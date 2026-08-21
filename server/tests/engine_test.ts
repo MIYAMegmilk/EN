@@ -552,10 +552,25 @@ Deno.test("キック: 2人未満になったゲームは中断して lobby へ�
   assert(res.effects.some((e) => e.t === "ended" && e.reason === "tooFewPlayers"));
 });
 
-Deno.test("切断: 2人未満になったゲームは中断して lobby へ戻る（§8）", () => {
+Deno.test("切断: 一時的な切断ではゲームを中断しない（§3.2 の60秒猶予）", () => {
   const s = toInput(start(makeDef(), ["a", "b"]));
   const res = reduce(s, { t: "playerLeft", playerId: "b", now: T0 });
+  assertEquals(res.state.phase, "input");
+  assertFalse(res.effects.some((e) => e.t === "ended"));
+  // 猶予内に復帰できる
+  const back = reduce(res.state, { t: "playerRejoined", playerId: "b", now: T0 });
+  assertEquals(back.state.participants["b"].connected, true);
+  assertEquals(back.state.phase, "input");
+});
+
+Deno.test("退室化: 猶予超過で在籍が2人未満になるとゲームを中断する（§8）", () => {
+  const s = toInput(start(makeDef(), ["a", "b"]));
+  const left = reduce(s, { t: "playerLeft", playerId: "b", now: T0 });
+  assertEquals(left.state.phase, "input");
+  // ルーム層は猶予超過を playerKicked（在籍からの完全除外）としてエンジンに流す
+  const res = reduce(left.state, { t: "playerKicked", playerId: "b", now: T0 });
   assertEquals(res.state.phase, "lobby");
+  assertEquals(res.state.deadline, null);
   assert(res.effects.some((e) => e.t === "ended" && e.reason === "tooFewPlayers"));
 });
 

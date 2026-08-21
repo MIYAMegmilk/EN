@@ -493,10 +493,15 @@ function advance(state: GameState, now: number): EngineResult {
   }
 }
 
-/** 人数不足なら中断して lobby へ戻す。中断した場合のみ結果を返す */
+/**
+ * 人数不足なら中断して lobby へ戻す。中断した場合のみ結果を返す。
+ * 数えるのは在籍する採点対象者（scoredPlayerIds）であり、一時的な切断では中断しない。
+ * 切断は60秒の猶予中に復帰できるため（§3.2 / §8）、中断はキック・退室で
+ * 在籍が2人未満になったときだけ起こる。
+ */
 function abortIfTooFewPlayers(state: GameState, now: number): EngineResult | null {
   if (state.phase === "lobby") return null;
-  if (activePlayerIds(state).length >= MIN_PLAYERS) return null;
+  if (scoredPlayerIds(state).length >= MIN_PLAYERS) return null;
   const next = toLobby(state, now);
   return {
     state: next,

@@ -1,0 +1,861 @@
+/**
+ * ルーム管理層
+ * 詳細仕様書 §3.1 / §3.2 / §8 に対応する。
+ *
+ * 責務:
+ *   - ルームのメモリ保持と6桁コードの採番
+ *   - 参加 / 再接続 / 切断 / 退室化 / ホスト委譲
+ *   - C2S メッセージを EngineEvent に変換し、EngineEffect を S2C として配信
+ *   - フェーズタイマーの設置と無効化
+ *
+ * 規約（§3.2 規約2）: ルームごとに1本のキューでイベントを直列処理し、
+ * 状態遷移関数（engine.reduce）の呼び出しは同期文脈で行う。このファイルには
+ * await を書かない。
+ *
+ * 軽量スコープ: 認証・公開ルーム・ノック・キック・レート制限・VC・importGame・
+ * 24時間自動削除は未実装。接続点は `TODO(チーム分担)` として記してある。
+ */
+
+import {
+  type C2S,
+  DISCONNECT_GRACE_MS,
+  err,
+  type ErrorCode,
+  NICKNAME_MAX,
+  ok,
+  type Phase,
+  type PhaseDurations,
+  type PhaseView,
+  type Player,
+  type PlayerPublic,
+  type Result,
+  type Room,
+  ROOM_CAPACITY,
+  ROOM_CODE_LENGTH,
+  type RoomSnapshot,
+  type S2C,
+  type ScoringMode,
+  VC_CAPACITY,
+} from "./types.ts";
+import {
+  buildPhaseView,
+  DEFAULT_PHASE_DURATIONS,
+  type EngineEffect,
+  type EngineEvent,
+  type EnginePlayerInput,
+  type EngineResult,
+  reduce,
+  startGame,
+} from "./engine.ts";
+import { toSummary } from "./gamedef.ts";
+import { isOfficialGame, OFFICIAL_GAMES } from "./official_games.ts";
+
+// ---------------------------------------------------------------------------
+// 定数
+// ---------------------------------------------------------------------------
+
+/** 未実装の C2S を受けたときに返す説明文 */
+export const NOT_IMPLEMENTED_MESSAGE = "この機能は未実装です";
+
+/** 投票を行わないゲームの judge フェーズ秒数。表示だけなので短くする */
+export const NON_VOTE_JUDGE_SEC = 5;
+
+/** ルームコード採番のリトライ上限 */
+const ROOM_CODE_ATTEMPTS = 50;
+
+// ---------------------------------------------------------------------------
+// 外部との接点
+// ---------------------------------------------------------------------------
+
+/** タイマーの識別子。差し替え可能にするため number で扱う */
+export type TimerHandle = number;
+
+/** 1本の WebSocket 接続を抽象化したもの。テストはモックを渡す */
+export interface ClientLink {
+  /** 接続ごとに一意なID */
+  readonly id: string;
+  /** S2C メッセージを送る */
+  send(msg: S2C): void;
+  /** 接続を閉じる */
+  close(): void;
+}
+
+/** 時刻・タイマーを差し替えるための設定（テスト用） */
+export type RoomManagerOptions = {
+  /** 現在時刻（epoch ms）を返す */
+  now?: () => number;
+  /** タイマーを設置する */
+  setTimer?: (fn: () => void, ms: number) => TimerHandle;
+  /** タイマーを解除する */
+  clearTimer?: (handle: TimerHandle) => void;
+};
+
+// ---------------------------------------------------------------------------
+// 内部の保持データ
+// ---------------------------------------------------------------------------
+
+/** ルーム本体に付随する実行時の状態 */
+type RoomEntry = {
+  /** ルーム本体（§5） */
+  room: Room;
+  /** 接続中の参加者（playerId → 接続） */
+  links: Map<string, ClientLink>;
+  /** 直列処理用のキュー */
+  queue: Array<() => void>;
+  /** キューを処理中か */
+  draining: boolean;
+  /** 現フェーズの期限タイマー */
+  phaseTimer: TimerHandle | null;
+  /** 切断猶予タイマー（playerId → ハンドル） */
+  graceTimers: Map<string, TimerHandle>;
+};
+
+/** 接続がどのルームの誰に紐づいているか */
+type LinkState = {
+  /** 接続 */
+  link: ClientLink;
+  /** ルームコード */
+  roomCode: string;
+  /** playerId */
+  playerId: string;
+};
+
+/** 参加者をルームから外す理由 */
+type RemoveReason = "leave" | "graceExpired";
+
+// ---------------------------------------------------------------------------
+// 入力検証
+// ---------------------------------------------------------------------------
+
+/** 文字数はコードポイント単位で数える（サロゲートペア対策） */
+function charLength(s: string): number {
+  return [...s].length;
+}
+
+/** 制御文字を含むか */
+function hasControlChar(s: string): boolean {
+  for (const ch of s) {
+    const cp = ch.codePointAt(0);
+    if (cp !== undefined && (cp < 0x20 || cp === 0x7f)) return true;
+  }
+  return false;
+}
+
+/** ニックネームを検証して正規化する（1..20文字・制御文字禁止、§3.1） */
+export function validateNickname(input: unknown): Result<string> {
+  if (typeof input !== "string") {
+    return err("INVALID_INPUT", "ニックネームを入力してください");
+  }
+  const trimmed = input.trim();
+  const length = charLength(trimmed);
+  if (length === 0) {
+    return err("INVALID_INPUT", "ニックネームを入力してください");
+  }
+  if (length > NICKNAME_MAX) {
+    return err("INVALID_INPUT", `ニックネームは${NICKNAME_MAX}文字以内で入力してください`);
+  }
+  if (hasControlChar(trimmed)) {
+    return err("INVALID_INPUT", "ニックネームに使用できない文字が含まれています");
+  }
+  return ok(trimmed);
+}
+
+/** ルームコードを正規化する。6桁の数字でなければ null */
+export function normalizeRoomCode(input: unknown): string | null {
+  if (typeof input !== "string") return null;
+  const trimmed = input.trim();
+  if (!/^[0-9]{6}$/.test(trimmed)) return null;
+  return trimmed;
+}
+
+/** 6桁のルームコードを暗号論的乱数で作る（剰余バイアスを避けるため再抽選する） */
+function randomRoomCode(): string {
+  const range = 10 ** ROOM_CODE_LENGTH;
+  const limit = Math.floor(0x1_0000_0000 / range) * range;
+  const buf = new Uint32Array(1);
+  for (;;) {
+    crypto.getRandomValues(buf);
+    if (buf[0] < limit) {
+      return String(buf[0] % range).padStart(ROOM_CODE_LENGTH, "0");
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ルーム管理
+// ---------------------------------------------------------------------------
+
+/** ルームの生成・参加・進行をまとめて受け持つ */
+export class RoomManager {
+  private readonly rooms = new Map<string, RoomEntry>();
+  private readonly links = new Map<string, LinkState>();
+  private readonly now: () => number;
+  private readonly setTimer: (fn: () => void, ms: number) => TimerHandle;
+  private readonly clearTimer: (handle: TimerHandle) => void;
+
+  constructor(options: RoomManagerOptions = {}) {
+    this.now = options.now ?? (() => Date.now());
+    this.setTimer = options.setTimer ??
+      ((fn, ms) => setTimeout(fn, ms) as unknown as TimerHandle);
+    this.clearTimer = options.clearTimer ??
+      ((handle) => clearTimeout(handle as unknown as number));
+  }
+
+  /** 稼働中のルーム数（テスト・監視用） */
+  get roomCount(): number {
+    return this.rooms.size;
+  }
+
+  /** ルームを取得する（テスト用。返り値は内部状態そのもの） */
+  getRoom(code: string): Room | undefined {
+    return this.rooms.get(code)?.room;
+  }
+
+  /** C2S メッセージを1件処理する */
+  handle(link: ClientLink, msg: C2S): void {
+    if (msg.t === "createRoom") {
+      this.handleCreateRoom(link, msg);
+      return;
+    }
+    if (msg.t === "join") {
+      this.handleJoin(link, msg);
+      return;
+    }
+    const state = this.links.get(link.id);
+    if (state === undefined) {
+      sendError(link, "ROOM_NOT_FOUND", "ルームに参加していません");
+      return;
+    }
+    this.enqueue(state.roomCode, () => this.handleInRoom(state, msg));
+  }
+
+  /** WebSocket が閉じたときの処理（§3.2: 60秒はセッションを保持する） */
+  disconnect(link: ClientLink): void {
+    const state = this.links.get(link.id);
+    if (state === undefined) return;
+    this.links.delete(link.id);
+    this.enqueue(state.roomCode, () => {
+      const entry = this.rooms.get(state.roomCode);
+      if (entry === undefined) return;
+      // すでに再接続で別の接続に置き換わっている場合は何もしない
+      if (entry.links.get(state.playerId) !== link) return;
+      entry.links.delete(state.playerId);
+      const player = entry.room.players.get(state.playerId);
+      if (player === undefined) return;
+      const now = this.now();
+      player.connected = false;
+      player.disconnectedAt = now;
+      entry.room.lastActiveAt = now;
+      this.applyEngineEvent(entry, { t: "playerLeft", playerId: player.id, now });
+      this.broadcast(entry, { t: "playerLeft", player: this.toPublic(entry, player) });
+      this.armGraceTimer(entry, player.id);
+    });
+  }
+
+  /** すべてのタイマーを解除してルームを破棄する（サーバー停止時・テスト後始末） */
+  dispose(): void {
+    for (const entry of [...this.rooms.values()]) {
+      this.clearRoomTimers(entry);
+    }
+    this.rooms.clear();
+    this.links.clear();
+  }
+
+  // -------------------------------------------------------------------------
+  // 直列処理（§3.2 規約2）
+  // -------------------------------------------------------------------------
+
+  /** ルームのキューに積んで順番に実行する。ルーム未確定の処理は即時実行する */
+  private enqueue(code: string, task: () => void): void {
+    const entry = this.rooms.get(code);
+    if (entry === undefined) {
+      runTask(task);
+      return;
+    }
+    entry.queue.push(task);
+    if (entry.draining) return;
+    entry.draining = true;
+    try {
+      for (;;) {
+        const next = entry.queue.shift();
+        if (next === undefined) break;
+        runTask(next);
+      }
+    } finally {
+      entry.draining = false;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // ルーム作成 / 参加
+  // -------------------------------------------------------------------------
+
+  /** ルームを作成し、作成者をホストとして入室させる（§3.1） */
+  private handleCreateRoom(link: ClientLink, msg: Extract<C2S, { t: "createRoom" }>): void {
+    if (this.links.has(link.id)) {
+      sendError(link, "INVALID_INPUT", "すでにルームに参加しています");
+      return;
+    }
+    // TODO(チーム分担): §3.0 認証必須化。WS アップグレード時の Cookie を検証し、
+    // 未ログインなら AUTH_REQUIRED を返す。ownerUserId には認証済みの userId を入れる。
+    if (msg.visibility !== "private") {
+      // TODO(チーム分担): §3.1 / §3.1.1 公開ルーム（一覧・ノック・entryToken）
+      sendError(link, "INVALID_INPUT", "公開ルームは未実装です");
+      return;
+    }
+    const nickname = validateNickname(msg.nickname);
+    if (!nickname.ok) {
+      sendError(link, nickname.code, nickname.message);
+      return;
+    }
+    const code = this.allocateRoomCode();
+    if (code === null) {
+      sendError(
+        link,
+        "INVALID_INPUT",
+        "ルームを作成できませんでした。時間をおいて再試行してください",
+      );
+      return;
+    }
+    const now = this.now();
+    const host = this.newPlayer(nickname.value);
+    const room: Room = {
+      code,
+      visibility: "private",
+      ownerUserId: "",
+      hostId: host.id,
+      players: new Map([[host.id, host]]),
+      pendingKnocks: new Map(),
+      pendingEntries: new Map(),
+      blockedSessions: new Set(),
+      availableGames: new Map(OFFICIAL_GAMES.map((g) => [g.id, g])),
+      selectedGameId: null,
+      game: null,
+      createdAt: now,
+      lastActiveAt: now,
+    };
+    const entry: RoomEntry = {
+      room,
+      links: new Map([[host.id, link]]),
+      queue: [],
+      draining: false,
+      phaseTimer: null,
+      graceTimers: new Map(),
+    };
+    this.rooms.set(code, entry);
+    this.links.set(link.id, { link, roomCode: code, playerId: host.id });
+    // TODO(チーム分担): §3.1 最終アクティビティから24時間で自動削除する掃除処理
+    this.sendSnapshot(entry, host);
+  }
+
+  /** 招待制ルームへの参加。session 指定時は再接続として扱う（§3.2） */
+  private handleJoin(link: ClientLink, msg: Extract<C2S, { t: "join" }>): void {
+    if (this.links.has(link.id)) {
+      sendError(link, "INVALID_INPUT", "すでにルームに参加しています");
+      return;
+    }
+    const code = normalizeRoomCode(msg.roomCode);
+    if (code === null || !this.rooms.has(code)) {
+      sendError(link, "ROOM_NOT_FOUND", "ルームが見つかりません");
+      return;
+    }
+    this.enqueue(code, () => {
+      const entry = this.rooms.get(code);
+      if (entry === undefined) {
+        sendError(link, "ROOM_NOT_FOUND", "ルームが見つかりません");
+        return;
+      }
+      this.doJoin(entry, link, msg);
+    });
+  }
+
+  /** 参加の本体。キューの中から呼ばれる */
+  private doJoin(entry: RoomEntry, link: ClientLink, msg: Extract<C2S, { t: "join" }>): void {
+    const room = entry.room;
+    const now = this.now();
+    const session = typeof msg.session === "string" ? msg.session : undefined;
+    if (session !== undefined) {
+      const existing = findBySession(room, session);
+      if (existing !== null) {
+        this.reconnect(entry, link, existing, now);
+        return;
+      }
+      // 猶予超過で退室済みなど、既知でないセッションは新規参加として扱う
+    }
+    // TODO(チーム分担): §3.1 キック済み sessionToken（room.blockedSessions）の拒否（BLOCKED）
+    // TODO(チーム分担): §3.1.1 公開ルームは entryToken の検証・消費を必須にする（INVALID_TOKEN）
+    const nickname = validateNickname(msg.nickname);
+    if (!nickname.ok) {
+      sendError(link, nickname.code, nickname.message);
+      return;
+    }
+    if (room.players.size >= ROOM_CAPACITY) {
+      sendError(link, "ROOM_FULL", `このルームは満員です（定員${ROOM_CAPACITY}人）`);
+      return;
+    }
+    const player = this.newPlayer(nickname.value);
+    room.players.set(player.id, player);
+    room.lastActiveAt = now;
+    entry.links.set(player.id, link);
+    this.links.set(link.id, { link, roomCode: room.code, playerId: player.id });
+    this.applyEngineEvent(entry, {
+      t: "playerJoined",
+      playerId: player.id,
+      nickname: player.nickname,
+      now,
+    });
+    this.sendSnapshot(entry, player);
+    this.broadcastExcept(entry, player.id, {
+      t: "playerJoined",
+      player: this.toPublic(entry, player),
+    });
+  }
+
+  /** 同一 sessionToken での再接続。フルスナップショットを送って復帰させる（§3.2） */
+  private reconnect(entry: RoomEntry, link: ClientLink, player: Player, now: number): void {
+    this.cancelGraceTimer(entry, player.id);
+    const previous = entry.links.get(player.id);
+    if (previous !== undefined && previous !== link) {
+      this.links.delete(previous.id);
+      previous.close();
+    }
+    player.connected = true;
+    delete player.disconnectedAt;
+    entry.room.lastActiveAt = now;
+    entry.links.set(player.id, link);
+    this.links.set(link.id, { link, roomCode: entry.room.code, playerId: player.id });
+    this.applyEngineEvent(entry, { t: "playerRejoined", playerId: player.id, now });
+    this.sendSnapshot(entry, player);
+    this.broadcastExcept(entry, player.id, {
+      t: "playerJoined",
+      player: this.toPublic(entry, player),
+    });
+  }
+
+  /** 未使用の6桁コードを採番する */
+  private allocateRoomCode(): string | null {
+    for (let i = 0; i < ROOM_CODE_ATTEMPTS; i++) {
+      const code = randomRoomCode();
+      if (!this.rooms.has(code)) return code;
+    }
+    return null;
+  }
+
+  /** 新しい参加者を作る。sessionToken は再接続の本人確認に使う */
+  private newPlayer(nickname: string): Player {
+    return {
+      id: crypto.randomUUID(),
+      nickname,
+      connected: true,
+      sessionToken: crypto.randomUUID(),
+      score: 0,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // ルーム内メッセージ
+  // -------------------------------------------------------------------------
+
+  /** ルームに所属している接続からのメッセージを処理する */
+  private handleInRoom(state: LinkState, msg: C2S): void {
+    const entry = this.rooms.get(state.roomCode);
+    if (entry === undefined) {
+      sendError(state.link, "ROOM_NOT_FOUND", "ルームが見つかりません");
+      return;
+    }
+    const player = entry.room.players.get(state.playerId);
+    if (player === undefined) {
+      sendError(state.link, "ROOM_NOT_FOUND", "ルームから退室済みです");
+      return;
+    }
+    const now = this.now();
+    entry.room.lastActiveAt = now;
+    // TODO(チーム分担): §3.8 レート制限（1接続あたり 20件/秒 を超えたら切断）
+    switch (msg.t) {
+      case "leave":
+        this.removePlayer(entry, player.id, "leave");
+        return;
+      case "selectGame":
+        this.handleSelectGame(entry, state, msg.gameId);
+        return;
+      case "startGame":
+        this.handleStartGame(entry, state, now);
+        return;
+      case "skipPhase":
+        if (!this.requireHost(entry, state)) return;
+        this.applyEngineEvent(entry, { t: "skipPhase", now }, state.link);
+        return;
+      case "submitInput":
+        if (typeof msg.value !== "string" && typeof msg.value !== "number") {
+          sendError(state.link, "INVALID_INPUT", "回答の形式が正しくありません");
+          return;
+        }
+        this.applyEngineEvent(
+          entry,
+          { t: "submitInput", playerId: player.id, value: msg.value, now },
+          state.link,
+        );
+        return;
+      case "submitVote":
+        if (typeof msg.targetPlayerId !== "string") {
+          sendError(state.link, "INVALID_INPUT", "投票先の形式が正しくありません");
+          return;
+        }
+        this.applyEngineEvent(
+          entry,
+          { t: "submitVote", voterId: player.id, targetPlayerId: msg.targetPlayerId, now },
+          state.link,
+        );
+        return;
+      // TODO(チーム分担): §3.1.1 knock / approveKnock / rejectKnock（公開ルーム）
+      case "knock":
+      case "approveKnock":
+      case "rejectKnock":
+      // TODO(チーム分担): §3.1 kick（blockedSessions への追加と entryToken 無効化を含む）
+      case "kick":
+      // TODO(チーム分担): §3.5 importGame（共有コードから availableGames に追加）
+      case "importGame":
+      // TODO(チーム分担): §3.6 rtcSignal（to が同一ルームの接続中メンバーのときのみ中継）
+      case "rtcSignal":
+        sendError(state.link, "INVALID_INPUT", NOT_IMPLEMENTED_MESSAGE);
+        return;
+      default:
+        sendError(state.link, "INVALID_INPUT", NOT_IMPLEMENTED_MESSAGE);
+        return;
+    }
+  }
+
+  /** ホストかどうかを検証する。非ホストには NOT_HOST を返す */
+  private requireHost(entry: RoomEntry, state: LinkState): boolean {
+    if (entry.room.hostId === state.playerId) return true;
+    sendError(state.link, "NOT_HOST", "ホストのみが操作できます");
+    return false;
+  }
+
+  /** ゲーム選択（ホストのみ・lobby のみ） */
+  private handleSelectGame(entry: RoomEntry, state: LinkState, gameId: unknown): void {
+    if (!this.requireHost(entry, state)) return;
+    const room = entry.room;
+    if (room.game !== null && room.game.phase !== "lobby") {
+      sendError(state.link, "PHASE_MISMATCH", "ゲームの進行中は変更できません");
+      return;
+    }
+    if (typeof gameId !== "string" || !room.availableGames.has(gameId)) {
+      sendError(state.link, "INVALID_INPUT", "選択できるゲームではありません");
+      return;
+    }
+    room.selectedGameId = gameId;
+    this.broadcastPhase(entry);
+  }
+
+  /** ゲーム開始（ホストのみ） */
+  private handleStartGame(entry: RoomEntry, state: LinkState, now: number): void {
+    if (!this.requireHost(entry, state)) return;
+    const room = entry.room;
+    if (room.game !== null && room.game.phase !== "lobby") {
+      sendError(state.link, "PHASE_MISMATCH", "すでにゲームが進行中です");
+      return;
+    }
+    if (room.selectedGameId === null) {
+      sendError(state.link, "INVALID_INPUT", "ゲームが選択されていません");
+      return;
+    }
+    const definition = room.availableGames.get(room.selectedGameId);
+    if (definition === undefined) {
+      sendError(state.link, "INVALID_INPUT", "選択できるゲームではありません");
+      return;
+    }
+    const players: EnginePlayerInput[] = [...room.players.values()].map((p) => ({
+      id: p.id,
+      nickname: p.nickname,
+      connected: p.connected,
+    }));
+    const result = startGame(definition, players, now, phaseDurationsFor(definition.scoring));
+    if (result.error !== undefined) {
+      sendError(state.link, result.error, result.message ?? "ゲームを開始できません");
+      return;
+    }
+    room.game = result.state;
+    this.applyEffects(entry, result.effects);
+    this.syncPhaseTimer(entry);
+  }
+
+  // -------------------------------------------------------------------------
+  // エンジン連携
+  // -------------------------------------------------------------------------
+
+  /** エンジンにイベントを流し、結果を配信する。エラーは送信元にだけ返す */
+  private applyEngineEvent(
+    entry: RoomEntry,
+    event: EngineEvent,
+    origin?: ClientLink,
+  ): EngineResult | null {
+    const room = entry.room;
+    if (room.game === null) {
+      if (origin !== undefined && isPlayerAction(event)) {
+        sendError(origin, "PHASE_MISMATCH", "ゲームが進行していません");
+      }
+      return null;
+    }
+    const result = reduce(room.game, event);
+    room.game = result.state;
+    if (result.error !== undefined) {
+      if (origin !== undefined) {
+        sendError(origin, result.error, result.message ?? "処理できませんでした");
+      }
+      return result;
+    }
+    this.applyEffects(entry, result.effects);
+    // フェーズが変わらない変化（提出数・投票数・参加者の増減）も画面に反映する
+    if (result.changed && !result.effects.some((e) => e.t === "phaseChanged")) {
+      this.broadcastPhase(entry);
+    }
+    this.syncPhaseTimer(entry);
+    return result;
+  }
+
+  /** EngineEffect を S2C に変換して配信する */
+  private applyEffects(entry: RoomEntry, effects: EngineEffect[]): void {
+    for (const effect of effects) {
+      switch (effect.t) {
+        case "phaseChanged":
+          this.broadcastPhase(entry);
+          break;
+        case "roundResult":
+          this.broadcast(entry, { t: "roundResult", scores: effect.scores });
+          break;
+        case "finalResult":
+          this.broadcast(entry, { t: "finalResult", scores: effect.scores });
+          // Player.score はゲーム横断の累計。1ゲーム分の合計をここで加算する
+          for (const row of effect.scores) {
+            const player = entry.room.players.get(row.playerId);
+            if (player !== undefined) player.score += row.totalScore;
+          }
+          break;
+        case "ended":
+          break;
+      }
+    }
+  }
+
+  /** 現フェーズの期限に合わせてタイマーを張り直す。古いタイマーは無効化する */
+  private syncPhaseTimer(entry: RoomEntry): void {
+    if (entry.phaseTimer !== null) {
+      this.clearTimer(entry.phaseTimer);
+      entry.phaseTimer = null;
+    }
+    const game = entry.room.game;
+    if (game === null || game.deadline === null) return;
+    const code = entry.room.code;
+    const delay = Math.max(0, game.deadline - this.now());
+    entry.phaseTimer = this.setTimer(() => {
+      this.enqueue(code, () => {
+        if (this.rooms.get(code) !== entry) return;
+        entry.phaseTimer = null;
+        this.applyEngineEvent(entry, { t: "timeout", now: this.now() });
+      });
+    }, delay);
+  }
+
+  // -------------------------------------------------------------------------
+  // 切断・退室・ホスト委譲
+  // -------------------------------------------------------------------------
+
+  /** 切断から60秒で退室化するタイマーを張る（§3.2） */
+  private armGraceTimer(entry: RoomEntry, playerId: string): void {
+    this.cancelGraceTimer(entry, playerId);
+    const code = entry.room.code;
+    const handle = this.setTimer(() => {
+      this.enqueue(code, () => {
+        if (this.rooms.get(code) !== entry) return;
+        entry.graceTimers.delete(playerId);
+        const player = entry.room.players.get(playerId);
+        if (player === undefined || player.connected) return;
+        this.removePlayer(entry, playerId, "graceExpired");
+      });
+    }, DISCONNECT_GRACE_MS);
+    entry.graceTimers.set(playerId, handle);
+  }
+
+  /** 切断猶予タイマーを解除する */
+  private cancelGraceTimer(entry: RoomEntry, playerId: string): void {
+    const handle = entry.graceTimers.get(playerId);
+    if (handle === undefined) return;
+    this.clearTimer(handle);
+    entry.graceTimers.delete(playerId);
+  }
+
+  /**
+   * 参加者をルームから外す。
+   * エンジンには playerKicked（在籍からの完全除外）を流す。ブロックリストには入れない。
+   */
+  private removePlayer(entry: RoomEntry, playerId: string, reason: RemoveReason): void {
+    const room = entry.room;
+    const player = room.players.get(playerId);
+    if (player === undefined) return;
+    const now = this.now();
+    this.cancelGraceTimer(entry, playerId);
+    const link = entry.links.get(playerId);
+    entry.links.delete(playerId);
+    if (link !== undefined) {
+      this.links.delete(link.id);
+      if (reason === "leave") link.close();
+    }
+    room.players.delete(playerId);
+    room.lastActiveAt = now;
+    this.applyEngineEvent(entry, { t: "playerKicked", playerId, now });
+    this.broadcast(entry, { t: "playerLeft", player: this.toPublic(entry, player) });
+    if (room.hostId === playerId) {
+      const successor = [...room.players.keys()][0];
+      if (successor !== undefined) {
+        room.hostId = successor;
+        this.broadcast(entry, { t: "hostChanged", playerId: successor });
+      }
+    }
+    if (room.players.size === 0) this.deleteRoom(entry);
+  }
+
+  /** ルームを破棄する。残っているタイマーもすべて解除する */
+  private deleteRoom(entry: RoomEntry): void {
+    this.clearRoomTimers(entry);
+    for (const link of entry.links.values()) this.links.delete(link.id);
+    entry.links.clear();
+    this.rooms.delete(entry.room.code);
+  }
+
+  /** ルームに紐づくタイマーをすべて解除する */
+  private clearRoomTimers(entry: RoomEntry): void {
+    if (entry.phaseTimer !== null) {
+      this.clearTimer(entry.phaseTimer);
+      entry.phaseTimer = null;
+    }
+    for (const handle of entry.graceTimers.values()) this.clearTimer(handle);
+    entry.graceTimers.clear();
+  }
+
+  // -------------------------------------------------------------------------
+  // 配信
+  // -------------------------------------------------------------------------
+
+  /** ルーム内の全接続へ送る */
+  private broadcast(entry: RoomEntry, msg: S2C): void {
+    for (const link of entry.links.values()) link.send(msg);
+  }
+
+  /** 指定の参加者以外へ送る */
+  private broadcastExcept(entry: RoomEntry, playerId: string, msg: S2C): void {
+    for (const [id, link] of entry.links) {
+      if (id !== playerId) link.send(msg);
+    }
+  }
+
+  /** phase は受信者ごとに view を作り分ける（§3.2 原則3） */
+  private broadcastPhase(entry: RoomEntry): void {
+    const game = entry.room.game;
+    const phase: Phase = game?.phase ?? "lobby";
+    const deadline = game?.deadline ?? null;
+    for (const [playerId, link] of entry.links) {
+      const msg: Extract<S2C, { t: "phase" }> = {
+        t: "phase",
+        phase,
+        view: this.viewFor(entry, playerId),
+      };
+      if (deadline !== null) msg.deadline = deadline;
+      link.send(msg);
+    }
+  }
+
+  /** 受信者向けの PhaseView。lobby は選択中ゲームをルーム層の値で埋める */
+  private viewFor(entry: RoomEntry, playerId: string): PhaseView {
+    const game = entry.room.game;
+    if (game === null || game.phase === "lobby") {
+      return { phase: "lobby", selectedGameId: entry.room.selectedGameId };
+    }
+    return buildPhaseView(game, playerId);
+  }
+
+  /** 参加者にフルスナップショットを送る（§4.1 roomState） */
+  private sendSnapshot(entry: RoomEntry, player: Player): void {
+    const link = entry.links.get(player.id);
+    if (link === undefined) return;
+    link.send({ t: "roomState", snapshot: this.buildSnapshot(entry, player) });
+  }
+
+  /** RoomSnapshot を組み立てる。session は本人にのみ入れる */
+  private buildSnapshot(entry: RoomEntry, viewer: Player): RoomSnapshot {
+    const room = entry.room;
+    const game = room.game;
+    const snapshot: RoomSnapshot = {
+      code: room.code,
+      visibility: room.visibility,
+      capacity: ROOM_CAPACITY,
+      hostId: room.hostId,
+      youId: viewer.id,
+      youAreHost: room.hostId === viewer.id,
+      youAreSpectator: game?.participants[viewer.id]?.role === "spectator",
+      players: [...room.players.values()].map((p) => this.toPublic(entry, p)),
+      availableGames: [...room.availableGames.values()].map((g) =>
+        toSummary(g, isOfficialGame(g.id))
+      ),
+      selectedGameId: room.selectedGameId,
+      phase: game?.phase ?? "lobby",
+      deadline: game?.deadline ?? null,
+      view: this.viewFor(entry, viewer.id),
+      session: viewer.sessionToken,
+      serverTime: this.now(),
+    };
+    if (room.roomName !== undefined) snapshot.roomName = room.roomName;
+    // TODO(チーム分担): §3.1.1 公開ルームではホストにのみ pendingKnocks を載せる
+    return snapshot;
+  }
+
+  /** 他の参加者にも見せてよい形に変換する（§3.2 原則3） */
+  private toPublic(entry: RoomEntry, player: Player): PlayerPublic {
+    const index = [...entry.room.players.keys()].indexOf(player.id);
+    return {
+      id: player.id,
+      nickname: player.nickname,
+      connected: player.connected,
+      isHost: entry.room.hostId === player.id,
+      score: player.score,
+      vcEligible: index >= 0 && index < VC_CAPACITY,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 補助
+// ---------------------------------------------------------------------------
+
+/** ゲームの採点方式に応じたフェーズ秒数。vote 以外の judge は表示のみなので短い */
+export function phaseDurationsFor(scoring: ScoringMode): PhaseDurations {
+  if (scoring === "vote") return DEFAULT_PHASE_DURATIONS;
+  return { ...DEFAULT_PHASE_DURATIONS, judgeSec: NON_VOTE_JUDGE_SEC };
+}
+
+/** sessionToken から参加者を探す */
+function findBySession(room: Room, session: string): Player | null {
+  for (const player of room.players.values()) {
+    if (player.sessionToken === session) return player;
+  }
+  return null;
+}
+
+/** 参加者本人の操作によるイベントか（エラーを返すべき相手がいるか） */
+function isPlayerAction(event: EngineEvent): boolean {
+  return event.t === "submitInput" || event.t === "submitVote" || event.t === "skipPhase";
+}
+
+/** エラーを1件送る */
+function sendError(link: ClientLink, code: ErrorCode, message: string): void {
+  link.send({ t: "error", code, message });
+}
+
+/** 1件の処理中に例外が出ても他の処理を止めない */
+function runTask(task: () => void): void {
+  try {
+    task();
+  } catch (e) {
+    console.error("room task failed:", e);
+  }
+}

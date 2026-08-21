@@ -537,6 +537,8 @@ export type RoomSnapshot = {
   view: PhaseView;
   /** 保留中のノック。ホストにのみ入る（§3.2 原則3） */
   pendingKnocks?: KnockPublic[];
+  /** 受信者自身のセッショントークン。再接続時に join.session として送り返す（§3.2） */
+  session?: string;
   /** サーバー時刻（epoch ms）。クライアントの時計ずれ補正用 */
   serverTime: number;
 };

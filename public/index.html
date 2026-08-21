@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>宴 -EN-（開発用動作確認ページ）</title>
+    <style>
+      /* 開発用の最小限の見た目。本番の画面は別途デザインする */
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 0 auto;
+        padding: 1rem;
+        max-width: 44rem;
+        line-height: 1.6;
+      }
+      h1 {
+        font-size: 1.2rem;
+      }
+      h2 {
+        font-size: 1rem;
+        margin: 1.2rem 0 0.4rem;
+      }
+      section {
+        border: 1px solid #ccc;
+        border-radius: 6px;
+        padding: 0.6rem 0.8rem;
+        margin-bottom: 0.8rem;
+      }
+      button,
+      input,
+      select {
+        font: inherit;
+        padding: 0.3rem 0.5rem;
+      }
+      ul {
+        margin: 0.3rem 0;
+        padding-left: 1.2rem;
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        align-items: center;
+      }
+      .hidden {
+        display: none;
+      }
+      .muted {
+        color: #666;
+        font-size: 0.85rem;
+      }
+      #log {
+        max-height: 12rem;
+        overflow-y: auto;
+        font-size: 0.8rem;
+        white-space: pre-wrap;
+        background: #f6f6f6;
+        padding: 0.4rem;
+      }
+      #error {
+        color: #b00020;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>宴 -EN- 開発用動作確認ページ</h1>
+    <p class="muted">
+      コアシステムの疎通確認だけを目的とした暫定ページです。デザインと本番の画面構成は
+      フロントエンド担当が別途作成します。
+    </p>
+
+    <p id="error" role="alert"></p>
+
+    <section id="entry">
+      <h2>ルームに入る</h2>
+      <div class="row">
+        <label for="nickname">ニックネーム</label>
+        <input id="nickname" maxlength="20" autocomplete="off" />
+      </div>
+      <div class="row">
+        <button id="create" type="button">招待制ルームを作成</button>
+      </div>
+      <div class="row">
+        <label for="code">参加コード</label>
+        <input id="code" inputmode="numeric" maxlength="6" autocomplete="off" />
+        <button id="join" type="button">参加</button>
+      </div>
+    </section>
+
+    <section id="room" class="hidden">
+      <h2>ルーム <span id="room-code"></span></h2>
+      <p class="muted" id="room-meta"></p>
+      <h2>参加者</h2>
+      <ul id="players"></ul>
+      <div class="row" id="lobby-controls">
+        <label for="game">ゲーム</label>
+        <select id="game"></select>
+        <button id="select-game" type="button">選択</button>
+        <button id="start" type="button">開始</button>
+      </div>
+      <div class="row">
+        <button id="skip" type="button">スキップ（ホスト）</button>
+        <button id="leave" type="button">退室</button>
+      </div>
+    </section>
+
+    <section id="phase" class="hidden">
+      <h2 id="phase-title"></h2>
+      <p id="phase-deadline" class="muted"></p>
+      <div id="phase-body"></div>
+    </section>
+
+    <section id="result" class="hidden">
+      <h2 id="result-title"></h2>
+      <ul id="result-list"></ul>
+    </section>
+
+    <section>
+      <h2>通信ログ</h2>
+      <div id="log"></div>
+    </section>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
