@@ -101,6 +101,8 @@ function connect() {
     }
     log("←", msg);
     receive(msg);
+    // VC は参加者の増減とシグナリングを同じ WS で受け取る（§3.2 / §3.6）
+    VC.handleServerMessage(msg);
   };
 }
 
@@ -186,7 +188,9 @@ function renderAll() {
   const snapshot = state.snapshot;
   $("entry").classList.toggle("hidden", snapshot !== null);
   $("room").classList.toggle("hidden", snapshot === null);
+  $("vc").classList.toggle("hidden", snapshot === null);
   $("phase").classList.toggle("hidden", snapshot === null);
+  renderVc();
   if (snapshot === null) return;
 
   $("room-code").textContent = snapshot.code;
@@ -344,6 +348,48 @@ function renderScores(title, scores) {
   }
 }
 
+/** VC の操作ボタンと状態表示を更新する */
+function renderVc() {
+  const vc = VC.getState();
+  $("vc-join").disabled = vc.active;
+  $("vc-leave").disabled = !vc.active;
+  $("vc-mute").disabled = !vc.active;
+  $("vc-camera").disabled = !vc.active;
+  $("vc-mute").textContent = vc.muted ? "ミュート解除" : "ミュート";
+  $("vc-camera").textContent = vc.camera ? "カメラOFF" : "カメラON";
+  const peers = vc.peers.map((p) => `${p.nickname}: ${p.connectionState}`).join(" / ");
+  const head = vc.active ? "参加中" : vc.eligible ? "未参加" : "未参加（VC枠外）";
+  $("vc-status").textContent = peers.length > 0 ? `${head} — ${peers}` : head;
+}
+
+/** VC モジュールを組み込む */
+function bindVc() {
+  VC.init({
+    send,
+    container: $("vc-media"),
+    onStatus: (event) => {
+      if (event.kind === "error") showError(event.message);
+      log("VC", event.message);
+      renderVc();
+    },
+  });
+  $("vc-join").addEventListener("click", () => {
+    // 自動再生制限（iOS Safari）を避けるため、マイク取得はこの操作の直後に行う
+    VC.join().then(renderVc);
+  });
+  $("vc-leave").addEventListener("click", () => {
+    VC.leave();
+    renderVc();
+  });
+  $("vc-mute").addEventListener("click", () => {
+    VC.toggleMute();
+    renderVc();
+  });
+  $("vc-camera").addEventListener("click", () => {
+    VC.toggleCamera().then(renderVc);
+  });
+}
+
 /** 操作の割り当て */
 function bind() {
   $("create").addEventListener("click", () => {
@@ -358,6 +404,7 @@ function bind() {
   $("start").addEventListener("click", () => send({ t: "startGame" }));
   $("skip").addEventListener("click", () => send({ t: "skipPhase" }));
   $("leave").addEventListener("click", () => {
+    VC.leave();
     send({ t: "leave" });
     store.drop();
     state.snapshot = null;
@@ -366,4 +413,5 @@ function bind() {
 }
 
 bind();
+bindVc();
 connect();
