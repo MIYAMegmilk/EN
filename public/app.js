@@ -362,10 +362,27 @@ function renderVc() {
   $("vc-status").textContent = peers.length > 0 ? `${head} — ${peers}` : head;
 }
 
-/** VC モジュールを組み込む */
-function bindVc() {
+/**
+ * サーバーから ICE サーバー設定（STUN / TURN）を取得する。
+ * 取得できなければ null を返し、VC 側の既定（STUN のみ）で続行する。
+ */
+async function fetchIceServers() {
+  try {
+    const res = await fetch("/api/ice", { signal: AbortSignal.timeout(3000) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const servers = data === null ? undefined : data.iceServers;
+    return Array.isArray(servers) && servers.length > 0 ? servers : null;
+  } catch {
+    return null;
+  }
+}
+
+/** VC モジュールを組み込む。iceServers が null なら VC 側の既定を使う */
+function bindVc(iceServers) {
   VC.init({
     send,
+    iceServers,
     container: $("vc-media"),
     onStatus: (event) => {
       if (event.kind === "error") showError(event.message);
@@ -412,6 +429,11 @@ function bind() {
   });
 }
 
-bind();
-bindVc();
-connect();
+/** 起動する。ICE 設定を先に取ってから VC を初期化する */
+async function start() {
+  bind();
+  bindVc(await fetchIceServers());
+  connect();
+}
+
+start();
