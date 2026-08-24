@@ -20,6 +20,7 @@ import {
   QUOTE_LINE_MAX,
   reduce,
   SENRYU_MEMORY,
+  SERI_VOICE_COOLDOWN_MS,
   SILENCE_MAX_STREAK,
   SILENCE_MS,
 } from "../bot.ts";
@@ -31,6 +32,8 @@ import {
   NICKNAME_ADJECTIVES,
   NICKNAME_NOUNS,
   ROUND_REACTION_TEXTS,
+  SENRYU_EXACT_TEXTS,
+  SENRYU_VOICE_TEXTS,
   TOPIC_CARDS,
 } from "../bot_templates.ts";
 import { createKanaProvider, detectSenryu, SENRYU_TOLERANCE } from "../senryu.ts";
@@ -247,6 +250,15 @@ Deno.test("せり: 川柳判定が常に null を返すなら何もしない", (
   assertEquals(result.utterances.length, 0);
 });
 
+// ---------------------------------------------------------------------------
+// せり: 通話の文字起こし（source: "voice"、docs/design/bot-voice.md）
+// ---------------------------------------------------------------------------
+
+/** 文字起こし1件（source: "voice"）を作る */
+function voice(text: string): Extract<BotEvent, { t: "message" }> {
+  return { t: "message", playerId: "p1", nickname: "たろう", text, source: "voice" };
+}
+
 Deno.test("せり: voice 由来の発言も同じ経路で判定する", () => {
   const result = reduce(
     createBotState(T0),
@@ -261,6 +273,112 @@ Deno.test("せり: voice 由来の発言も同じ経路で判定する", () => {
   );
   assertEquals(result.utterances.length, 1);
   assertEquals(result.utterances[0].botId, "seri");
+});
+
+Deno.test("せり: 声で拾った句もチャットに流す（発話面はチャットのみ）", () => {
+  const result = reduce(createBotState(T0), voice("ふるいけやかわずとびこむみずのおと"), ctx(T0));
+  assertEquals(result.utterances.length, 1);
+  const [utterance] = result.utterances;
+  assertEquals(utterance.kind, "senryu");
+  assert(utterance.card?.c === "senryu");
+  // テロップは打った句と同じ形。詠み手のあだ名もそのまま載る
+  assertEquals(utterance.card.lines, ["ふるいけや", "かわずとびこむ", "みずのおと"]);
+  assertEquals(utterance.card.author, "たろう");
+  // 文面はチャット用と分ける（「書いた」ではなく「言った」句のため）
+  assert(SENRYU_VOICE_TEXTS.includes(utterance.text), "声用の文面が使われていない");
+  assert(!SENRYU_EXACT_TEXTS.includes(utterance.text));
+});
+
+Deno.test("せり: 声の字余り・字足らずは拾わない（聞き違いと区別できない）", () => {
+  // チャットなら「字足らず」で拾う句（bot_test 冒頭の loose テストと同じ入力）
+  const text = "あいうえおかきくけこさしすせそた";
+  const chat = reduce(
+    createBotState(T0),
+    { t: "message", playerId: "p1", nickname: "たろう", text, source: "chat" },
+    ctx(T0),
+  );
+  assertEquals(chat.utterances.length, 1, "前提: チャットでは字足らずでも拾う");
+
+  const spoken = reduce(createBotState(T0), voice(text), ctx(T0));
+  assertEquals(spoken.utterances.length, 0);
+});
+
+Deno.test("せり: 声の句はクールダウン中は見送る", () => {
+  const first = reduce(
+    createBotState(T0),
+    voice("ふるいけやかわずとびこむみずのおと"),
+    ctx(T0),
+  );
+  assertEquals(first.utterances.length, 1);
+  assertEquals(first.state.seri.lastVoiceAt, T0);
+
+  // 別の句でも、クールダウンが明けるまでは拾わない
+  const during = reduce(
+    first.state,
+    voice("あきののにさくはなたちのなをしらず"),
+    ctx(T0 + SERI_VOICE_COOLDOWN_MS - 1),
+  );
+  assertEquals(during.utterances.length, 0);
+  assertEquals(during.state.seri.lastVoiceAt, T0, "見送った声でクールダウンを延長しない");
+
+  const after = reduce(
+    during.state,
+    voice("あきののにさくはなたちのなをしらず"),
+    ctx(T0 + SERI_VOICE_COOLDOWN_MS),
+  );
+  assertEquals(after.utterances.length, 1);
+  assertEquals(after.state.seri.lastVoiceAt, T0 + SERI_VOICE_COOLDOWN_MS);
+});
+
+Deno.test("せり: 声のクールダウン中でもチャットの句は拾う（枠は別）", () => {
+  const first = reduce(
+    createBotState(T0),
+    voice("ふるいけやかわずとびこむみずのおと"),
+    ctx(T0),
+  );
+  assertEquals(first.utterances.length, 1);
+
+  const typed = reduce(
+    first.state,
+    {
+      t: "message",
+      playerId: "p2",
+      nickname: "はなこ",
+      text: "あきののにさくはなたちのなをしらず",
+      source: "chat",
+    },
+    ctx(T0 + 1_000),
+  );
+  assertEquals(typed.utterances.length, 1);
+  assertEquals(typed.state.seri.lastVoiceAt, T0, "チャットの句で声のクールダウンを進めない");
+});
+
+Deno.test("せり: OFF なら声からも拾わない", () => {
+  const off = reduce(
+    createBotState(T0),
+    { t: "setBot", botId: "seri", enabled: false },
+    ctx(T0),
+  ).state;
+  const result = reduce(off, voice("ふるいけやかわずとびこむみずのおと"), ctx(T0));
+  assertEquals(result.utterances.length, 0);
+});
+
+Deno.test("ぐっちー: 声で会話が続いている部屋を沈黙と判定しない", () => {
+  let state = createBotState(T0);
+  // 2分ごとに文字起こしが届く＝声で喋り続けている部屋。川柳ではない発言を使う
+  for (let i = 1; i <= 5; i++) {
+    const at = T0 + i * 2 * 60_000;
+    state = reduce(state, voice("かんぱーい"), ctx(at)).state;
+    const tick = reduce(state, { t: "tick" }, ctx(at + 1_000));
+    state = tick.state;
+    assertEquals(tick.utterances.length, 0, `${i}回目: 声を無視して話題カードを投げている`);
+  }
+  assertEquals(state.gucchi.silenceStreak, 0);
+
+  // 声も止まって3分経てば、これまでどおり話題カードを投げる
+  const silent = reduce(state, { t: "tick" }, ctx(state.lastActivityAt + SILENCE_MS));
+  assertEquals(silent.utterances.length, 1);
+  assertEquals(silent.utterances[0].kind, "topic");
 });
 
 // ---------------------------------------------------------------------------

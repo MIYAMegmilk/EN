@@ -10,6 +10,7 @@ import {
   countMora,
   createKanaProvider,
   createKuromojiProvider,
+  createSenryuDetector,
   detectSenryu,
   detectSenryuAny,
   findSenryu,
@@ -373,14 +374,58 @@ Deno.test("回帰: ひらがなの日常発言を川柳と誤判定しない", (
   );
 });
 
+/**
+ * 「あ・あ・…」の敵対的トークン列を作る。区切り記号の `separator` 参照を数えて、
+ * 探索量（＝3重ループを回した回数）を実時間に頼らず測れるようにする。
+ *
+ * 以前はこの回帰テストを performance.now() で測っていたが、単体では 17〜20ms
+ * なのに閾値が 30ms しかなく、フルスイートの並列実行で 40〜57ms まで伸びて
+ * ランダムに落ちていた。計算量の回帰を見たいのであって、実行機の負荷を
+ * 見たいわけではないので、決定論的に数えられる指標に変える。
+ */
+function hostileTokens(pairs: number, counter: { reads: number }): YomiToken[] {
+  const tokens: YomiToken[] = [];
+  for (let i = 0; i < pairs; i++) {
+    tokens.push({ surface: "あ", yomi: "ア" });
+    const separator: YomiToken = { surface: "・", yomi: null };
+    // 探索が触るたびに数える。値そのものは常に true（区切り記号）
+    Object.defineProperty(separator, "separator", {
+      get: () => {
+        counter.reads++;
+        return true;
+      },
+    });
+    tokens.push(separator);
+  }
+  return tokens;
+}
+
+/** 敵対的入力を1回探索し、区切り記号を何回見たかを返す */
+function searchCost(pairs: number): number {
+  const counter = { reads: 0 };
+  findSenryu(hostileTokens(pairs, counter), { tolerance: 1 });
+  return counter.reads;
+}
+
 Deno.test("回帰: 記号だらけの長文でも組み合わせ爆発しない", () => {
   // 区切り記号は 0 モーラなので、候補の作り方を誤ると3重ループが爆発する。
-  // 上限いっぱい（200字）の敵対的入力でも実用的な時間で返ること
-  const hostile = "あ・".repeat(100);
-  const started = performance.now();
-  for (let i = 0; i < 20; i++) detectSenryu(hostile, kana, { tolerance: 1 });
-  const perCall = (performance.now() - started) / 20;
-  assert(perCall < 30, `1件あたり ${perCall.toFixed(1)}ms かかっている`);
+  // 入力を倍にしたとき、探索量が4倍を超えない（＝3乗のオーダーになっていない）こと。
+  // 実装当時の実測は 7,552 → 16,252 回（2.15倍）。
+  const single = searchCost(100);
+  const double = searchCost(200);
+  assert(
+    double < single * 4,
+    `入力を倍にしたら探索が ${(double / single).toFixed(1)} 倍になった（${single} → ${double}）`,
+  );
+  // 絶対量の歯止め。上限いっぱい（200字 ≒ 200トークン）の敵対的入力で、
+  // 実測 7,552 回の4倍を超えたら何かが起きている
+  assert(single < 30_000, `200トークンの探索に ${single} 回かかっている`);
+});
+
+Deno.test("回帰: 上限いっぱいの敵対的入力でも detectSenryu が返る", () => {
+  // 200字（SENRYU_TEXT_MAX）ちょうどの記号だらけの入力。
+  // 落ちず、誤検出もしないこと（時間は測らない。上の回帰テストが計算量を見ている）
+  assertEquals(detectSenryu("あ・".repeat(100), kana, { tolerance: 1 }), null);
 });
 
 Deno.test("回帰: 同じ音の繰り返しだけの文字列は川柳にしない", () => {
@@ -396,4 +441,52 @@ Deno.test("回帰: 同じ音の繰り返しだけの文字列は川柳にしな�
   }
   // 音の種類が足りていれば拾う
   assert(detectSenryu("ふるいけやかわずとびこむみずのおと", kana) !== null);
+});
+
+// ---------------------------------------------------------------------------
+// createSenryuDetector（サーバーが使う組み立て）
+// ---------------------------------------------------------------------------
+
+Deno.test("createSenryuDetector: 辞書を待たずに、かなの句はすぐ拾う", () => {
+  const detect = createSenryuDetector();
+  // 同期で答えが返ること自体が要件（bot.reduce は純粋関数で await できない）
+  const match = detect("ふるいけやかわずとびこむみずのおと");
+  assert(match !== null);
+  assertEquals(match.lines, ["ふるいけや", "かわずとびこむ", "みずのおと"]);
+});
+
+Deno.test("createSenryuDetector: 呼ばれるまで辞書を読まない", () => {
+  let ready = 0;
+  createSenryuDetector({ onReady: () => ready++ });
+  // 判定を1度も求めていないので読み込みは始まっていない
+  assertEquals(ready, 0);
+});
+
+Deno.test({
+  name: "createSenryuDetector: 辞書が読めたら漢字混じりも拾うようになる",
+  // 読み込み完了を待つので、他のテストと時間を取り合わないよう単独で走らせる
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    const kanji = "古池や蛙飛び込む水の音";
+    let resolve: (provider: YomiProvider | null) => void;
+    const ready = new Promise<YomiProvider | null>((r) => {
+      resolve = r;
+    });
+    const detect = createSenryuDetector({ onReady: (p) => resolve(p) });
+
+    // 1回目の呼び出しが読み込みの引き金。この時点ではまだ かな のみ
+    assertEquals(detect(kanji), null, "読み込み前に漢字混じりを拾えてしまっている");
+
+    const provider = await ready;
+    if (provider === null) {
+      console.log("kuromoji を読み込めないためスキップ");
+      return;
+    }
+    const match = detect(kanji);
+    assert(match !== null, "辞書を読んだのに漢字混じりを拾えていない");
+    assertEquals(match.lines, ["古池や", "蛙飛び込む", "水の音"]);
+    // かなの句も引き続き拾える（kuromoji はかなだけの文で解析が破綻するため）
+    assert(detect("ふるいけやかわずとびこむみずのおと") !== null);
+  },
 });

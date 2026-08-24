@@ -18,6 +18,7 @@ import { fromFileUrl } from "@std/path";
 import { getCookies } from "@std/http/cookie";
 import { AuthApi, SESSION_COOKIE_NAME, verifySession } from "./auth.ts";
 import { type ClientLink, RoomManager } from "./rooms.ts";
+import { createSenryuDetector } from "./senryu.ts";
 import {
   type C2S,
   type S2C,
@@ -33,8 +34,11 @@ export const MAX_MESSAGE_BYTES = 64 * 1024;
 /** 静的配信のルート */
 const PUBLIC_DIR = fromFileUrl(new URL("../public/", import.meta.url));
 
-/** 受理する C2S の t 一覧。未知の t は INVALID_INPUT で弾く */
-const C2S_TYPES: ReadonlySet<string> = new Set([
+/**
+ * 受理する C2S の t 一覧。未知の t は INVALID_INPUT で弾く。
+ * types.ts の C2S 型と過不足があってはならない（server/tests/main_test.ts で機械的に照合する）。
+ */
+export const C2S_TYPES: ReadonlySet<string> = new Set([
   "createRoom",
   "join",
   "knock",
@@ -49,6 +53,8 @@ const C2S_TYPES: ReadonlySet<string> = new Set([
   "importGame",
   "chat",
   "voice",
+  "setBot",
+  "endPollVote",
   "rtcSignal",
   "leave",
 ]);
@@ -387,7 +393,20 @@ export function startServer(
   hostname = "127.0.0.1",
   kv?: Deno.Kv,
 ): ServerHandle {
-  const manager = new RoomManager();
+  // 川柳判定（§3.10 せり）。kuromoji の辞書は初回の判定時に読み込み、
+  // 読めるまでは かな のみで判定する（漢字混じりはそれまで拾えない）。
+  // 辞書のない環境では かな のまま動き続ける（createSenryuDetector 参照）
+  const manager = new RoomManager({
+    senryu: createSenryuDetector({
+      onReady: (provider) => {
+        console.log(
+          provider === null
+            ? "senryu: kuromoji を読み込めませんでした。かなのみで判定します"
+            : "senryu: kuromoji を読み込みました（漢字混じりの句も拾います）",
+        );
+      },
+    }),
+  });
   // 環境変数の読込は起動時の1回だけにする
   const iceBody = JSON.stringify({ iceServers: buildIceServers() });
   const auth = kv !== undefined ? new AuthApi(kv) : null;
