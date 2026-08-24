@@ -1,0 +1,67 @@
+/**
+ * プリセット趣味タグのデータ（§3.11）
+ *
+ * VRChat のタグのように「人となりが少し見える」ための興味関心タグ。
+ * 自由入力は受け付けず、運営が用意したプリセット一覧から選ぶ（不適切文言の混入を
+ * 構造的に防ぐ）。追加はチームがこのファイルを更新する。
+ *
+ * タグの表示名はサーバー由来のみとし、クライアントには ID→表示名の対応表として渡す
+ * （§3.11「表示テキストはサーバー由来のみ＝XSS面の入力経路にしない」）。
+ */
+
+/** プリセットタグの識別子 */
+export type HobbyTagId =
+  | "game"
+  | "anime"
+  | "manga"
+  | "music"
+  | "movie"
+  | "sports"
+  | "cooking"
+  | "travel"
+  | "alcohol"
+  | "oshi"
+  | "programming"
+  | "pet"
+  | "reading"
+  | "camping"
+  | "fashion"
+  | "photo"
+  | "fitness"
+  | "cafe"
+  | "boardgame"
+  | "gardening";
+
+/** タグ1件（IDと表示名） */
+export type HobbyTag = { id: HobbyTagId; label: string };
+
+/** プリセットタグ一覧（初期20種、§3.11） */
+export const HOBBY_TAGS: readonly HobbyTag[] = [
+  { id: "game", label: "ゲーム" },
+  { id: "anime", label: "アニメ" },
+  { id: "manga", label: "漫画" },
+  { id: "music", label: "音楽" },
+  { id: "movie", label: "映画" },
+  { id: "sports", label: "スポーツ" },
+  { id: "cooking", label: "料理" },
+  { id: "travel", label: "旅行" },
+  { id: "alcohol", label: "お酒" },
+  { id: "oshi", label: "推し活" },
+  { id: "programming", label: "プログラミング" },
+  { id: "pet", label: "ペット" },
+  { id: "reading", label: "読書" },
+  { id: "camping", label: "キャンプ" },
+  { id: "fashion", label: "ファッション" },
+  { id: "photo", label: "写真" },
+  { id: "fitness", label: "筋トレ" },
+  { id: "cafe", label: "カフェ巡り" },
+  { id: "boardgame", label: "ボードゲーム" },
+  { id: "gardening", label: "ガーデニング" },
+];
+
+const HOBBY_TAG_IDS: ReadonlySet<string> = new Set(HOBBY_TAGS.map((t) => t.id));
+
+/** 値がプリセットのタグIDかどうかを判定する（自由入力を弾く） */
+export function isValidHobbyTagId(value: unknown): value is HobbyTagId {
+  return typeof value === "string" && HOBBY_TAG_IDS.has(value);
+}

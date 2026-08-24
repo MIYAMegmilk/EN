@@ -13,6 +13,7 @@
 import { decodeBase64, encodeBase64 } from "@std/encoding/base64";
 import { deleteCookie, getCookies, setCookie } from "@std/http/cookie";
 import type { AuthSession, User } from "./types.ts";
+import { HOBBY_TAGS } from "./hobby_tags.ts";
 
 /** userId の文字数制約（§3.0） */
 export const USER_ID_MIN = 4;
@@ -192,6 +193,9 @@ export class AuthApi {
     if (url.pathname === "/api/me" && req.method === "GET") {
       return await this.me(req);
     }
+    if (url.pathname === "/api/tags" && req.method === "GET") {
+      return this.tags();
+    }
     return null;
   }
 
@@ -270,6 +274,11 @@ export class AuthApi {
     const res = jsonResponse({ ok: true });
     deleteCookie(res.headers, SESSION_COOKIE_NAME, { path: "/" });
     return res;
+  }
+
+  /** プリセット趣味タグの一覧を返す（§3.11、ログイン不要） */
+  private tags(): Response {
+    return jsonResponse({ tags: HOBBY_TAGS });
   }
 
   private async me(req: Request): Promise<Response> {

@@ -254,3 +254,20 @@ Deno.test("me は期限切れセッションを401で拒否する", async () => 
     kv.close();
   }
 });
+
+Deno.test("GET /api/tags はプリセットタグ一覧を返す（ログイン不要）", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/tags`);
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assert(Array.isArray(body.tags));
+    assert(
+      body.tags.some((t: { id: string; label: string }) => t.id === "game" && t.label === "ゲーム"),
+    );
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
