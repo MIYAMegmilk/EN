@@ -209,6 +209,23 @@ export type ChatMessage = {
   card?: BotCard;
 };
 
+/**
+ * 通話の文字起こし1行（§3.6 + docs/design/bot-voice.md）。
+ * チャット（§3.9）とは別枠。履歴（chatHistory）には積まず、永続化もしない。
+ */
+export type VoiceLine = {
+  /** 発言の一意ID */
+  id: string;
+  /** 喋った人の playerId */
+  playerId: string;
+  /** 発言時点の表示名 */
+  nickname: string;
+  /** 認識結果。200文字以内・制御文字なし */
+  text: string;
+  /** 受信時刻（epoch ms） */
+  at: number;
+};
+
 /** ルーム。プロセスメモリ上のみで保持し KV には置かない（§5） */
 export type Room = {
   /** 6桁の参加コード */
@@ -721,6 +738,8 @@ export type C2S =
   | { t: "submitVote"; targetPlayerId: string }
   | { t: "importGame"; shareCode: string }
   | { t: "chat"; text: string }
+  /** 通話の文字起こし1行（docs/design/bot-voice.md）。VC 枠内の参加者のみ受理される */
+  | { t: "voice"; text: string }
   /** bot の ON/OFF（ホストのみ、§3.10）。botId 省略で3体まとめて切り替える */
   | { t: "setBot"; botId?: BotId; enabled: boolean }
   /** 終了アンケートへの投票（§3.10） */
@@ -747,6 +766,8 @@ export type S2C =
   | { t: "finalResult"; scores: ScoreEntry[] }
   | { t: "hostChanged"; playerId: string }
   | { t: "chat"; message: ChatMessage }
+  /** 通話の文字起こし1行が確定した（docs/design/bot-voice.md） */
+  | { t: "voice"; line: VoiceLine }
   /** bot の ON/OFF が変わった（§3.10） */
   | { t: "botState"; bots: BotSwitches }
   /** 終了アンケートが締まった（§3.10）。agreed が true ならお開きの合意が取れた */

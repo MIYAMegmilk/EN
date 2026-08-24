@@ -15,6 +15,8 @@ import {
   validateChatText,
   validateNickname,
   validateRoomName,
+  VOICE_RATE_MAX,
+  VOICE_RATE_WINDOW_MS,
 } from "../rooms.ts";
 import { DEFAULT_PHASE_DURATIONS } from "../engine.ts";
 import type { S2C } from "../types.ts";
@@ -958,6 +960,163 @@ Deno.test("チャット: ルーム未参加の接続からは ROOM_NOT_FOUND", (
   const link = new MockLink();
   manager.handle(link, { t: "chat", text: "どこにも属していない" });
   assertEquals(last(link, "error")?.code, "ROOM_NOT_FOUND");
+  manager.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// 通話の文字起こし（voice、docs/design/bot-voice.md）
+// ---------------------------------------------------------------------------
+
+Deno.test('voice: VC 枠内の発言者本人を含む全員に {t:"voice", line} として届く', () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
+  assertExists(guest.state);
+  manager.handle(guest.link, { t: "voice", text: "  こんばんは  " });
+  for (const link of [host.link, guest.link]) {
+    const msg = last(link, "voice");
+    assertExists(msg);
+    assertEquals(msg.line.text, "こんばんは");
+  }
+  manager.dispose();
+});
+
+Deno.test("voice: line の中身が正しい（playerId / nickname / text / at / id）", () => {
+  const { clock, manager } = setup();
+  const host = createRoom(manager);
+  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
+  assertExists(guest.state);
+  manager.handle(guest.link, { t: "voice", text: "今日は飲みすぎた" });
+  const msg = last(host.link, "voice");
+  assertExists(msg);
+  assertEquals(msg.line.playerId, guest.state.snapshot.youId);
+  assertEquals(msg.line.nickname, "ゲスト");
+  assertEquals(msg.line.text, "今日は飲みすぎた");
+  assertEquals(msg.line.at, clock.now);
+  assertExists(msg.line.id);
+  manager.dispose();
+});
+
+Deno.test("voice: chatHistory には積まれない（docs/design/bot-voice.md）", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  manager.handle(host.link, { t: "voice", text: "喋り言葉はチャット履歴に積まない" });
+  assertExists(last(host.link, "voice"));
+  assertEquals(manager.getRoom(host.snapshot.code)?.chatHistory.length, 0);
+  assertEquals(all(host.link, "chat").length, 0);
+  manager.dispose();
+});
+
+Deno.test("voice: スナップショットに文字起こしが入らない", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  manager.handle(host.link, { t: "voice", text: "スナップショットには残らないはず" });
+  const late = joinRoom(manager, host.snapshot.code, "あとから");
+  assertExists(late.state);
+  assertEquals(late.state.snapshot.chat.length, 0);
+  manager.dispose();
+});
+
+Deno.test("voice: 200文字ちょうどは受理し、201文字は INVALID_INPUT", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  manager.handle(host.link, { t: "voice", text: "あ".repeat(CHAT_TEXT_MAX) });
+  assertEquals(last(host.link, "voice")?.line.text.length, CHAT_TEXT_MAX);
+  assertEquals(last(host.link, "error"), undefined);
+  manager.handle(host.link, { t: "voice", text: "あ".repeat(CHAT_TEXT_MAX + 1) });
+  assertEquals(last(host.link, "error")?.code, "INVALID_INPUT");
+  manager.dispose();
+});
+
+Deno.test("voice: 制御文字・空文字は INVALID_INPUT", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  manager.handle(host.link, { t: "voice", text: "改\n行" });
+  assertEquals(last(host.link, "error")?.code, "INVALID_INPUT");
+  manager.handle(host.link, { t: "voice", text: "" });
+  assertEquals(last(host.link, "error")?.code, "INVALID_INPUT");
+  manager.handle(host.link, { t: "voice", text: "   " });
+  assertEquals(last(host.link, "error")?.code, "INVALID_INPUT");
+  assertEquals(all(host.link, "voice").length, 0);
+  manager.dispose();
+});
+
+Deno.test(
+  `voice: ${
+    VOICE_RATE_WINDOW_MS / 1000
+  }秒に${VOICE_RATE_MAX}件を超えると黙って破棄され、窓が過ぎればまた送れる`,
+  () => {
+    const { clock, manager } = setup();
+    const host = createRoom(manager);
+    for (let i = 1; i <= VOICE_RATE_MAX; i++) {
+      manager.handle(host.link, { t: "voice", text: `発言${i}` });
+    }
+    assertEquals(all(host.link, "voice").length, VOICE_RATE_MAX);
+    // 13件目はエラーを返さず、配信もされず、黙って破棄される
+    manager.handle(host.link, { t: "voice", text: "超過分" });
+    assertEquals(last(host.link, "error"), undefined);
+    assertEquals(all(host.link, "voice").length, VOICE_RATE_MAX);
+    // 窓が過ぎればまた送れる
+    clock.advance(VOICE_RATE_WINDOW_MS);
+    manager.handle(host.link, { t: "voice", text: "窓明けの発言" });
+    assertEquals(last(host.link, "voice")?.line.text, "窓明けの発言");
+    manager.dispose();
+  },
+);
+
+Deno.test("voice: VC 枠外（7人目以降）からの発言は黙って破棄する（§3.1 / docs/design/bot-voice.md）", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  const members: { link: MockLink; id: string }[] = [];
+  for (let i = 2; i <= VC_CAPACITY + 1; i++) {
+    const guest = joinRoom(manager, host.snapshot.code, `ゲスト${i}`);
+    assertExists(guest.state);
+    members.push({ link: guest.link, id: guest.state.snapshot.youId });
+  }
+  assertEquals(members.length, VC_CAPACITY);
+  const outOfVc = members[members.length - 1];
+  const players = last(outOfVc.link, "roomState")?.snapshot.players;
+  assertExists(players);
+  assertEquals(players.find((p) => p.id === outOfVc.id)?.vcEligible, false);
+
+  const beforeHost = host.link.received.length;
+  manager.handle(outOfVc.link, { t: "voice", text: "枠外からの発言" });
+  assertEquals(all(host.link, "voice").length, 0);
+  assertEquals(last(outOfVc.link, "error"), undefined);
+  assertEquals(host.link.received.length, beforeHost);
+
+  // 枠内は通常どおり受理される
+  manager.handle(host.link, { t: "voice", text: "枠内からの発言" });
+  assertEquals(last(host.link, "voice")?.line.text, "枠内からの発言");
+  manager.dispose();
+});
+
+Deno.test("voice: ルーム未参加の接続からは ROOM_NOT_FOUND", () => {
+  const { manager } = setup();
+  createRoom(manager);
+  const link = new MockLink();
+  manager.handle(link, { t: "voice", text: "どこにも属していない" });
+  assertEquals(last(link, "error")?.code, "ROOM_NOT_FOUND");
+  manager.dispose();
+});
+
+Deno.test("voice: 退室すると voiceTimes が掃除される（メモリリーク防止の回帰）", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
+  assertExists(guest.state);
+  const guestId = guest.state.snapshot.youId;
+  manager.handle(guest.link, { t: "voice", text: "退室前の発言" });
+
+  // voiceTimes は rooms.ts 内の private フィールド（TS 上の型のみの private）なので、
+  // メモリリークの回帰確認のためだけにここで直接覗く
+  type RoomsInternal = { rooms: Map<string, { voiceTimes: Map<string, number[]> }> };
+  const internalEntry = (manager as unknown as RoomsInternal).rooms.get(host.snapshot.code);
+  assertExists(internalEntry);
+  assert(internalEntry.voiceTimes.has(guestId));
+
+  manager.handle(guest.link, { t: "leave" });
+  assert(!internalEntry.voiceTimes.has(guestId));
   manager.dispose();
 });
 

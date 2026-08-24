@@ -136,7 +136,11 @@ function connect() {
     receive(msg);
     // VC は参加者の増減とシグナリングを同じ WS で受け取る（§3.2 / §3.6）
     VC.handleServerMessage(msg);
+    // 通話の文字起こし（docs/design/bot-voice.md §5.4）
+    Voice.handleServerMessage(msg);
     Chat.handleServerMessage(msg);
+    // bot の演出面（docs/design/bot.md §4）
+    Bot.handleServerMessage(msg);
   };
 }
 
@@ -152,6 +156,7 @@ function receive(msg) {
         store.save(msg.snapshot.code, msg.snapshot.session);
       }
       Chat.setSelfId(msg.snapshot.youId);
+      Bot.setSelfId(msg.snapshot.youId);
       showError("");
       renderAll();
       break;
@@ -193,6 +198,8 @@ function receive(msg) {
       store.drop();
       state.snapshot = null;
       Chat.reset();
+      Voice.reset();
+      Bot.reset();
       showError("ルームから退出しました");
       renderAll();
       break;
@@ -225,6 +232,7 @@ function renderAll() {
   $("entry").classList.toggle("hidden", snapshot !== null);
   $("room").classList.toggle("hidden", snapshot === null);
   $("vc").classList.toggle("hidden", snapshot === null);
+  $("bot").classList.toggle("hidden", snapshot === null);
   $("chat").classList.toggle("hidden", snapshot === null);
   $("phase").classList.toggle("hidden", snapshot === null);
   renderVc();
@@ -491,6 +499,36 @@ function bindVc(iceServers) {
   });
 }
 
+/**
+ * Voice モジュールを組み込む（docs/design/bot-voice.md §5.4）。
+ * 非対応ブラウザ（iOS Safari・Firefox 等）ではトグルを無効化し、理由を title で示す。
+ */
+function bindVoice() {
+  const transcribeBtn = $("vc-transcribe");
+  // ボタン文言は常に Voice.getState().enabled から導く（vc-camera / vc-mute と同じ流儀）。
+  // 権限拒否や5回連続失敗など、クリック以外の理由で OFF に倒れたときも表示がずれない
+  const syncTranscribeLabel = () => {
+    transcribeBtn.textContent = Voice.getState().enabled ? "文字起こしOFF" : "文字起こしON";
+  };
+  Voice.init({
+    send,
+    captionEl: $("voice-caption"),
+    onStatus: (event) => {
+      $("vc-status").textContent = event.message;
+      syncTranscribeLabel();
+    },
+  });
+  if (!Voice.isSupported()) {
+    transcribeBtn.disabled = true;
+    transcribeBtn.title = "このブラウザは音声の文字起こしに対応していません";
+    return;
+  }
+  transcribeBtn.addEventListener("click", () => {
+    Voice.toggle();
+    syncTranscribeLabel();
+  });
+}
+
 /** 操作の割り当て */
 function bind() {
   $("logout").addEventListener("click", async () => {
@@ -519,7 +557,15 @@ function bind() {
     store.drop();
     state.snapshot = null;
     Chat.reset();
+    Voice.reset();
+    Bot.reset();
     renderAll();
+  });
+  bindVoice();
+  Bot.init({
+    send,
+    container: $("bot"),
+    onError: showError,
   });
   Chat.init({
     send,
