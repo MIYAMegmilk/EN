@@ -519,3 +519,53 @@ function isAllKana(text: string): boolean {
   }
   return text.length > 0;
 }
+
+// ---------------------------------------------------------------------------
+// 起動時の組み立て
+// ---------------------------------------------------------------------------
+
+/**
+ * サーバーが使う川柳判定を作る（§3.10 せり）。
+ *
+ * kuromoji の辞書は読み込みに数百ミリ秒かかり、常駐メモリも大きい。一方で
+ * かなプロバイダだけでは**漢字が1文字でも混ざると拾えない**（「古池や蛙飛び込む
+ * 水の音」が検出できない）。音声認識の出力は漢字かな混じりで返ってくるので、
+ * 文字起こし（docs/design/bot-voice.md）では kuromoji がないと実質発火しない。
+ *
+ * そこで「使うまで読まない、読めたら差し替える」ことにした:
+ *   - 最初の判定要求で辞書の読み込みを**開始する**（プロセスで1回だけ）
+ *   - 読み終わるまでは かな のみで判定する（待たせない。§3.10 の bot は同期）
+ *   - 読み終わったら [kuromoji, kana] で判定する（互いの穴を埋める。detectSenryuAny 参照）
+ *   - 読み込めない環境（辞書なし・npm 不通）では かな のまま動き続ける
+ *
+ * 一度も発言のないルームや、川柳判定を使わないテストでは辞書を読まない。
+ *
+ * このファイルで副作用を持つのはこの関数と createKuromojiProvider だけで、
+ * 検出ロジック本体（detectSenryu / findSenryu 等）は純粋なままである。
+ */
+export function createSenryuDetector(options: {
+  /** 読み込み結果を知らせる。ログ出力の方針を呼び出し側に委ねるため */
+  onReady?: (provider: YomiProvider | null) => void;
+  /** 許容幅。既定は せり の tolerance */
+  tolerance?: number;
+} = {}): (text: string) => SenryuMatch | null {
+  const kana = createKanaProvider();
+  const tolerance = options.tolerance ?? SENRYU_TOLERANCE;
+  // 読み込みが終わるまでは かな のみ。終わったら差し替える
+  let providers: readonly YomiProvider[] = [kana];
+  let started = false;
+  return (text) => {
+    if (!started) {
+      started = true;
+      createKuromojiProvider()
+        .then((kuromoji) => {
+          // kuromoji を先に置く。かなだけの文では kuromoji の解析が破綻するので
+          // うしろに kana を残して互いの穴を埋める（detectSenryuAny のコメント参照）
+          if (kuromoji !== null) providers = [kuromoji, kana];
+          options.onReady?.(kuromoji);
+        })
+        .catch(() => options.onReady?.(null));
+    }
+    return detectSenryuAny(text, providers, { tolerance });
+  };
+}

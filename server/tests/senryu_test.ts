@@ -10,6 +10,7 @@ import {
   countMora,
   createKanaProvider,
   createKuromojiProvider,
+  createSenryuDetector,
   detectSenryu,
   detectSenryuAny,
   findSenryu,
@@ -396,4 +397,52 @@ Deno.test("回帰: 同じ音の繰り返しだけの文字列は川柳にしな�
   }
   // 音の種類が足りていれば拾う
   assert(detectSenryu("ふるいけやかわずとびこむみずのおと", kana) !== null);
+});
+
+// ---------------------------------------------------------------------------
+// createSenryuDetector（サーバーが使う組み立て）
+// ---------------------------------------------------------------------------
+
+Deno.test("createSenryuDetector: 辞書を待たずに、かなの句はすぐ拾う", () => {
+  const detect = createSenryuDetector();
+  // 同期で答えが返ること自体が要件（bot.reduce は純粋関数で await できない）
+  const match = detect("ふるいけやかわずとびこむみずのおと");
+  assert(match !== null);
+  assertEquals(match.lines, ["ふるいけや", "かわずとびこむ", "みずのおと"]);
+});
+
+Deno.test("createSenryuDetector: 呼ばれるまで辞書を読まない", () => {
+  let ready = 0;
+  createSenryuDetector({ onReady: () => ready++ });
+  // 判定を1度も求めていないので読み込みは始まっていない
+  assertEquals(ready, 0);
+});
+
+Deno.test({
+  name: "createSenryuDetector: 辞書が読めたら漢字混じりも拾うようになる",
+  // 読み込み完了を待つので、他のテストと時間を取り合わないよう単独で走らせる
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    const kanji = "古池や蛙飛び込む水の音";
+    let resolve: (provider: YomiProvider | null) => void;
+    const ready = new Promise<YomiProvider | null>((r) => {
+      resolve = r;
+    });
+    const detect = createSenryuDetector({ onReady: (p) => resolve(p) });
+
+    // 1回目の呼び出しが読み込みの引き金。この時点ではまだ かな のみ
+    assertEquals(detect(kanji), null, "読み込み前に漢字混じりを拾えてしまっている");
+
+    const provider = await ready;
+    if (provider === null) {
+      console.log("kuromoji を読み込めないためスキップ");
+      return;
+    }
+    const match = detect(kanji);
+    assert(match !== null, "辞書を読んだのに漢字混じりを拾えていない");
+    assertEquals(match.lines, ["古池や", "蛙飛び込む", "水の音"]);
+    // かなの句も引き続き拾える（kuromoji はかなだけの文で解析が破綻するため）
+    assert(detect("ふるいけやかわずとびこむみずのおと") !== null);
+  },
 });
