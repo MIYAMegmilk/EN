@@ -685,8 +685,15 @@
       <section id="entry" class="home">
         <div class="card home-bar">
           <div class="field">
-            <label for="nickname">あだ名（20文字以内）</label>
-            <input class="input" id="nickname" maxlength="20" autocomplete="off" />
+            <label for="nickname">あだ名（20文字以内・空欄可）</label>
+            <!-- 空欄のまま入店すると、しゅんぴが二つ名を付ける（docs/design/bot.md §5） -->
+            <input
+              class="input"
+              id="nickname"
+              maxlength="20"
+              autocomplete="off"
+              placeholder="空欄ならこちらで付けます"
+            />
           </div>
 
           <div class="field">

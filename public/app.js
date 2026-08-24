@@ -110,10 +110,15 @@ function connect() {
     // ここまで来たら接続済みなので、直前の退室フラグが残っていても持ち越さない
     state.leaving = false;
     const saved = store.load();
-    const nickname = $("nickname").value.trim();
-    if (saved !== null && nickname.length > 0) {
-      // 再接続を試す（60秒以内なら復帰できる）
-      send({ t: "join", roomCode: saved.code, nickname, session: saved.session });
+    if (saved !== null) {
+      // 再接続を試す（60秒以内なら復帰できる）。session が生きていればサーバーは
+      // あだ名を見ない（doJoin が reconnect で早期 return する）ので、あだ名を省略して
+      // 入室した人も復帰できるよう空欄でも送る。猶予を過ぎていた場合は新規入室に
+      // 倒れ、そこでも空欄ならあらためて二つ名が付く
+      const msg = { t: "join", roomCode: saved.code, session: saved.session };
+      const nickname = $("nickname").value.trim();
+      if (nickname.length > 0) msg.nickname = nickname;
+      send(msg);
     }
   };
   ws.onclose = () => {
@@ -543,7 +548,12 @@ function bind() {
     send(msg);
   });
   $("join").addEventListener("click", () => {
-    send({ t: "join", roomCode: $("code").value, nickname: $("nickname").value });
+    // 空欄なら nickname を積まない。省略するとしゅんぴが二つ名を付ける（§3.10）。
+    // 空文字は「入力し忘れ」と区別できないのでサーバーが弾く（types.ts の join 参照）
+    const msg = { t: "join", roomCode: $("code").value };
+    const nickname = $("nickname").value.trim();
+    if (nickname.length > 0) msg.nickname = nickname;
+    send(msg);
   });
   $("select-game").addEventListener("click", () => {
     send({ t: "selectGame", gameId: $("game").value });
