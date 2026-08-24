@@ -153,10 +153,15 @@ function isAllowedOrigin(req: Request): boolean {
 
 /**
  * クライアントの実IPを求める（§3.8 のレート制限のキーに使う）。
- * 本番は VPS上のリバースプロキシ経由（§6）のため、TCP 接続元（remoteAddrHostname）は
- * 常にプロキシのアドレスになる。プロキシが付与する X-Forwarded-For の先頭値を優先する。
+ * 本番は同一VPS上のCaddy/Nginxがリバースプロキシする構成（§6）のため、正規の経路では
+ * TCP 接続元（remoteAddrHostname）は常に localhost になる。X-Forwarded-For は送信者が
+ * 自由に偽装できるヘッダーなので、TCP 接続元が localhost（＝信頼できるプロキシ経由）の
+ * ときだけ信頼する。リバースプロキシを経由しない直接アクセスでは TCP 接続元は偽装できない
+ * ため、この場合は X-Forwarded-For を無視して TCP 接続元をそのまま使う。
  */
 export function clientIp(req: Request, remoteAddrHostname: string): string {
+  const trustedProxy = remoteAddrHostname === "127.0.0.1" || remoteAddrHostname === "::1";
+  if (!trustedProxy) return remoteAddrHostname;
   const forwarded = req.headers.get("x-forwarded-for");
   if (forwarded === null) return remoteAddrHostname;
   const first = forwarded.split(",")[0]?.trim();

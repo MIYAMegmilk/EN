@@ -114,3 +114,17 @@ Deno.test("clientIp: 先頭要素の前後の空白を取り除く", () => {
   });
   assertEquals(clientIp(req, "127.0.0.1"), "203.0.113.5");
 });
+
+Deno.test("clientIp: ::1 からの接続も信頼済みプロキシとして扱う", () => {
+  const req = new Request("http://example.com/", {
+    headers: { "x-forwarded-for": "203.0.113.5" },
+  });
+  assertEquals(clientIp(req, "::1"), "203.0.113.5");
+});
+
+Deno.test("clientIp: プロキシ（localhost）以外からの直接接続は X-Forwarded-For を偽装されても無視する", () => {
+  const req = new Request("http://example.com/", {
+    headers: { "x-forwarded-for": "203.0.113.5" },
+  });
+  assertEquals(clientIp(req, "198.51.100.9"), "198.51.100.9");
+});
