@@ -40,7 +40,7 @@ function delay(ms: number): Promise<void> {
 /**
  * 条件が満たされるまでポーリングで待つ。
  * TestClient.waitFor はエラー受信で reject するため、エラー応答が正常系であるテスト
- * （未実装の rtcSignal を連投する等）ではこちらを使う。
+ * （レート制限に触れるまで連投する等）ではこちらを使う。
  */
 async function waitUntil(condition: () => boolean, label: string): Promise<void> {
   const deadline = Date.now() + WAIT_TIMEOUT_MS;
@@ -462,40 +462,73 @@ async function connectInRoom(port: number): Promise<TestClient> {
 }
 
 /**
+ * ルームを1つ作り、ホストと中継先の相手が参加済みのクライアントを返す。
+ * rtcSignal は宛先が同室の接続中メンバーでなければ黙って破棄されるため（§3.6）、
+ * 「レート制限を通過した件数」を数えるには実在する相手が要る。
+ */
+async function connectSignalPair(
+  port: number,
+): Promise<{ host: TestClient; peer: TestClient; peerId: string }> {
+  const host = await connectInRoom(port);
+  const created = host.received().find(
+    (m): m is Extract<S2C, { t: "roomState" }> => m.t === "roomState",
+  );
+  assertExists(created);
+
+  const peer = await TestClient.connect(port);
+  peer.send({ t: "join", roomCode: created.snapshot.code, nickname: "相手" });
+  const joined = await peer.waitFor((m) => m.t === "roomState", "roomState(peer)");
+  assert(joined.t === "roomState");
+  return { host, peer, peerId: joined.snapshot.youId };
+}
+
+/**
  * rtcSignal のバースト件数。フルメッシュ5本 × trickle ICE を模し、
  * 一般枠 WS_RATE_MAX の2倍を送る（別枠でなければ確実に切断される件数）。
  */
 const SIGNAL_BURST = WS_RATE_MAX * 2;
 
-/** rtcSignal を n 件、間を空けずに送る */
-function sendSignals(client: TestClient, count: number): void {
+/** rtcSignal を n 件、間を空けずに宛先 to へ送る */
+function sendSignals(client: TestClient, count: number, to: string): void {
   for (let i = 0; i < count; i++) {
-    client.send({ t: "rtcSignal", to: `peer${i}`, payload: { kind: "ice" } });
+    client.send({ t: "rtcSignal", to, payload: { kind: "ice" } });
   }
 }
 
-/** rtcSignal を n 件連投し、未実装応答（INVALID_INPUT）が返り切るまで待つ */
-async function burstSignals(client: TestClient, count: number): Promise<void> {
-  const before = client.countError("INVALID_INPUT");
-  sendSignals(client, count);
-  // main では rtcSignal 自体が未実装のため INVALID_INPUT が返る。
-  // ここでの検証点は「応答が返り切るまで接続が維持されること」
+/** 中継されて届いた rtcSignal の件数 */
+function countRelayed(peer: TestClient): number {
+  return peer.received().filter((m) => m.t === "rtcSignal").length;
+}
+
+/**
+ * rtcSignal を n 件連投し、相手に中継され切るまで待つ。
+ * レート制限に弾かれた分は中継されないため、届いた件数が受理件数になる。
+ */
+async function burstSignals(
+  host: TestClient,
+  peer: TestClient,
+  peerId: string,
+  count: number,
+): Promise<void> {
+  const before = countRelayed(peer);
+  sendSignals(host, count, peerId);
   await waitUntil(
-    () => client.countError("INVALID_INPUT") >= before + count,
-    `rtcSignal ${count}件への応答`,
+    () => countRelayed(peer) >= before + count,
+    `rtcSignal ${count}件の中継`,
   );
 }
 
 Deno.test("結合: rtcSignal は別枠なので 20件/秒 を超えても切断されない（§3.6 / §3.8）", async () => {
   const server = startServer(0);
-  const client = await connectInRoom(server.port);
+  const { host, peer, peerId } = await connectSignalPair(server.port);
 
-  await burstSignals(client, SIGNAL_BURST);
+  await burstSignals(host, peer, peerId, SIGNAL_BURST);
 
-  assertEquals(client.closeCode, null, "切断されていない");
-  assertEquals(client.countError("RATE_LIMITED"), 0, "RATE_LIMITED は届かない");
+  assertEquals(host.closeCode, null, "切断されていない");
+  assertEquals(host.countError("RATE_LIMITED"), 0, "RATE_LIMITED は届かない");
 
-  await client.leaveAndClose();
+  await peer.leaveAndClose();
+  await host.leaveAndClose();
   assertEquals(server.manager.roomCount, 0);
   await server.shutdown();
 });
@@ -515,32 +548,33 @@ const SIGNAL_HARD_BURST = WS_SIGNAL_HARD_MAX + 1;
 
 Deno.test("結合: rtcSignal はソフト上限を超えても切断されず、超過分だけ破棄される（§3.6 / §3.8）", async () => {
   const server = startServer(0);
-  const client = await connectInRoom(server.port);
+  const { host, peer, peerId } = await connectSignalPair(server.port);
 
-  sendSignals(client, SIGNAL_SOFT_BURST);
-  // 受理された分は未実装応答（INVALID_INPUT）で返ってくる
+  sendSignals(host, SIGNAL_SOFT_BURST, peerId);
+  // 受理された分だけが相手に中継される
   await waitUntil(
-    () => client.countError("INVALID_INPUT") >= WS_SIGNAL_RATE_MAX,
-    `rtcSignal ${WS_SIGNAL_RATE_MAX}件への応答`,
+    () => countRelayed(peer) >= WS_SIGNAL_RATE_MAX,
+    `rtcSignal ${WS_SIGNAL_RATE_MAX}件の中継`,
   );
   // WS は順序が保たれるため、バースト後に送ったチャットが届いた時点で全件が処理済み。
   // 通常メッセージが処理されること自体が「切断されず接続が生きている」ことの確認でもある。
-  client.send({ t: "chat", text: "バースト後の発言" });
+  host.send({ t: "chat", text: "バースト後の発言" });
   await waitUntil(
-    () => client.received().some((m) => m.t === "chat" && m.message.text === "バースト後の発言"),
+    () => host.received().some((m) => m.t === "chat" && m.message.text === "バースト後の発言"),
     "バースト後のチャット",
   );
 
-  assertEquals(client.closeCode, null, "ソフト上限の超過では切断されない");
+  assertEquals(host.closeCode, null, "ソフト上限の超過では切断されない");
   assertEquals(
-    client.countError("INVALID_INPUT"),
+    countRelayed(peer),
     WS_SIGNAL_RATE_MAX,
     `受理はソフト上限までで、超過 ${SIGNAL_SOFT_BURST - WS_SIGNAL_RATE_MAX} 件は破棄される`,
   );
   // 超過1件ごとに返すとエラーの増幅になるため、判定窓につき1回に絞られている
-  assertEquals(client.countError("RATE_LIMITED"), 1, "RATE_LIMITED の通知は判定窓につき1回");
+  assertEquals(host.countError("RATE_LIMITED"), 1, "RATE_LIMITED の通知は判定窓につき1回");
 
-  await client.leaveAndClose();
+  await peer.leaveAndClose();
+  await host.leaveAndClose();
   assertEquals(server.manager.roomCount, 0);
   await server.shutdown();
 });
@@ -549,8 +583,9 @@ Deno.test("結合: rtcSignal がハードキャップを超えると乱用とみ
   const server = startServer(0);
   const client = await connectInRoom(server.port);
 
+  // 宛先は実在しなくてよい。レート判定は WS 層で中継より先に走るため（§3.8）
   // 送信はすべて同期ループで済むため、送り終える前に切断されて送信が失敗することはない
-  sendSignals(client, SIGNAL_HARD_BURST);
+  sendSignals(client, SIGNAL_HARD_BURST, "no-such-peer");
 
   await Promise.race([client.closed, delay(WAIT_TIMEOUT_MS)]);
   assertEquals(client.closeCode, 1008, "policy violation の 1008 で切断される");
@@ -570,20 +605,21 @@ Deno.test("結合: rtcSignal がハードキャップを超えると乱用とみ
 
 Deno.test("結合: rtcSignal の連投は一般枠を消費しない（§3.8）", async () => {
   const server = startServer(0);
-  const client = await connectInRoom(server.port);
+  const { host, peer, peerId } = await connectSignalPair(server.port);
 
-  await burstSignals(client, SIGNAL_BURST);
+  await burstSignals(host, peer, peerId, SIGNAL_BURST);
 
   // 一般枠が消費されていなければ、バースト直後の通常メッセージも普通に処理される
-  client.send({ t: "chat", text: "バースト後の発言" });
+  host.send({ t: "chat", text: "バースト後の発言" });
   await waitUntil(
-    () => client.received().some((m) => m.t === "chat" && m.message.text === "バースト後の発言"),
+    () => host.received().some((m) => m.t === "chat" && m.message.text === "バースト後の発言"),
     "バースト後のチャット",
   );
-  assertEquals(client.closeCode, null, "切断されていない");
-  assertEquals(client.countError("RATE_LIMITED"), 0, "RATE_LIMITED は届かない");
+  assertEquals(host.closeCode, null, "切断されていない");
+  assertEquals(host.countError("RATE_LIMITED"), 0, "RATE_LIMITED は届かない");
 
-  await client.leaveAndClose();
+  await peer.leaveAndClose();
+  await host.leaveAndClose();
   assertEquals(server.manager.roomCount, 0);
   await server.shutdown();
 });

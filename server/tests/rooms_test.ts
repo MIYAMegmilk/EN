@@ -24,6 +24,7 @@ import {
   CHAT_TEXT_MAX,
   DISCONNECT_GRACE_MS,
   ROOM_CAPACITY,
+  VC_CAPACITY,
 } from "../types.ts";
 
 const T0 = 1_700_000_000_000;
@@ -527,6 +528,122 @@ Deno.test("進行中の参加は観戦扱いになる（§8）", () => {
 });
 
 // ---------------------------------------------------------------------------
+// VC シグナリングの中継（§3.6 / §3.8）
+// ---------------------------------------------------------------------------
+
+Deno.test("rtcSignal: 同一ルームの接続中メンバーへ from を付けて中継する", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
+  assertExists(guest.state);
+  const guestId = guest.state.snapshot.youId;
+
+  manager.handle(host.link, {
+    t: "rtcSignal",
+    to: guestId,
+    payload: { kind: "desc", description: { type: "offer", sdp: "v=0" } },
+  });
+  const signal = last(guest.link, "rtcSignal");
+  assertExists(signal);
+  assertEquals(signal.from, host.snapshot.youId);
+  assertEquals(signal.payload, { kind: "desc", description: { type: "offer", sdp: "v=0" } });
+  // 送信者にはエラーも中継も返さない
+  assertEquals(last(host.link, "error"), undefined);
+  assertEquals(all(host.link, "rtcSignal").length, 0);
+  manager.dispose();
+});
+
+Deno.test("rtcSignal: 自分宛・不在・型不正は黙って破棄する", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
+  assertExists(guest.state);
+
+  const before = guest.link.received.length;
+  manager.handle(host.link, { t: "rtcSignal", to: host.snapshot.youId, payload: {} });
+  manager.handle(host.link, { t: "rtcSignal", to: "no-such-player", payload: {} });
+  manager.handle(host.link, { t: "rtcSignal", to: 123 as unknown as string, payload: {} });
+  assertEquals(all(host.link, "rtcSignal").length, 0);
+  assertEquals(last(host.link, "error"), undefined);
+  assertEquals(guest.link.received.length, before);
+  manager.dispose();
+});
+
+Deno.test("rtcSignal: 別ルームの参加者宛は中継しない", () => {
+  const { manager } = setup();
+  const roomA = createRoom(manager, "Aホスト");
+  const roomB = createRoom(manager, "Bホスト");
+  const other = joinRoom(manager, roomB.snapshot.code, "Bゲスト");
+  assertExists(other.state);
+
+  const before = other.link.received.length;
+  manager.handle(roomA.link, { t: "rtcSignal", to: other.state.snapshot.youId, payload: {} });
+  assertEquals(other.link.received.length, before);
+  assertEquals(last(roomA.link, "error"), undefined);
+  manager.dispose();
+});
+
+Deno.test("rtcSignal: 切断中の相手宛は中継しない（再接続後は届く）", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
+  assertExists(guest.state);
+  const guestId = guest.state.snapshot.youId;
+  const session = guest.state.snapshot.session;
+  assertExists(session);
+
+  manager.disconnect(guest.link);
+  const before = guest.link.received.length;
+  manager.handle(host.link, { t: "rtcSignal", to: guestId, payload: { kind: "ready" } });
+  assertEquals(guest.link.received.length, before);
+  assertEquals(last(host.link, "error"), undefined);
+
+  const back = new MockLink();
+  manager.handle(back, {
+    t: "join",
+    roomCode: host.snapshot.code,
+    nickname: "ゲスト",
+    session,
+  });
+  manager.handle(host.link, { t: "rtcSignal", to: guestId, payload: { kind: "ready" } });
+  assertExists(last(back, "rtcSignal"));
+  manager.dispose();
+});
+
+Deno.test("rtcSignal: VC 枠外（7人目）が絡む中継は破棄する（§3.1 / §3.6）", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  const members = [];
+  for (let i = 2; i <= VC_CAPACITY + 1; i++) {
+    const guest = joinRoom(manager, host.snapshot.code, `ゲスト${i}`);
+    assertExists(guest.state);
+    members.push({ link: guest.link, id: guest.state.snapshot.youId });
+  }
+  const inVc = members[0];
+  const outOfVc = members[members.length - 1];
+  assertEquals(members.length, VC_CAPACITY);
+  // 7人目は vcEligible=false として配信されている
+  const players = last(outOfVc.link, "roomState")?.snapshot.players;
+  assertExists(players);
+  assertEquals(players.find((p) => p.id === outOfVc.id)?.vcEligible, false);
+  assertEquals(players.find((p) => p.id === inVc.id)?.vcEligible, true);
+
+  // 枠内 → 枠外
+  const beforeOut = outOfVc.link.received.length;
+  manager.handle(host.link, { t: "rtcSignal", to: outOfVc.id, payload: {} });
+  assertEquals(outOfVc.link.received.length, beforeOut);
+  // 枠外 → 枠内
+  const beforeHost = host.link.received.length;
+  manager.handle(outOfVc.link, { t: "rtcSignal", to: host.snapshot.youId, payload: {} });
+  assertEquals(host.link.received.length, beforeHost);
+  assertEquals(last(outOfVc.link, "error"), undefined);
+  // 枠内同士は中継される
+  manager.handle(host.link, { t: "rtcSignal", to: inVc.id, payload: { kind: "ready" } });
+  assertEquals(last(inVc.link, "rtcSignal")?.from, host.snapshot.youId);
+  manager.dispose();
+});
+
+// ---------------------------------------------------------------------------
 // チャット（§3.9）
 // ---------------------------------------------------------------------------
 
@@ -686,7 +803,6 @@ Deno.test("未実装の C2S は INVALID_INPUT で拒否する", () => {
     { t: "rejectKnock", knockId: "x" },
     { t: "kick", playerId: "x" },
     { t: "importGame", shareCode: "ABCDEFGH" },
-    { t: "rtcSignal", to: "x", payload: {} },
   ] as const;
   for (const msg of unsupported) {
     manager.handle(host.link, msg);

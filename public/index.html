@@ -60,6 +60,25 @@
       #error {
         color: #b00020;
       }
+      #vc-media {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+      }
+      .vc-peer {
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        padding: 0.3rem;
+        font-size: 0.8rem;
+      }
+      .vc-peer-label {
+        margin: 0 0 0.2rem;
+      }
+      .vc-video {
+        width: 12rem;
+        max-width: 100%;
+        background: #000;
+      }
       /* チャット（§3.9） */
       #chat-log {
         max-height: 12rem;
@@ -132,6 +151,18 @@
       </div>
     </section>
 
+    <section id="vc" class="hidden">
+      <h2>VC / カメラ</h2>
+      <div class="row">
+        <button id="vc-join" type="button">VCに参加</button>
+        <button id="vc-mute" type="button">ミュート</button>
+        <button id="vc-camera" type="button">カメラON</button>
+        <button id="vc-leave" type="button">VC退出</button>
+      </div>
+      <p class="muted" id="vc-status">未参加</p>
+      <div id="vc-media"></div>
+    </section>
+
     <section id="chat" class="hidden">
       <h2>チャット</h2>
       <ul id="chat-log"></ul>
@@ -157,6 +188,7 @@
       <div id="log"></div>
     </section>
 
+    <script src="./room/vc.js"></script>
     <script src="./room/chat.js"></script>
     <script src="./app.js"></script>
   </body>

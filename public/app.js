@@ -101,6 +101,8 @@ function connect() {
     }
     log("←", msg);
     receive(msg);
+    // VC は参加者の増減とシグナリングを同じ WS で受け取る（§3.2 / §3.6）
+    VC.handleServerMessage(msg);
     Chat.handleServerMessage(msg);
   };
 }
@@ -189,8 +191,10 @@ function renderAll() {
   const snapshot = state.snapshot;
   $("entry").classList.toggle("hidden", snapshot !== null);
   $("room").classList.toggle("hidden", snapshot === null);
+  $("vc").classList.toggle("hidden", snapshot === null);
   $("chat").classList.toggle("hidden", snapshot === null);
   $("phase").classList.toggle("hidden", snapshot === null);
+  renderVc();
   if (snapshot === null) return;
 
   $("room-code").textContent = snapshot.code;
@@ -348,6 +352,65 @@ function renderScores(title, scores) {
   }
 }
 
+/** VC の操作ボタンと状態表示を更新する */
+function renderVc() {
+  const vc = VC.getState();
+  $("vc-join").disabled = vc.active;
+  $("vc-leave").disabled = !vc.active;
+  $("vc-mute").disabled = !vc.active;
+  $("vc-camera").disabled = !vc.active;
+  $("vc-mute").textContent = vc.muted ? "ミュート解除" : "ミュート";
+  $("vc-camera").textContent = vc.camera ? "カメラOFF" : "カメラON";
+  const peers = vc.peers.map((p) => `${p.nickname}: ${p.connectionState}`).join(" / ");
+  const head = vc.active ? "参加中" : vc.eligible ? "未参加" : "未参加（VC枠外）";
+  $("vc-status").textContent = peers.length > 0 ? `${head} — ${peers}` : head;
+}
+
+/**
+ * サーバーから ICE サーバー設定（STUN / TURN）を取得する。
+ * 取得できなければ null を返し、VC 側の既定（STUN のみ）で続行する。
+ */
+async function fetchIceServers() {
+  try {
+    const res = await fetch("/api/ice", { signal: AbortSignal.timeout(3000) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const servers = data === null ? undefined : data.iceServers;
+    return Array.isArray(servers) && servers.length > 0 ? servers : null;
+  } catch {
+    return null;
+  }
+}
+
+/** VC モジュールを組み込む。iceServers が null なら VC 側の既定を使う */
+function bindVc(iceServers) {
+  VC.init({
+    send,
+    iceServers,
+    container: $("vc-media"),
+    onStatus: (event) => {
+      if (event.kind === "error") showError(event.message);
+      log("VC", event.message);
+      renderVc();
+    },
+  });
+  $("vc-join").addEventListener("click", () => {
+    // 自動再生制限（iOS Safari）を避けるため、マイク取得はこの操作の直後に行う
+    VC.join().then(renderVc);
+  });
+  $("vc-leave").addEventListener("click", () => {
+    VC.leave();
+    renderVc();
+  });
+  $("vc-mute").addEventListener("click", () => {
+    VC.toggleMute();
+    renderVc();
+  });
+  $("vc-camera").addEventListener("click", () => {
+    VC.toggleCamera().then(renderVc);
+  });
+}
+
 /** 操作の割り当て */
 function bind() {
   $("create").addEventListener("click", () => {
@@ -362,6 +425,7 @@ function bind() {
   $("start").addEventListener("click", () => send({ t: "startGame" }));
   $("skip").addEventListener("click", () => send({ t: "skipPhase" }));
   $("leave").addEventListener("click", () => {
+    VC.leave();
     send({ t: "leave" });
     store.drop();
     state.snapshot = null;
@@ -377,5 +441,11 @@ function bind() {
   });
 }
 
-bind();
-connect();
+/** 起動する。ICE 設定を先に取ってから VC を初期化する */
+async function start() {
+  bind();
+  bindVc(await fetchIceServers());
+  connect();
+}
+
+start();

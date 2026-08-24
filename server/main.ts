@@ -2,12 +2,14 @@
  * サーバーのエントリポイント
  * 詳細仕様書 §3.2 / §3.8 / §4 に対応する。
  *
- *   GET /ws  … WebSocket。全リアルタイム用途を1本で共用する（§3.2）
- *   その他   … public/ の静的配信
+ *   GET /ws       … WebSocket。全リアルタイム用途を1本で共用する（§3.2）
+ *   GET /api/ice  … WebRTC の ICE サーバー設定（§3.6）
+ *   その他        … public/ の静的配信
  *
  * 軽量スコープ: §4.0 の HTTP API（認証・公開ルーム一覧・スタジオ CRUD）は未実装。
  */
 
+import { loadSync } from "@std/dotenv";
 import { serveDir } from "@std/http/file-server";
 import { fromFileUrl } from "@std/path";
 import { type ClientLink, RoomManager } from "./rooms.ts";
@@ -272,6 +274,56 @@ async function handleStatic(req: Request): Promise<Response> {
 }
 
 // ---------------------------------------------------------------------------
+// ICE サーバー設定（§3.6）
+// ---------------------------------------------------------------------------
+
+/** 常に配る公開 STUN */
+const STUN_URL = "stun:stun.l.google.com:19302";
+
+/** RTCIceServer として配る1件 */
+export type IceServer = {
+  urls: string;
+  username?: string;
+  credential?: string;
+};
+
+/**
+ * ICE サーバー一覧を組み立てる。
+ * TURN 認証情報は `.env`（無ければ環境変数）から読み、3つ揃ったときだけ載せる。
+ * 値は /api/ice の応答以外に出さない（ログにも残さない §3.8）。
+ */
+export function buildIceServers(): IceServer[] {
+  let dotenv: Record<string, string> = {};
+  try {
+    dotenv = loadSync({ export: false });
+  } catch {
+    // .env を読めない環境（権限なし等）では環境変数だけを使う
+  }
+  const read = (key: string): string => (dotenv[key] ?? Deno.env.get(key) ?? "").trim();
+  const servers: IceServer[] = [{ urls: STUN_URL }];
+  const urls = read("TURN_URL");
+  const username = read("TURN_USER");
+  const credential = read("TURN_PASS");
+  if (urls !== "" && username !== "" && credential !== "") {
+    servers.push({ urls, username, credential });
+  }
+  return servers;
+}
+
+/** 起動時に作った応答本文をそのまま返す。認証情報を含むため保存させない */
+function iceResponse(body: string): Response {
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer",
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // サーバー起動
 // ---------------------------------------------------------------------------
 
@@ -288,9 +340,17 @@ export type ServerHandle = {
 /** サーバーを起動する。port に 0 を渡すと空きポートを自動で選ぶ */
 export function startServer(port = 8000, hostname = "127.0.0.1"): ServerHandle {
   const manager = new RoomManager();
+  // 環境変数の読込は起動時の1回だけにする
+  const iceBody = JSON.stringify({ iceServers: buildIceServers() });
   const server = Deno.serve({ port, hostname, onListen: () => {} }, (req) => {
     const url = new URL(req.url);
     if (url.pathname === "/ws") return handleWebSocket(req, manager);
+    if (url.pathname === "/api/ice") {
+      if (req.method !== "GET") {
+        return new Response("method not allowed", { status: 405, headers: { allow: "GET" } });
+      }
+      return iceResponse(iceBody);
+    }
     // TODO(チーム分担): §4.0 HTTP API（/api/auth/*, /api/me, /api/rooms, /api/games/*）
     return handleStatic(req);
   });

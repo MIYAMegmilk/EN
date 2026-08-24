@@ -13,8 +13,9 @@
  * 状態遷移関数（engine.reduce）の呼び出しは同期文脈で行う。このファイルには
  * await を書かない。
  *
- * 軽量スコープ: 認証・公開ルーム・ノック・キック・VC・importGame・24時間自動削除は未実装。
+ * 軽量スコープ: 認証・公開ルーム・ノック・キック・importGame・24時間自動削除は未実装。
  * 接続点は `TODO(チーム分担)` として記してある。
+ * VC は rtcSignal の中継のみを受け持つ（§3.6。接続の確立はクライアント側）。
  * §3.8 の WS レート制限（1接続あたり 20件/秒）は main.ts の WebSocket 層で実装済み。
  */
 
@@ -538,6 +539,10 @@ export class RoomManager {
           state.link,
         );
         return;
+      case "rtcSignal":
+        // 中継条件を満たさない場合は黙って破棄する（§3.6 / §3.8）
+        this.relayRtcSignal(entry, player, msg);
+        return;
       case "chat":
         this.handleChat(entry, state, player, msg.text, now);
         return;
@@ -549,14 +554,39 @@ export class RoomManager {
       case "kick":
       // TODO(チーム分担): §3.5 importGame（共有コードから availableGames に追加）
       case "importGame":
-      // TODO(チーム分担): §3.6 rtcSignal（to が同一ルームの接続中メンバーのときのみ中継）
-      case "rtcSignal":
         sendError(state.link, "INVALID_INPUT", NOT_IMPLEMENTED_MESSAGE);
         return;
       default:
         sendError(state.link, "INVALID_INPUT", NOT_IMPLEMENTED_MESSAGE);
         return;
     }
+  }
+
+  /**
+   * VC シグナリングを宛先へ中継する（§3.6 / §3.8）。
+   * 中継するのは「送信者と同一ルームに在籍し、接続中で、双方が VC 枠に入っている」相手のみ。
+   * それ以外（自分宛・不在・切断中・VC 枠外・型不正）は黙って破棄する。
+   * シグナリングは競合で宛先が消えることが正常系のため、エラーは返さない。
+   * payload はサーバーでは解釈せずそのまま転送する。
+   */
+  private relayRtcSignal(
+    entry: RoomEntry,
+    sender: Player,
+    msg: Extract<C2S, { t: "rtcSignal" }>,
+  ): void {
+    if (typeof msg.to !== "string" || msg.to === sender.id) return;
+    if (!entry.room.players.has(msg.to)) return;
+    const target = entry.links.get(msg.to);
+    if (target === undefined) return;
+    if (!this.isVcEligible(entry, sender.id)) return;
+    if (!this.isVcEligible(entry, msg.to)) return;
+    target.send({ t: "rtcSignal", from: sender.id, payload: msg.payload });
+  }
+
+  /** VC 枠（参加順 6 人まで）に入っているか（§3.1） */
+  private isVcEligible(entry: RoomEntry, playerId: string): boolean {
+    const index = [...entry.room.players.keys()].indexOf(playerId);
+    return index >= 0 && index < VC_CAPACITY;
   }
 
   /** ホストかどうかを検証する。非ホストには NOT_HOST を返す */
@@ -900,14 +930,13 @@ export class RoomManager {
 
   /** 他の参加者にも見せてよい形に変換する（§3.2 原則3） */
   private toPublic(entry: RoomEntry, player: Player): PlayerPublic {
-    const index = [...entry.room.players.keys()].indexOf(player.id);
     return {
       id: player.id,
       nickname: player.nickname,
       connected: player.connected,
       isHost: entry.room.hostId === player.id,
       score: player.score,
-      vcEligible: index >= 0 && index < VC_CAPACITY,
+      vcEligible: this.isVcEligible(entry, player.id),
     };
   }
 }

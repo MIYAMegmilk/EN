@@ -1,0 +1,3 @@
+# 改行コードを LF に統一する（deno fmt が LF 前提のため）
+# Windows でもエディタ・Deno とも LF で問題なく動作する
+* text=auto eol=lf
