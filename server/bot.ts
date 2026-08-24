@@ -12,6 +12,12 @@
  * 仕様書との差分（§3.10 の改訂をチームに要請中）:
  *   - 「bot はルームに1体まで」→ 役割の違う3体にする
  *   - 「10分あたり最大5発話」→ ぐっちーにのみ適用。せり（川柳）は無制限
+ *   - 「チャット・ゲーム操作が3分ない場合に沈黙」→ VC の文字起こしも活動に数える
+ *
+ * 通話対応（docs/design/bot-voice.md）:
+ *   各参加者のブラウザが自分のマイクを文字起こしして送ってくる発言を
+ *   source: "voice" として受け取り、そこから川柳を拾う。**bot が喋るのは
+ *   あくまでチャットのみ**（§3.10 / 設計書§3）。音声合成は使わない。
  */
 
 import {
@@ -31,6 +37,7 @@ import {
   ROUND_REACTION_TEXTS,
   SENRYU_EXACT_TEXTS,
   SENRYU_LOOSE_TEXTS,
+  SENRYU_VOICE_TEXTS,
   TOPIC_CARDS,
   type TopicCard,
 } from "./bot_templates.ts";
@@ -79,6 +86,15 @@ export const END_POLL_MAX = 2;
 export const END_POLL_MIN_AGE_MS = 45 * 60_000;
 /** せりが「同じ川柳」と見なして黙る、直近の記憶件数 */
 export const SENRYU_MEMORY = 5;
+/**
+ * 声で拾った句のあと、せりが次に声へ反応するまで空ける間隔（ミリ秒）。
+ *
+ * チャットのせりは無制限でよい。人が 5-7-5 を打ち込むのは意図的な行為で、
+ * 数もたかが知れているためである。声はそうではない。呑み会の会話は
+ * 止まらないので、文字起こしは1人あたり数秒に1件のペースで流れ込む。
+ * 偶然の 5-7-5 を全部拾うと、せりが会話に割り込み続けることになる。
+ */
+export const SERI_VOICE_COOLDOWN_MS = 90_000;
 /** チャットに引用する1句の最大文字数。ユーザー入力を流し戻すための保険（§3.8） */
 export const QUOTE_LINE_MAX = 40;
 
@@ -171,6 +187,11 @@ export type BotState = {
   seri: {
     /** 直近に拾った川柳の読み（新しい順）。同じものを拾い直したら黙る */
     recentYomi: string[];
+    /**
+     * 最後に「声の句」を拾った時刻。SERI_VOICE_COOLDOWN_MS の起点。
+     * チャットの句では進めない（打った句と喋った句で別枠に数える）。
+     */
+    lastVoiceAt: number | null;
   };
   /** ぐっちーの状態 */
   gucchi: {
@@ -201,7 +222,7 @@ export function createBotState(now: number): BotState {
     lastHumanAt: now,
     lastActivityAt: now,
     lobbySince: now,
-    seri: { recentYomi: [] },
+    seri: { recentYomi: [], lastVoiceAt: null },
     gucchi: {
       utteranceTimes: [],
       silenceStreak: 0,
@@ -219,7 +240,16 @@ export function createBotState(now: number): BotState {
 // 入出力
 // ---------------------------------------------------------------------------
 
-/** 発言がどこから来たか。voice は VC の文字起こし（v1 は未使用、差し込み口のみ） */
+/**
+ * 発言がどこから来たか。
+ *
+ *   chat  … テキストチャット（§3.9）。本人が打った文字なので額面どおり信じてよい
+ *   voice … VC の文字起こし（§3.6 + docs/design/bot-voice.md）。各参加者の
+ *           ブラウザが自分のマイクだけを認識した結果で、聞き違いが混ざる
+ *
+ * どちらも「人間の活動」なので沈黙タイマー（§3.10）は同じように進める。
+ * 違いが出るのはせりの拾い方だけ（senryuUtterance を参照）。
+ */
 export type MessageSource = "chat" | "voice";
 
 /** bot に伝えるルームの出来事 */
@@ -365,23 +395,51 @@ function clamp(text: string, max: number): string {
   return chars.length <= max ? text : `${chars.slice(0, max - 1).join("")}…`;
 }
 
-/** 川柳を拾ったときの発話を作る。拾わないときは null */
+/**
+ * 川柳を拾ったときの発話を作る。拾わないときは null。
+ *
+ * 声（source: "voice"）はチャットより厳しく絞る。理由は2つある:
+ *
+ *   1. 文字起こしは聞き違いを含む。読点も改行もない喋り言葉が長い1本の
+ *      文字列で届くので、字余り・字足らずまで許すと「たまたま 4-8-6 に
+ *      割れただけの雑談」を毎回拾ってしまう。声はぴったり 5-7-5 だけにする。
+ *   2. 会話は止まらない。1件ずつは正しくても、拾うたびに割り込まれると
+ *      場が壊れる。SERI_VOICE_COOLDOWN_MS のあいだは声の句を見送る。
+ *
+ * クールダウンは川柳判定より先に見る。判定（形態素解析）が解析コストの大半で、
+ * 文字起こしは1人あたり数秒に1件のペースで流れ込むためである。
+ */
 function senryuUtterance(
   state: BotState,
   event: Extract<BotEvent, { t: "message" }>,
   ctx: BotContext,
-): { utterance: BotUtterance; yomi: string } | null {
+): { utterance: BotUtterance; yomi: string; voice: boolean } | null {
   if (!state.enabled.seri) return null;
+  const voice = event.source === "voice";
+  if (
+    voice && state.seri.lastVoiceAt !== null &&
+    ctx.now - state.seri.lastVoiceAt < SERI_VOICE_COOLDOWN_MS
+  ) {
+    return null;
+  }
   const match = ctx.senryu(event.text);
   if (match === null) return null;
+  // 声の字余り・字足らずは聞き違いと区別できないので拾わない
+  if (voice && !match.exactPattern) return null;
   const yomi = match.yomi.join("");
   // 直近に拾ったものと同じ川柳なら黙る（コピペ連投の洪水だけ防ぐ。回数制限はしない）
   if (state.seri.recentYomi.includes(yomi)) return null;
-  const text = match.exactPattern
-    ? pick(SENRYU_EXACT_TEXTS, ctx.rng)
-    : fill(pick(SENRYU_LOOSE_TEXTS, ctx.rng), { shape: shapeLabel(match.morae) });
+  let text: string;
+  if (voice) {
+    text = pick(SENRYU_VOICE_TEXTS, ctx.rng);
+  } else if (match.exactPattern) {
+    text = pick(SENRYU_EXACT_TEXTS, ctx.rng);
+  } else {
+    text = fill(pick(SENRYU_LOOSE_TEXTS, ctx.rng), { shape: shapeLabel(match.morae) });
+  }
   return {
     yomi,
+    voice,
     utterance: {
       botId: "seri",
       kind: "senryu",
@@ -699,11 +757,17 @@ export function reduce(state: BotState, event: BotEvent, ctx: BotContext): BotRe
       const recentYomi = senryu === null
         ? state.seri.recentYomi
         : [senryu.yomi, ...state.seri.recentYomi].slice(0, SENRYU_MEMORY);
+      // 声のクールダウンは「声で拾えたとき」だけ進める。チャットの句や
+      // 見送った声で進めると、実際には黙っているのに次の句まで待たせてしまう
+      const lastVoiceAt = senryu !== null && senryu.voice ? ctx.now : state.seri.lastVoiceAt;
       const next: BotState = {
         ...state,
+        // 文字起こしの発言も人間の活動として数える。ここが voice 対応の要で、
+        // これがないと「全員が声で盛り上がっている部屋」をぐっちーが沈黙と
+        // 誤判定し、話題カード→ゲーム提案→お開きの打診まで進んでしまう（§3.10）
         lastActivityAt: ctx.now,
         lastHumanAt: ctx.now,
-        seri: { recentYomi },
+        seri: { recentYomi, lastVoiceAt },
         gucchi: { ...state.gucchi, silenceStreak: 0 },
       };
       // せりは発話枠を消費しない（回数無制限）
