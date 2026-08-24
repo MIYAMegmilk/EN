@@ -35,7 +35,7 @@ import {
   type TopicCard,
 } from "./bot_templates.ts";
 import { SENRYU_PATTERN, type SenryuMatch } from "./senryu.ts";
-import type { ErrorCode, Phase } from "./types.ts";
+import type { BotCard, BotKind, ErrorCode, Phase } from "./types.ts";
 import { NICKNAME_MAX } from "./types.ts";
 
 export { BOT_IDS, type BotId, BOTS } from "./bot_templates.ts";
@@ -86,34 +86,11 @@ export const QUOTE_LINE_MAX = 40;
 // 発話
 // ---------------------------------------------------------------------------
 
-/** 発話の種類 */
-export type BotKind =
-  | "naming"
-  | "senryu"
-  | "greeting"
-  | "topic"
-  | "gameSuggest"
-  | "endPoll"
-  | "closing"
-  | "pollContinue"
-  | "reaction"
-  | "finalReaction";
-
-/** テロップ演出のためにクライアントへ添える情報 */
-export type BotCard =
-  | {
-    c: "senryu";
-    /** 上句・中句・下句 */
-    lines: [string, string, string];
-    /** 各句の実モーラ数 */
-    morae: [number, number, number];
-    /** ちょうど 5-7-5 だったか */
-    exact: boolean;
-    /** 詠んだ人のあだ名 */
-    author: string;
-  }
-  | { c: "gameSuggest"; gameId: string; gameTitle: string }
-  | { c: "endPoll"; pollId: string; deadline: number };
+/**
+ * 発話の種類・テロップ演出データの正本は types.ts（§4.3）。
+ * S2C の ChatMessage にそのまま載るワイヤ型なので、型の正本側に置いてある。
+ */
+export type { BotCard, BotKind };
 
 /** bot 1発話 */
 export type BotUtterance = {
