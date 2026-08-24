@@ -38,12 +38,12 @@ async function callApi(path, options) {
 
 async function refreshMe() {
   const { ok, body } = await callApi("/api/me");
-  const el = $("me-result");
   if (ok && body && typeof body.userId === "string") {
-    el.textContent = `ログイン中: ${body.userId}`;
-  } else {
-    el.textContent = "未ログイン";
+    // ログイン済みならこの画面に留まらず index.html へ進む
+    location.href = "/index.html";
+    return;
   }
+  $("me-result").textContent = "未ログイン";
 }
 
 $("register").addEventListener("click", async () => {
@@ -76,12 +76,6 @@ $("login").addEventListener("click", async () => {
   } else {
     showError(`ログインに失敗しました (${status}): ${body?.error ?? "unknown error"}`);
   }
-});
-
-$("logout").addEventListener("click", async () => {
-  await callApi("/api/auth/logout", { method: "POST" });
-  showStatus("ログアウトしました");
-  await refreshMe();
 });
 
 refreshMe();
