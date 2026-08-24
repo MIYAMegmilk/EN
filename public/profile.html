@@ -3,93 +3,122 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>宴 -EN-（プロフィール編集・開発用動作確認ページ）</title>
+    <title>宴 -EN- 身支度</title>
+    <link rel="stylesheet" href="./assets/en.css" />
     <style>
-      /* 開発用の最小限の見た目。本番の画面は別途デザインする */
-      body {
-        font-family: system-ui, sans-serif;
+      /*
+       * 要素の ID は profile.js が参照しているため変えない。
+       * 配色・部品は assets/en.css の共通トークンを使う（index.html / login.html と揃える）。
+       */
+      main {
+        max-width: 480px;
         margin: 0 auto;
-        padding: 1rem;
-        max-width: 30rem;
-        line-height: 1.6;
+        padding: 26px 20px 60px;
       }
-      h1 {
-        font-size: 1.2rem;
+
+      .sheet {
+        padding: 26px 26px 30px;
       }
-      h2 {
-        font-size: 1rem;
-        margin: 1.2rem 0 0.4rem;
+
+      .sheet h1 {
+        font-family: var(--serif);
+        font-size: 24px;
+        margin: 0 0 8px;
+        color: var(--cream);
+        letter-spacing: 0.05em;
       }
-      section {
-        border: 1px solid #ccc;
-        border-radius: 6px;
-        padding: 0.6rem 0.8rem;
-        margin-bottom: 0.8rem;
+
+      .lead {
+        color: var(--muted);
+        font-size: 12.5px;
+        line-height: 1.9;
+        margin: 0 0 20px;
       }
-      label {
-        display: block;
-        font-size: 0.85rem;
-        margin-top: 0.4rem;
+
+      .messages {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-bottom: 16px;
       }
-      input,
-      button {
-        font: inherit;
-        padding: 0.4rem 0.5rem;
+
+      .messages:not(:has(> *:not(:empty))) {
+        margin-bottom: 0;
       }
-      #profile-nickname {
-        width: 100%;
-        box-sizing: border-box;
+
+      #status {
+        color: #a8c58a;
+        font-size: 12.5px;
+        margin: 0;
       }
-      #profile-save {
-        margin-top: 0.6rem;
-        cursor: pointer;
-      }
+
+      /* 趣味タグ。チェックボックスをピル状のトグルとして見せる */
       #profile-tags {
         display: flex;
         flex-wrap: wrap;
-        gap: 0.4rem;
-        margin-top: 0.4rem;
+        gap: 8px;
       }
+
       #profile-tags label {
         display: inline-flex;
         align-items: center;
-        gap: 0.2rem;
-        margin-top: 0;
-        border: 1px solid #ccc;
-        border-radius: 999px;
-        padding: 0.15rem 0.6rem;
-        font-size: 0.85rem;
+        gap: 6px;
+        padding: 6px 14px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-pill);
+        background: var(--panel-3);
+        color: var(--muted);
+        font-size: 12.5px;
+        cursor: pointer;
+        transition: border-color 0.15s, color 0.15s, background 0.15s;
       }
-      .muted {
-        color: #666;
-        font-size: 0.85rem;
+
+      #profile-tags label:hover {
+        border-color: var(--gold-3);
       }
-      #error {
-        color: #b00020;
+
+      #profile-tags input[type="checkbox"] {
+        accent-color: var(--gold);
       }
-      #status {
-        color: #2e7d32;
+
+      #profile-tags label:has(input:checked) {
+        border-color: var(--gold-3);
+        background: linear-gradient(180deg, rgba(230, 166, 63, 0.16), rgba(200, 134, 42, 0.1));
+        color: var(--gold-2);
       }
     </style>
   </head>
-  <body>
-    <h1>宴 -EN- プロフィール編集（開発用動作確認ページ）</h1>
-    <p class="muted">
-      /api/profile の疎通確認だけを目的とした暫定ページです。デザインは別途作成します。
-    </p>
+  <body class="wood">
+    <header class="appbar">
+      <span class="brand">宴 -EN-</span>
+      <span class="spacer"></span>
+      <a href="/index.html" class="btn">お座敷に戻る</a>
+    </header>
 
-    <p id="error" role="alert"></p>
-    <p id="status" role="status"></p>
-    <p class="muted"><a href="/index.html">ルーム一覧に戻る</a></p>
+    <main>
+      <div class="card sheet">
+        <p class="eyebrow">PROFILE</p>
+        <h1>身支度</h1>
+        <p class="lead">あだ名と趣味タグを整えて、卓に出てください。</p>
 
-    <section id="profile-section">
-      <h2>軽量プロフィール</h2>
-      <label for="profile-nickname">あだ名（20文字以内）</label>
-      <input id="profile-nickname" maxlength="20" autocomplete="off" />
-      <label>趣味タグ（最大5個・プリセットから選択）</label>
-      <div id="profile-tags"></div>
-      <button id="profile-save" type="button">保存</button>
-    </section>
+        <div class="messages">
+          <p id="error" class="alert" role="alert"></p>
+          <p id="status" role="status"></p>
+        </div>
+
+        <section id="profile-section">
+          <div class="field">
+            <label for="profile-nickname">あだ名（20文字以内）</label>
+            <input class="input" id="profile-nickname" maxlength="20" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label>趣味タグ（最大5個・プリセットから選択）</label>
+            <div id="profile-tags"></div>
+          </div>
+          <button id="profile-save" class="btn btn-gold btn-block" type="button">保存</button>
+        </section>
+      </div>
+    </main>
 
     <script src="./profile.js"></script>
   </body>
