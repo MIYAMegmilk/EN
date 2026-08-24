@@ -347,6 +347,11 @@ export type SandboxGameState = {
   startedBy: string;
   /** 開始時刻（epoch ms）。途中参加者の表示に使う */
   startedAt: number;
+  /**
+   * 受信者本人にだけ入る秘密の番号（0 〜 開始時点の参加人数-1 の一意な値）。
+   * 途中参加者は null。他人の値は絶対に送らない（§3.2 原則3）
+   */
+  yourSecret: number | null;
 };
 
 /** マニフェストの1件。GET /api/sandboxGames が返す */

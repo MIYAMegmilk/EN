@@ -1390,3 +1390,231 @@ Deno.test("退室: 全員が退室するとサンドボックス稼働中でも�
   assertEquals(manager.roomCount, 0);
   manager.dispose();
 });
+
+// ---------------------------------------------------------------------------
+// サンドボックスゲームの「秘密の番号」配布（人によって配る情報が違うゲーム向け）
+// ---------------------------------------------------------------------------
+
+Deno.test("sandboxStart: 開始時点の参加者全員に 0..N-1 のユニークな秘密の番号が配られる", () => {
+  const { manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
+  const host = createRoom(manager);
+  const guestA = joinRoom(manager, host.snapshot.code, "ゲストA");
+  const guestB = joinRoom(manager, host.snapshot.code, "ゲストB");
+  assertExists(guestA.state);
+  assertExists(guestB.state);
+
+  manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
+
+  const secrets = [host.link, guestA.link, guestB.link].map((link) => {
+    const msg = last(link, "sandboxState");
+    assertExists(msg?.game);
+    return msg.game.yourSecret;
+  });
+  // 0..2（3人）が過不足なく1回ずつ使われる（重複なし・範囲外なし）
+  assertEquals([...secrets].sort(), [0, 1, 2]);
+  manager.dispose();
+});
+
+Deno.test("sandboxStart: 各クライアントは自分の秘密の番号だけを受け取り、他人の値は一切含まれない（§3.2 原則3）", () => {
+  const { manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
+  const host = createRoom(manager);
+  const guestA = joinRoom(manager, host.snapshot.code, "ゲストA");
+  const guestB = joinRoom(manager, host.snapshot.code, "ゲストB");
+  assertExists(guestA.state);
+  assertExists(guestB.state);
+
+  manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
+
+  const links = [host.link, guestA.link, guestB.link];
+  const mine = links.map((link) => {
+    const msg = last(link, "sandboxState");
+    assertExists(msg?.game);
+    // 受信した game オブジェクトはこの4フィールドのみ。他人分の値を運ぶマップ・配列を
+    // 増設する余地が無いことを構造的に確認する
+    assertEquals(
+      Object.keys(msg.game).sort(),
+      ["gameId", "startedAt", "startedBy", "yourSecret"],
+    );
+    return msg.game.yourSecret as number;
+  });
+
+  // 各リンクが受け取った全メッセージ（sandboxState 以外も含む）を検査し、
+  // 自分以外の秘密の番号が yourSecret として一度でも出現しないことを確認する
+  links.forEach((link, i) => {
+    const others = mine.filter((_, j) => j !== i);
+    for (const msg of link.received) {
+      if (msg.t !== "sandboxState" || msg.game === null) continue;
+      assertEquals(msg.game.yourSecret, mine[i]);
+      for (const otherSecret of others) {
+        assert(msg.game.yourSecret !== otherSecret);
+      }
+    }
+  });
+  manager.dispose();
+});
+
+Deno.test("sandboxStart: ホストも他人の秘密の番号を知らない", () => {
+  const { manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
+  const host = createRoom(manager);
+  const guestA = joinRoom(manager, host.snapshot.code, "ゲストA");
+  const guestB = joinRoom(manager, host.snapshot.code, "ゲストB");
+  assertExists(guestA.state);
+  assertExists(guestB.state);
+
+  manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
+
+  const hostSecret = last(host.link, "sandboxState")?.game?.yourSecret;
+  const aSecret = last(guestA.link, "sandboxState")?.game?.yourSecret;
+  const bSecret = last(guestB.link, "sandboxState")?.game?.yourSecret;
+  assertExists(hostSecret);
+  assertExists(aSecret);
+  assertExists(bSecret);
+  // 3人とも異なる値を持っている（= ホストが受け取ったのは自分の値だけ）
+  assertEquals(new Set([hostSecret, aSecret, bSecret]).size, 3);
+  // ホストが受け取った全メッセージを検査しても、ゲストの値が一度も現れない
+  for (const msg of all(host.link, "sandboxState")) {
+    if (msg.game === null) continue;
+    assertFalse(msg.game.yourSecret === aSecret);
+    assertFalse(msg.game.yourSecret === bSecret);
+  }
+  manager.dispose();
+});
+
+Deno.test("再接続: サンドボックス稼働中に再接続すると自分の秘密の番号がスナップショットから復元される（§3.2）", () => {
+  const { clock, manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
+  const host = createRoom(manager);
+  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
+  assertExists(guest.state);
+  const session = guest.state.snapshot.session;
+  assertExists(session);
+
+  manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
+  const before = last(guest.link, "sandboxState")?.game?.yourSecret;
+  assertExists(before);
+
+  manager.disconnect(guest.link);
+  clock.advance(30_000);
+  const back = new MockLink();
+  manager.handle(back, {
+    t: "join",
+    roomCode: host.snapshot.code,
+    nickname: "ゲスト",
+    session,
+  });
+  const restored = last(back, "roomState");
+  assertExists(restored);
+  assertEquals(restored.snapshot.sandbox?.yourSecret, before);
+  manager.dispose();
+});
+
+Deno.test("sandboxStart: 開始後に参加した人の yourSecret は null（開始時のシャッフルに入っていない）", () => {
+  const { manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
+  const host = createRoom(manager);
+  manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
+
+  const late = joinRoom(manager, host.snapshot.code, "あとから");
+  assertExists(late.state);
+  assertEquals(late.state.snapshot.sandbox?.gameId, "reflex");
+  assertEquals(late.state.snapshot.sandbox?.yourSecret, null);
+  manager.dispose();
+});
+
+Deno.test("sandboxEnd: 配布済みの秘密の番号（内部状態）が破棄される（メモリリーク防止の回帰）", () => {
+  const { manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
+  const host = createRoom(manager);
+  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
+  assertExists(guest.state);
+  manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
+
+  // sandboxSecrets は rooms.ts 内の private フィールド（TS 上の型のみの private）なので、
+  // メモリリークの回帰確認のためだけにここで直接覗く（voiceTimes のテストと同じ手法）
+  type RoomsInternal = { rooms: Map<string, { sandboxSecrets: Map<string, number> }> };
+  const internalEntry = (manager as unknown as RoomsInternal).rooms.get(host.snapshot.code);
+  assertExists(internalEntry);
+  assertEquals(internalEntry.sandboxSecrets.size, 2);
+
+  manager.handle(host.link, { t: "sandboxEnd" });
+  assertEquals(internalEntry.sandboxSecrets.size, 0);
+  manager.dispose();
+});
+
+Deno.test("sandboxEnd → sandboxStart: 終了後の再開始で新しいシャッフルが配り直される", () => {
+  const { manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
+  const host = createRoom(manager);
+  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
+  assertExists(guest.state);
+
+  manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
+  assertExists(last(guest.link, "sandboxState")?.game?.yourSecret);
+
+  manager.handle(host.link, { t: "sandboxEnd" });
+  assertEquals(last(guest.link, "sandboxState")?.game, null);
+
+  // 終了中に参加した人は、以前の開始時シャッフルの対象になっていない（null のまま）
+  const another = joinRoom(manager, host.snapshot.code, "べつのひと");
+  assertExists(another.state);
+  assertEquals(another.state.snapshot.sandbox, null);
+
+  // 再開始すると、そのときの参加者全員（host / guest / another）に新しいシャッフルが配られる
+  manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
+  const secrets = [host.link, guest.link, another.link].map((link) =>
+    last(link, "sandboxState")?.game?.yourSecret
+  );
+  assertEquals([...secrets].sort(), [0, 1, 2]);
+  manager.dispose();
+});
+
+Deno.test("退室: サンドボックス稼働中に退室すると、その人の秘密の番号（内部状態）が掃除される（メモリリーク防止の回帰）", () => {
+  const { manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
+  const host = createRoom(manager);
+  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
+  assertExists(guest.state);
+  const guestId = guest.state.snapshot.youId;
+  manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
+
+  type RoomsInternal = { rooms: Map<string, { sandboxSecrets: Map<string, number> }> };
+  const internalEntry = (manager as unknown as RoomsInternal).rooms.get(host.snapshot.code);
+  assertExists(internalEntry);
+  assert(internalEntry.sandboxSecrets.has(guestId));
+
+  manager.handle(guest.link, { t: "leave" });
+  assert(!internalEntry.sandboxSecrets.has(guestId));
+  manager.dispose();
+});
+
+Deno.test("sandboxStart: 1人だけのルームでも成立する（yourSecret は 0）", () => {
+  const { manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
+  const host = createRoom(manager);
+  manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
+  const msg = last(host.link, "sandboxState");
+  assertExists(msg?.game);
+  assertEquals(msg.game.yourSecret, 0);
+  manager.dispose();
+});
+
+Deno.test("sandboxStart: シャッフルが偏っていない（多数回試行すれば同じ人が各値を取りうる）", () => {
+  const { manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
+  const host = createRoom(manager);
+  const guestA = joinRoom(manager, host.snapshot.code, "ゲストA");
+  const guestB = joinRoom(manager, host.snapshot.code, "ゲストB");
+  const guestC = joinRoom(manager, host.snapshot.code, "ゲストC");
+  assertExists(guestA.state);
+  assertExists(guestB.state);
+  assertExists(guestC.state);
+
+  // 常に同じ並びになる実装ミス（例: 常に登録順=0,1,2,3 を配るだけ）を検出できればよいので、
+  // 厳密な統計検定はせず「host の値が試行を通じて 0..3 のすべてを取りうるか」だけを見る
+  const seenByHost = new Set<number>();
+  const TRIALS = 200;
+  for (let i = 0; i < TRIALS; i++) {
+    manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
+    const secret = last(host.link, "sandboxState")?.game?.yourSecret;
+    assertExists(secret);
+    seenByHost.add(secret);
+    manager.handle(host.link, { t: "sandboxEnd" });
+  }
+  // 4人ルームなので host の値は 0..3 のいずれか。200回試行すれば全パターンが出るはず
+  // （一様乱数なら1つでも出ない確率は 4×(3/4)^200 ≈ 0、実装ミスなら確実に検出できる）
+  assertEquals([...seenByHost].sort(), [0, 1, 2, 3]);
+  manager.dispose();
+});

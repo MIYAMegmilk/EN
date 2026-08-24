@@ -47,6 +47,7 @@ import {
   type RoomSnapshot,
   type S2C,
   SANDBOX_PAYLOAD_MAX_BYTES,
+  type SandboxGameState,
   type ScoreEntry,
   type ScoringMode,
   VC_CAPACITY,
@@ -205,6 +206,13 @@ type RoomEntry = {
   chatTimes: Map<string, number[]>;
   /** 文字起こしのレート制限用。playerId → 判定窓内の受信時刻（古い順、docs/design/bot-voice.md） */
   voiceTimes: Map<string, number[]>;
+  /**
+   * サンドボックスゲーム開始時に配った秘密の番号（playerId → 0..N-1 のシャッフル値）。
+   * 「人によって配る情報が違う」ゲーム（ワードウルフ等）向け。仕様上のデータモデル（Room）には
+   * 入れず、chatTimes / voiceTimes と同じ扱いのランタイム専用状態とする。
+   * 途中参加者はここに存在しない（= yourSecret は null として扱う）
+   */
+  sandboxSecrets: Map<string, number>;
   /** bot 3体の状態（§3.10） */
   bot: BotState;
   /** bot への定期 tick タイマー */
@@ -290,6 +298,31 @@ function randomRoomCode(): string {
       return String(buf[0] % range).padStart(ROOM_CODE_LENGTH, "0");
     }
   }
+}
+
+/**
+ * 0 以上 exclusiveMax 未満の整数を暗号論的乱数で返す（剰余バイアスを避けるため再抽選する）。
+ * randomRoomCode と同じ「再抽選で剰余バイアスを消す」手法を汎用化したもの
+ */
+function randomInt(exclusiveMax: number): number {
+  const buf = new Uint32Array(1);
+  const limit = Math.floor(0x1_0000_0000 / exclusiveMax) * exclusiveMax;
+  for (;;) {
+    crypto.getRandomValues(buf);
+    if (buf[0] < limit) return buf[0] % exclusiveMax;
+  }
+}
+
+/**
+ * Fisher-Yates で配列を破壊的にシャッフルする（乱数は randomInt を使い剰余バイアスを避ける）。
+ * サンドボックスゲームの「秘密の番号」配布（0..N-1 の一意な割り当て）に使う
+ */
+function shuffleInPlace<T>(values: T[]): T[] {
+  for (let i = values.length - 1; i > 0; i--) {
+    const j = randomInt(i + 1);
+    [values[i], values[j]] = [values[j], values[i]];
+  }
+  return values;
 }
 
 // ---------------------------------------------------------------------------
@@ -507,6 +540,7 @@ export class RoomManager {
       graceTimers: new Map(),
       chatTimes: new Map(),
       voiceTimes: new Map(),
+      sandboxSecrets: new Map(),
       bot: createBotState(now),
       botTimer: null,
       botPollTimer: null,
@@ -855,6 +889,13 @@ export class RoomManager {
    * 冪等であり、エラー自体は都度返す。§8.1 の「二重 sandboxStart は DUPLICATE」に対応）。
    * gameId は sandboxGameIds のホワイトリスト（main.ts がマニフェストから起動時に構築）に
    * 無ければ INVALID_INPUT（未知の gameId・dev ゲームの本番指定を含む、§6.2）。
+   *
+   * 開始時点の参加者へ「一意な秘密の番号」（0..N-1 のシャッフル）を1人1つ配る。
+   * 「人によって配る情報が違う」ゲーム（ワードウルフ等）を成立させるための仕組みで、
+   * サーバーはゲームのルール（gameId の中身）を一切知らないまま配る（§3.2 原則3）。
+   * 値は entry.sandboxSecrets（ランタイム専用・Room 型には入れない）に保持し、
+   * room.sandbox 自体には持たせない（yourSecret は常に null の "canonical" な形を保つ）。
+   * 送信直前に受信者ごとへ差し替える（sandboxStateFor / broadcastPhase と同じ作り方）
    */
   private handleSandboxStart(
     entry: RoomEntry,
@@ -880,20 +921,43 @@ export class RoomManager {
       sendError(state.link, "INVALID_INPUT", "選択できるサンドボックスゲームではありません");
       return;
     }
-    room.sandbox = { gameId: msg.gameId, startedBy: state.playerId, startedAt: now };
-    this.broadcast(entry, { t: "sandboxState", game: room.sandbox });
+    room.sandbox = {
+      gameId: msg.gameId,
+      startedBy: state.playerId,
+      startedAt: now,
+      yourSecret: null,
+    };
+    entry.sandboxSecrets.clear();
+    const playerIds = [...room.players.keys()];
+    const shuffled = shuffleInPlace(playerIds.map((_, i) => i));
+    playerIds.forEach((id, i) => entry.sandboxSecrets.set(id, shuffled[i]));
+    for (const [playerId, link] of entry.links) {
+      link.send({ t: "sandboxState", game: this.sandboxStateFor(entry, playerId) });
+    }
   }
 
   /**
    * サンドボックスゲームの終了（ホストのみ、§5.1）。
    * 稼働していないときは何もしない（冪等。仕様書に明記が無いため報告に記載する判断）。
+   * 配布済みの秘密の番号もここで破棄する
    */
   private handleSandboxEnd(entry: RoomEntry, state: LinkState): void {
     if (!this.requireHost(entry, state)) return;
     const room = entry.room;
     if (room.sandbox === null) return;
     room.sandbox = null;
+    entry.sandboxSecrets.clear();
     this.broadcast(entry, { t: "sandboxState", game: null });
+  }
+
+  /**
+   * 受信者向けの SandboxGameState。yourSecret を本人の値だけに差し替える（§3.2 原則3）。
+   * entry.sandboxSecrets に無ければ途中参加者とみなし null を入れる
+   */
+  private sandboxStateFor(entry: RoomEntry, playerId: string): SandboxGameState | null {
+    const sandbox = entry.room.sandbox;
+    if (sandbox === null) return null;
+    return { ...sandbox, yourSecret: entry.sandboxSecrets.get(playerId) ?? null };
   }
 
   /**
@@ -1315,6 +1379,8 @@ export class RoomManager {
     // レート制限の記録も参加者と一緒に破棄する
     entry.chatTimes.delete(playerId);
     entry.voiceTimes.delete(playerId);
+    // 配布済みの秘密の番号も一緒に破棄する（メモリリーク防止）
+    entry.sandboxSecrets.delete(playerId);
     const link = entry.links.get(playerId);
     entry.links.delete(playerId);
     if (link !== undefined) {
@@ -1344,6 +1410,7 @@ export class RoomManager {
     entry.links.clear();
     entry.chatTimes.clear();
     entry.voiceTimes.clear();
+    entry.sandboxSecrets.clear();
     this.rooms.delete(entry.room.code);
   }
 
@@ -1434,7 +1501,7 @@ export class RoomManager {
       bots: { ...entry.bot.enabled },
       session: viewer.sessionToken,
       serverTime: this.now(),
-      sandbox: room.sandbox,
+      sandbox: this.sandboxStateFor(entry, viewer.id),
     };
     if (room.roomName !== undefined) snapshot.roomName = room.roomName;
     // 集計中のアンケートは再接続でも復元する。締切だけ渡し、投票済みかは持たせない
