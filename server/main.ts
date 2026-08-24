@@ -448,7 +448,11 @@ export function startServer(
 
 if (import.meta.main) {
   const port = Number(Deno.env.get("PORT") ?? "8000");
-  const kv = await Deno.openKv();
+  // KV_PATH で保存先を指定できるようにする。未設定なら undefined が渡り、従来どおり
+  // Deno の既定位置（~/.cache/deno/ 配下）になる。既定位置はキャッシュ扱いのディレクトリ
+  // のため、deno のキャッシュ削除や OS の掃除で消える可能性がある。本番はアカウント・
+  // 認証セッション・ゲーム定義・共有コードを失わないよう永続ディレクトリを指定する。
+  const kv = await Deno.openKv(Deno.env.get("KV_PATH"));
   const handle = startServer(Number.isInteger(port) && port > 0 ? port : 8000, "127.0.0.1", kv);
   console.log(`宴 -EN- server listening on http://localhost:${handle.port}/`);
 }
