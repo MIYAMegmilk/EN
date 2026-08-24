@@ -80,6 +80,7 @@ async function refreshAccount() {
   $("account-status").textContent = loggedIn ? `ログイン中: ${body.userId}` : "未ログイン";
   $("logout").classList.toggle("hidden", !loggedIn);
   $("login-link").classList.toggle("hidden", loggedIn);
+  $("profile-link").classList.toggle("hidden", !loggedIn);
 }
 
 /** サーバーへ送る */

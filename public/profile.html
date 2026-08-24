@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>宴 -EN-（プロフィール編集・開発用動作確認ページ）</title>
+    <style>
+      /* 開発用の最小限の見た目。本番の画面は別途デザインする */
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 0 auto;
+        padding: 1rem;
+        max-width: 30rem;
+        line-height: 1.6;
+      }
+      h1 {
+        font-size: 1.2rem;
+      }
+      h2 {
+        font-size: 1rem;
+        margin: 1.2rem 0 0.4rem;
+      }
+      section {
+        border: 1px solid #ccc;
+        border-radius: 6px;
+        padding: 0.6rem 0.8rem;
+        margin-bottom: 0.8rem;
+      }
+      label {
+        display: block;
+        font-size: 0.85rem;
+        margin-top: 0.4rem;
+      }
+      input,
+      button {
+        font: inherit;
+        padding: 0.4rem 0.5rem;
+      }
+      #profile-nickname {
+        width: 100%;
+        box-sizing: border-box;
+      }
+      #profile-save {
+        margin-top: 0.6rem;
+        cursor: pointer;
+      }
+      #profile-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        margin-top: 0.4rem;
+      }
+      #profile-tags label {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.2rem;
+        margin-top: 0;
+        border: 1px solid #ccc;
+        border-radius: 999px;
+        padding: 0.15rem 0.6rem;
+        font-size: 0.85rem;
+      }
+      .muted {
+        color: #666;
+        font-size: 0.85rem;
+      }
+      #error {
+        color: #b00020;
+      }
+      #status {
+        color: #2e7d32;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>宴 -EN- プロフィール編集（開発用動作確認ページ）</h1>
+    <p class="muted">
+      /api/profile の疎通確認だけを目的とした暫定ページです。デザインは別途作成します。
+    </p>
+
+    <p id="error" role="alert"></p>
+    <p id="status" role="status"></p>
+    <p class="muted"><a href="/index.html">ルーム一覧に戻る</a></p>
+
+    <section id="profile-section">
+      <h2>軽量プロフィール</h2>
+      <label for="profile-nickname">あだ名（20文字以内）</label>
+      <input id="profile-nickname" maxlength="20" autocomplete="off" />
+      <label>趣味タグ（最大5個・プリセットから選択）</label>
+      <div id="profile-tags"></div>
+      <button id="profile-save" type="button">保存</button>
+    </section>
+
+    <script src="./profile.js"></script>
+  </body>
+</html>
