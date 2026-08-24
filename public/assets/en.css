@@ -444,6 +444,29 @@ select {
   line-height: 1.6;
 }
 
+/* 受信した文字起こし（最新1〜2行）。docs/design/bot-voice.md §5.4 決定事項 */
+.voice-lines:empty {
+  display: none;
+}
+
+.voice-lines {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--dim);
+}
+
+.voice-line-nickname {
+  margin-right: 6px;
+  font-weight: 600;
+}
+
+.voice-line-self .voice-line-nickname {
+  color: var(--gold-2);
+}
+
 /* ── bot（しゅんぴ / せり / ぐっちー）表示。docs/design/bot.md §2 / §4 ── */
 .bot-toggles {
   display: flex;
