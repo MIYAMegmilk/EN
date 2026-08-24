@@ -19,11 +19,16 @@ import { getCookies } from "@std/http/cookie";
 import { AuthApi, SESSION_COOKIE_NAME, verifySession } from "./auth.ts";
 import { type ClientLink, RoomManager } from "./rooms.ts";
 import { createSenryuDetector } from "./senryu.ts";
+import { charLength, hasControlChar } from "./validation.ts";
 import {
   type C2S,
+  ROOM_CAPACITY,
   type S2C,
+  type SandboxGameInfo,
   WS_RATE_MAX,
   WS_RATE_WINDOW_MS,
+  WS_SANDBOX_HARD_MAX,
+  WS_SANDBOX_RATE_MAX,
   WS_SIGNAL_HARD_MAX,
   WS_SIGNAL_RATE_MAX,
 } from "./types.ts";
@@ -56,6 +61,9 @@ export const C2S_TYPES: ReadonlySet<string> = new Set([
   "setBot",
   "endPollVote",
   "rtcSignal",
+  "sandboxStart",
+  "sandboxEnd",
+  "sandboxSignal",
   "leave",
 ]);
 
@@ -74,6 +82,50 @@ const SECURITY_HEADERS: ReadonlyArray<[string, string]> = [
       "form-action 'self'",
       "img-src 'self' data:",
       "style-src 'self' 'unsafe-inline'",
+    ].join("; "),
+  ],
+  ["x-content-type-options", "nosniff"],
+  ["referrer-policy", "no-referrer"],
+];
+
+/**
+ * `/sandbox/` 配下（runner）専用のセキュリティヘッダ
+ * （docs/design/game-sandbox.md §2.3 / §2.6 / §7.4）。
+ * このページはユーザーコード（第1段はチーム製だが、悪意あるコードを前提に設計する）を
+ * 実行するため、アプリ本体の SECURITY_HEADERS とは別の、閉じた CSP を張る。
+ * 同じ CSP を runner.html の <meta> にも書く想定だが、正本はこのヘッダー側とする
+ * （meta は frame-ancestors を無視する仕様があり、§7.4 のとおりヘッダーでしか効かない）。
+ *
+ * - `script-src 'self' 'unsafe-eval'`: runner.js の読み込みと、`new Function` による
+ *   ゲームコード評価のため（§2.3）。このページの唯一の役目がユーザーコードの実行なので
+ *   ここだけ許す
+ * - `connect-src 'none'`: fetch / XHR / WebSocket / EventSource / sendBeacon を全面禁止（§2.3）
+ * - `worker-src 'none'`: **書き忘れてはならない**。無いと `script-src` にフォールバックし、
+ *   `new Worker(...)` が通って Worker 自身の CSP（親の connect-src 'none' を継承しない）
+ *   経由で外部通信できてしまう、プロトタイプで実測した穴（§2.4）
+ * - `frame-ancestors 'self'`: アプリ本体は全レスポンスに 'none' を付けているため、
+ *   このままだと自分のページから自分の runner を iframe に入れられない。
+ *   runner だけ 'self' に緩める。同時にこれは「外部サイトが sandbox 属性なしの
+ *   `<iframe>` で runner を埋め込み、アプリのオリジンでユーザーコードを走らせる」経路を
+ *   塞ぐ、同一オリジン配信（§2.6 B）にとって必須の補償措置でもある（§7.4）
+ */
+const SANDBOX_SECURITY_HEADERS: ReadonlyArray<[string, string]> = [
+  [
+    "content-security-policy",
+    [
+      "default-src 'none'",
+      "script-src 'self' 'unsafe-eval'",
+      "script-src-elem 'self'",
+      "style-src 'unsafe-inline'",
+      "img-src data: blob:",
+      "connect-src 'none'",
+      "worker-src 'none'",
+      "child-src 'none'",
+      "frame-src 'none'",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "form-action 'none'",
+      "frame-ancestors 'self'",
     ].join("; "),
   ],
   ["x-content-type-options", "nosniff"],
@@ -208,6 +260,12 @@ async function handleWebSocket(
   // 超過1件ごとに RATE_LIMITED を返すとエラーの増幅になる（100件を超えて送られた分だけ
   // 返信が増える）ため、判定窓（WS_RATE_WINDOW_MS）につき最大1回だけ通知する。
   let signalNoticeAt: number | null = null;
+  // sandboxSignal も rtcSignal と同じ構造の別枠（docs/design/game-sandbox.md §4.3）。
+  // WS は全用途1本共用（§3.2）なので、ゲームの高頻度送信で切断するとチャットも
+  // 既存ゲーム進行も巻き添えで落ちる。ソフト超過は破棄のみ、ハード超過だけ切断する。
+  const sandboxLimiter = new MessageRateLimiter(WS_SANDBOX_RATE_MAX);
+  const sandboxHardLimiter = new MessageRateLimiter(WS_SANDBOX_HARD_MAX);
+  let sandboxNoticeAt: number | null = null;
   socket.onmessage = (event) => {
     const data = event.data;
     if (typeof data !== "string") {
@@ -235,6 +293,7 @@ async function handleWebSocket(
     // 一般枠で数える（数えないとガベージの連投を切断できなくなるため）。
     // ルーム参加前の連打も「1接続あたり」の規定どおり一般枠で数える。
     const isSignal = msg !== null && msg.t === "rtcSignal";
+    const isSandboxSignal = msg !== null && msg.t === "sandboxSignal";
     const windowSec = WS_RATE_WINDOW_MS / 1000;
     // 1003（受理できない種類のデータ）/ 1009（サイズ超過）と区別し、送信ポリシー違反を示す
     // 1008 で閉じる。切断後は onclose → manager.disconnect が走るため、§3.2 の60秒猶予で
@@ -266,6 +325,29 @@ async function handleWebSocket(
             code: "RATE_LIMITED",
             message:
               `シグナリングの送信が多すぎます（${windowSec}秒に${WS_SIGNAL_RATE_MAX}件まで）。超過分は破棄しました`,
+          });
+        }
+        return;
+      }
+    } else if (isSandboxSignal) {
+      // 両方の枠に記録してから判定する（同じ受信列を別々の上限で数える）
+      const withinSoft = sandboxLimiter.accept();
+      const withinHard = sandboxHardLimiter.accept();
+      if (!withinHard) {
+        disconnect(WS_SANDBOX_HARD_MAX);
+        return;
+      }
+      if (!withinSoft) {
+        // ソフト上限の超過は当該メッセージを破棄するだけで切断しない
+        // （docs/design/game-sandbox.md §4.3）。通知は判定窓につき1回に絞る。
+        const at = Date.now();
+        if (sandboxNoticeAt === null || at - sandboxNoticeAt >= WS_RATE_WINDOW_MS) {
+          sandboxNoticeAt = at;
+          link.send({
+            t: "error",
+            code: "RATE_LIMITED",
+            message:
+              `サンドボックスゲームの送信が多すぎます（${windowSec}秒に${WS_SANDBOX_RATE_MAX}件まで）。超過分は破棄しました`,
           });
         }
         return;
@@ -315,7 +397,13 @@ async function handleStatic(req: Request, kv: Deno.Kv | null): Promise<Response>
   const rewritten = new Request(new URL(path + url.search, url.origin), req);
   const res = await serveDir(rewritten, { fsRoot: PUBLIC_DIR, quiet: true });
   const headers = new Headers(res.headers);
-  for (const [key, value] of SECURITY_HEADERS) headers.set(key, value);
+  // /sandbox/ 配下（runner）だけは専用の CSP・frame-ancestors に差し替える
+  // （docs/design/game-sandbox.md §2.6 / §7.4）。他のパスは SECURITY_HEADERS のまま
+  // （frame-ancestors 'none' を維持し、既存への影響を出さない）
+  const securityHeaders = path.startsWith("/sandbox/")
+    ? SANDBOX_SECURITY_HEADERS
+    : SECURITY_HEADERS;
+  for (const [key, value] of securityHeaders) headers.set(key, value);
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
 }
 
@@ -397,6 +485,139 @@ function jsonResponse(body: string): Response {
 }
 
 // ---------------------------------------------------------------------------
+// サンドボックスゲームのマニフェスト（docs/design/game-sandbox.md §6.2）
+// ---------------------------------------------------------------------------
+
+/** マニフェストの id の形式（§6.2） */
+const SANDBOX_GAME_ID_RE = /^[a-z0-9_][a-z0-9_-]{0,31}$/;
+/** タイトル・作者名の最大文字数（§6.2。§3.5 の title と同じ上限） */
+const SANDBOX_NAME_MAX = 20;
+/** 説明文の最大文字数（§6.2。§3.5 の description と同じ上限） */
+const SANDBOX_DESCRIPTION_MAX = 100;
+/** マニフェストに載せられるゲーム数の下限・上限（§6.2） */
+const SANDBOX_GAMES_MIN = 1;
+const SANDBOX_GAMES_MAX = 50;
+
+/** manifest.json の1件の内部表現。公開型 SandboxGameInfo に dev フラグを足したもの */
+type SandboxManifestGame = SandboxGameInfo & { dev: boolean };
+
+/** 文字列フィールドの検証（charLength の範囲・制御文字禁止。§6.2 の title/description/author 共通） */
+function isValidSandboxText(value: unknown, min: number, max: number): value is string {
+  if (typeof value !== "string") return false;
+  const length = charLength(value);
+  return length >= min && length <= max && !hasControlChar(value);
+}
+
+/**
+ * public/games/manifest.json の中身を検証する（§6.2）。
+ * 1件でも規則違反があれば null を返す。ファイル I/O を持たない純粋関数なので、
+ * ディスクを介さずユニットテストできる。
+ */
+export function parseSandboxManifest(raw: string): SandboxManifestGame[] | null {
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return null;
+  const obj = data as Record<string, unknown>;
+  if (obj.version !== 1) return null;
+  const rawGames = obj.games;
+  if (
+    !Array.isArray(rawGames) || rawGames.length < SANDBOX_GAMES_MIN ||
+    rawGames.length > SANDBOX_GAMES_MAX
+  ) {
+    return null;
+  }
+  const seenIds = new Set<string>();
+  const games: SandboxManifestGame[] = [];
+  for (const item of rawGames) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) return null;
+    const g = item as Record<string, unknown>;
+    if (typeof g.id !== "string" || !SANDBOX_GAME_ID_RE.test(g.id) || seenIds.has(g.id)) {
+      return null;
+    }
+    if (!isValidSandboxText(g.title, 1, SANDBOX_NAME_MAX)) return null;
+    if (!isValidSandboxText(g.description, 0, SANDBOX_DESCRIPTION_MAX)) return null;
+    if (g.file !== `${g.id}.js`) return null;
+    if (
+      typeof g.minPlayers !== "number" || !Number.isInteger(g.minPlayers) ||
+      g.minPlayers < 1 || g.minPlayers > ROOM_CAPACITY
+    ) {
+      return null;
+    }
+    if (
+      typeof g.maxPlayers !== "number" || !Number.isInteger(g.maxPlayers) ||
+      g.maxPlayers < g.minPlayers || g.maxPlayers > ROOM_CAPACITY
+    ) {
+      return null;
+    }
+    if (!isValidSandboxText(g.author, 1, SANDBOX_NAME_MAX)) return null;
+    if (g.dev !== undefined && typeof g.dev !== "boolean") return null;
+    seenIds.add(g.id);
+    games.push({
+      id: g.id,
+      title: g.title as string,
+      description: g.description as string,
+      file: g.file,
+      minPlayers: g.minPlayers,
+      maxPlayers: g.maxPlayers,
+      author: g.author as string,
+      dev: g.dev === true,
+    });
+  }
+  return games;
+}
+
+/**
+ * dev:true の項目を EN_SANDBOX_DEV が有効なときだけ残し、公開型 SandboxGameInfo
+ * （dev フラグを含まない、クライアントへ配る形）に変換する（§6.2 / §8.2）。
+ */
+export function filterSandboxGames(
+  games: readonly SandboxManifestGame[],
+  devEnabled: boolean,
+): SandboxGameInfo[] {
+  return games
+    .filter((g) => devEnabled || !g.dev)
+    .map(({ dev: _dev, ...info }) => info);
+}
+
+/** public/games/manifest.json の既定の配置場所 */
+const SANDBOX_MANIFEST_PATH = fromFileUrl(
+  new URL("../public/games/manifest.json", import.meta.url),
+);
+
+/**
+ * サンドボックスゲームの一覧をディスクから読み込む。
+ *
+ * 設計書 §6.2 は「検証に失敗したらサーバーは起動しない（fail fast）」だが、本実装では
+ * サーバー起動そのものは止めず、読み込み・検証に失敗したら0件（空配列）として扱う判断とした。
+ * 理由: 第1段の実装順序（設計書 §9.3）ではサーバー側とフロント（public/games/ 配下）が
+ * 並行作業になるため、public/games/manifest.json がまだ存在しない・作業途中で一時的に
+ * 壊れている状態でサーバー全体を起動不能にすると、無関係な担当（チャット・VC 等）の
+ * 動作確認まで止めてしまう。サンドボックスゲームが0件でも既存機能は成立するため、
+ * 500 やサーバー起動失敗ではなく「サンドボックスゲームなし」に縮退させる。
+ * この判断は仕様書に明記されていない差分のため、実装報告に明記する。
+ */
+function loadSandboxManifestGames(path: string): SandboxManifestGame[] {
+  let raw: string;
+  try {
+    raw = Deno.readTextFileSync(path);
+  } catch {
+    return [];
+  }
+  const parsed = parseSandboxManifest(raw);
+  if (parsed === null) {
+    console.warn(
+      `sandbox: ${path} の検証に失敗しました。サンドボックスゲームは0件として起動します`,
+    );
+    return [];
+  }
+  return parsed;
+}
+
+// ---------------------------------------------------------------------------
 // サーバー起動
 // ---------------------------------------------------------------------------
 
@@ -414,16 +635,33 @@ export type ServerHandle = {
  * サーバーを起動する。port に 0 を渡すと空きポートを自動で選ぶ。
  * kv を省略すると認証 API は 501 を返し、WS 側もログイン済みと判定できないため
  * createRoom は常に AUTH_REQUIRED になる（本番では必ず kv を渡す）。
+ * sandboxManifestPath はテスト用（public/games/manifest.json 以外のパスを読ませる）。
+ * 省略時は既定の配置場所（SANDBOX_MANIFEST_PATH）を読む。
  */
 export function startServer(
   port = 8000,
   hostname = "127.0.0.1",
   kv?: Deno.Kv,
+  sandboxManifestPath: string = SANDBOX_MANIFEST_PATH,
 ): ServerHandle {
   // 川柳判定（§3.10 せり）。kuromoji は既定で使う（常駐 +220〜330MB。§6 に見積り）。
   // 初回の判定時に辞書を読み込み、読めるまでは かな のみで判定する。
   // EN_SENRYU_KUROMOJI=0 で かなのみに倒せる。
   // 辞書のない環境では かな のまま動き続ける（createSenryuDetector 参照）
+  //
+  // サンドボックスゲームのマニフェスト読み込みも環境変数の読込と同じく起動時の1回だけ
+  // （docs/design/game-sandbox.md §6.2）。EN_SANDBOX_DEV が "1" のときだけ dev:true の
+  // ゲームを有効化する（§8.2: 本番では構造的に起動できないようにする）
+  const sandboxDevEnabled = Deno.env.get("EN_SANDBOX_DEV") === "1";
+  const sandboxManifestGames = loadSandboxManifestGames(sandboxManifestPath);
+  const sandboxGameIds = new Set(
+    sandboxManifestGames
+      .filter((g) => sandboxDevEnabled || !g.dev)
+      .map((g) => g.id),
+  );
+  const sandboxGamesBody = JSON.stringify({
+    games: filterSandboxGames(sandboxManifestGames, sandboxDevEnabled),
+  });
   const manager = new RoomManager({
     senryu: createSenryuDetector({
       kuromoji: useKuromojiSenryu(),
@@ -435,6 +673,7 @@ export function startServer(
         );
       },
     }),
+    sandboxGameIds,
   });
   // 環境変数の読込は起動時の1回だけにする
   const iceBody = JSON.stringify({ iceServers: buildIceServers() });
@@ -455,6 +694,15 @@ export function startServer(
       }
       return jsonResponse(JSON.stringify({ rooms: manager.listPublicRooms() }));
     }
+    // サンドボックスゲーム一覧（docs/design/game-sandbox.md §6.2）。認証不要。
+    // マニフェストが無い・壊れている場合も 500 にはせず空配列で応答する
+    // （loadSandboxManifestGames 参照）
+    if (url.pathname === "/api/sandboxGames") {
+      if (req.method !== "GET") {
+        return new Response("method not allowed", { status: 405, headers: { allow: "GET" } });
+      }
+      return jsonResponse(sandboxGamesBody);
+    }
     if (url.pathname.startsWith("/api/")) {
       if (!isAllowedOrigin(req)) return new Response("forbidden origin", { status: 403 });
       if (auth === null) return new Response("auth not configured", { status: 501 });
@@ -462,7 +710,7 @@ export function startServer(
       if (res !== null) return res;
       return new Response("not found", { status: 404 });
     }
-    // TODO(チーム分担): §4.0 HTTP API（/api/rooms, /api/games/*）
+    // TODO(チーム分担): §4.0 HTTP API（/api/rooms 以外の未実装分）
     return handleStatic(req, kv ?? null);
   });
   return {

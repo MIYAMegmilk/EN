@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "games": [
+    {
+      "id": "reflex",
+      "title": "反射神経バトル",
+      "description": "緑になったら押す。全5ラウンドで反応速度を競う",
+      "file": "reflex.js",
+      "minPlayers": 2,
+      "maxPlayers": 10,
+      "author": "ちいかわ",
+      "dev": false
+    },
+    {
+      "id": "mogura",
+      "title": "もぐらたたき",
+      "description": "3×3のマスに出るもぐらをタップ。30秒で得点を競う",
+      "file": "mogura.js",
+      "minPlayers": 1,
+      "maxPlayers": 10,
+      "author": "ちいかわ",
+      "dev": false
+    }
+  ]
+}

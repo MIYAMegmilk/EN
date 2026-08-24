@@ -146,6 +146,8 @@ function connect() {
     Chat.handleServerMessage(msg);
     // bot の演出面（docs/design/bot.md §4）
     Bot.handleServerMessage(msg);
+    // サンドボックスゲーム（docs/design/game-sandbox.md）
+    Sandbox.handleServerMessage(msg);
   };
 }
 
@@ -205,6 +207,7 @@ function receive(msg) {
       Chat.reset();
       Voice.reset();
       Bot.reset();
+      Sandbox.reset();
       showError("ルームから退出しました");
       renderAll();
       break;
@@ -240,6 +243,7 @@ function renderAll() {
   $("bot").classList.toggle("hidden", snapshot === null);
   $("chat").classList.toggle("hidden", snapshot === null);
   $("phase").classList.toggle("hidden", snapshot === null);
+  $("sandbox").classList.toggle("hidden", snapshot === null);
   renderVc();
   if (snapshot === null) return;
 
@@ -569,6 +573,7 @@ function bind() {
     Chat.reset();
     Voice.reset();
     Bot.reset();
+    Sandbox.reset();
     renderAll();
   });
   bindVoice();
@@ -583,6 +588,14 @@ function bind() {
     inputEl: $("chat-text"),
     formEl: $("chat-form"),
     onError: showError,
+  });
+  Sandbox.init({
+    send,
+    container: $("sandbox"),
+    onStatus: (event) => {
+      if (event.kind === "error") showError(event.message);
+      log("Sandbox", event.message);
+    },
   });
 }
 
