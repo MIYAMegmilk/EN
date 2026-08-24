@@ -718,6 +718,20 @@
                 />
               </div>
               <div class="field">
+                <label for="room-description">説明文（100文字以内・任意）</label>
+                <textarea
+                  class="input"
+                  id="room-description"
+                  maxlength="100"
+                  rows="2"
+                  placeholder="今夜は焼酎の会です"
+                ></textarea>
+              </div>
+              <div class="field">
+                <label>タグ（最大5個・任意）</label>
+                <div id="room-tags" class="room-tags-picker"></div>
+              </div>
+              <div class="field">
                 <label for="visibility">誰に見せるか</label>
                 <select class="input" id="visibility">
                   <option value="public">お座敷一覧に出す（誰でも入店できる）</option>
