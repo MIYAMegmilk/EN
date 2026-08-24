@@ -5,6 +5,8 @@
  * ScoreEntry / PlayerPublic / GameState）はこのファイルで確定させる。
  */
 
+import type { RoomTagId } from "./room_tags.ts";
+
 // ---------------------------------------------------------------------------
 // 定数（仕様書に明記された上限値）
 // ---------------------------------------------------------------------------
@@ -262,6 +264,10 @@ export type Room = {
   visibility: RoomVisibility;
   /** ルーム名（公開ルームのみ必須、20文字以内） */
   roomName?: string;
+  /** 卓の説明文（100文字以内・任意） */
+  description?: string;
+  /** プリセットタグ（最大5個・任意） */
+  tags?: RoomTagId[];
   /** 作成者のアカウントID */
   ownerUserId: string;
   /** 現在のホストの playerId */
@@ -700,6 +706,10 @@ export type PublicRoomSummary = {
   capacity: number;
   /** 遊んでいるゲームのタイトル。ロビーで未選択なら入らない */
   gameTitle?: string;
+  /** 卓の説明文（設定されていれば） */
+  description?: string;
+  /** プリセットタグ（設定されていれば） */
+  tags?: string[];
   /** ゲーム進行中か（lobby 以外） */
   playing: boolean;
   /** 作成時刻（epoch ms）。「何時から灯りがついているか」の表示に使う */

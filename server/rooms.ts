@@ -43,6 +43,7 @@ import {
   type Room,
   ROOM_CAPACITY,
   ROOM_CODE_LENGTH,
+  ROOM_DESCRIPTION_MAX,
   ROOM_NAME_MAX,
   type RoomSnapshot,
   type S2C,
@@ -79,6 +80,7 @@ import type { SenryuMatch, YomiProvider } from "./senryu.ts";
 import { toSummary } from "./gamedef.ts";
 import { isOfficialGame, OFFICIAL_GAMES } from "./official_games.ts";
 import { charLength, hasControlChar, validateNickname } from "./validation.ts";
+import { type RoomTagId } from "./room_tags.ts";
 
 /** ニックネームの検証ロジックの本体は validation.ts にある（auth.ts からも使うため）。
  * 既存のインポート元（server/tests/rooms_test.ts など）を壊さないよう、ここから再エクスポートする */
@@ -271,6 +273,25 @@ export function validateRoomName(input: unknown): Result<string> {
   return ok(trimmed);
 }
 
+/**
+ * 卓の説明文を検証して正規化する（100文字以内・制御文字禁止）。
+ * 空文字は「説明文なし」として許可する（PATCH /api/rooms/:code での更新用）。
+ */
+export function validateRoomDescription(input: unknown): Result<string> {
+  if (typeof input !== "string") {
+    return err("INVALID_INPUT", "説明文の形式が正しくありません");
+  }
+  const trimmed = input.trim();
+  const length = charLength(trimmed);
+  if (length > ROOM_DESCRIPTION_MAX) {
+    return err("INVALID_INPUT", `説明文は${ROOM_DESCRIPTION_MAX}文字以内で入力してください`);
+  }
+  if (hasControlChar(trimmed)) {
+    return err("INVALID_INPUT", "説明文に使用できない文字が含まれています");
+  }
+  return ok(trimmed);
+}
+
 /** ルームコードを正規化する。6桁の数字でなければ null */
 export function normalizeRoomCode(input: unknown): string | null {
   if (typeof input !== "string") return null;
@@ -295,6 +316,11 @@ function randomRoomCode(): string {
 // ---------------------------------------------------------------------------
 // ルーム管理
 // ---------------------------------------------------------------------------
+
+/** setRoomMeta の結果（PATCH /api/rooms/:code のステータス決定に使う） */
+export type SetRoomMetaResult =
+  | { ok: true; description?: string; tags?: RoomTagId[] }
+  | { ok: false; status: 404 | 403 };
 
 /** ルームの生成・参加・進行をまとめて受け持つ */
 export class RoomManager {
@@ -329,6 +355,32 @@ export class RoomManager {
   }
 
   /**
+   * 卓の説明文・タグをオーナー本人が更新する（§4.0 `PATCH /api/rooms/:code`）。
+   * 入力の検証（文字数・タグの妥当性）は呼び出し側（main.ts）の責務とし、
+   * ここではオーナー確認と反映だけを行う。
+   */
+  setRoomMeta(
+    code: string,
+    userId: string,
+    meta: { description: string; tags: RoomTagId[] },
+  ): SetRoomMetaResult {
+    const entry = this.rooms.get(code);
+    if (entry === undefined) return { ok: false, status: 404 };
+    if (entry.room.ownerUserId !== userId) return { ok: false, status: 403 };
+    if (meta.description === "") {
+      delete entry.room.description;
+    } else {
+      entry.room.description = meta.description;
+    }
+    if (meta.tags.length === 0) {
+      delete entry.room.tags;
+    } else {
+      entry.room.tags = meta.tags;
+    }
+    return { ok: true, description: entry.room.description, tags: entry.room.tags };
+  }
+
+  /**
    * 稼働中の公開ルーム一覧（§2 公開ルーム一覧 / §4.0 `GET /api/rooms`）。
    * 招待制ルームは載せない。コードを知らない人に漏らさないため（§3.1）。
    * 新しく立った卓が上に来るよう createdAt の降順で返す。
@@ -353,6 +405,8 @@ export class RoomManager {
         ? undefined
         : room.availableGames.get(room.selectedGameId);
       if (selected !== undefined) summary.gameTitle = selected.title;
+      if (room.description !== undefined) summary.description = room.description;
+      if (room.tags !== undefined && room.tags.length > 0) summary.tags = room.tags;
       list.push(summary);
     }
     list.sort((a, b) => b.createdAt - a.createdAt);
