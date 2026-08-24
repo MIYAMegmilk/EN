@@ -60,6 +60,34 @@
       #error {
         color: #b00020;
       }
+      /* チャット（§3.9） */
+      #chat-log {
+        max-height: 12rem;
+        overflow-y: auto;
+        list-style: none;
+        padding-left: 0.2rem;
+        overflow-wrap: anywhere;
+      }
+      #chat-log .chat-time {
+        color: #666;
+        font-size: 0.8rem;
+        margin-right: 0.3rem;
+      }
+      #chat-log .chat-nickname {
+        font-weight: bold;
+        margin-right: 0.3rem;
+      }
+      #chat-log .chat-badge-bot {
+        background: #666;
+        color: #fff;
+        font-size: 0.75rem;
+        border-radius: 3px;
+        padding: 0 0.3rem;
+        margin-right: 0.3rem;
+      }
+      #chat-log li.chat-self {
+        background: #f0f6ff;
+      }
     </style>
   </head>
   <body>
@@ -104,6 +132,15 @@
       </div>
     </section>
 
+    <section id="chat" class="hidden">
+      <h2>チャット</h2>
+      <ul id="chat-log"></ul>
+      <form id="chat-form" class="row">
+        <input id="chat-text" maxlength="200" autocomplete="off" />
+        <button id="chat-send" type="button">送信</button>
+      </form>
+    </section>
+
     <section id="phase" class="hidden">
       <h2 id="phase-title"></h2>
       <p id="phase-deadline" class="muted"></p>
@@ -120,6 +157,7 @@
       <div id="log"></div>
     </section>
 
+    <script src="./room/chat.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>

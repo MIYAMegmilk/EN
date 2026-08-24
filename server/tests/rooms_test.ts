@@ -1,6 +1,6 @@
 /**
  * rooms.ts のユニットテスト
- * 詳細仕様書 §3.1 / §3.2 / §8 の挙動を検証する。
+ * 詳細仕様書 §3.1 / §3.2 / §3.9 / §8 の挙動を検証する。
  * 時刻とタイマーは差し替え可能なため、待機せずに猶予超過を再現できる。
  */
 
@@ -12,11 +12,19 @@ import {
   NOT_IMPLEMENTED_MESSAGE,
   phaseDurationsFor,
   RoomManager,
+  validateChatText,
   validateNickname,
 } from "../rooms.ts";
 import { DEFAULT_PHASE_DURATIONS } from "../engine.ts";
 import type { S2C } from "../types.ts";
-import { DISCONNECT_GRACE_MS, ROOM_CAPACITY } from "../types.ts";
+import {
+  CHAT_HISTORY_MAX,
+  CHAT_RATE_MAX,
+  CHAT_RATE_WINDOW_MS,
+  CHAT_TEXT_MAX,
+  DISCONNECT_GRACE_MS,
+  ROOM_CAPACITY,
+} from "../types.ts";
 
 const T0 = 1_700_000_000_000;
 
@@ -141,6 +149,31 @@ Deno.test("ニックネーム検証: 空・21文字以上・制御文字を拒�
   assertFalse(validateNickname("た\nろう").ok);
   assertFalse(validateNickname(123).ok);
   assert(validateNickname("あ".repeat(20)).ok);
+});
+
+Deno.test("チャット検証: 前後の空白を除去して受理する", () => {
+  const res = validateChatText("  こんばんは  ");
+  assert(res.ok);
+  assertEquals(res.value, "こんばんは");
+});
+
+Deno.test("チャット検証: 200文字ちょうどは受理し、201文字は拒否する", () => {
+  assert(validateChatText("あ".repeat(CHAT_TEXT_MAX)).ok);
+  assertFalse(validateChatText("あ".repeat(CHAT_TEXT_MAX + 1)).ok);
+});
+
+Deno.test("チャット検証: 空・空白のみ・文字列以外を拒否する", () => {
+  assertFalse(validateChatText("").ok);
+  assertFalse(validateChatText("   ").ok);
+  assertFalse(validateChatText(123).ok);
+  assertFalse(validateChatText(undefined).ok);
+});
+
+Deno.test("チャット検証: 制御文字（改行・タブ・NUL 等）を拒否する", () => {
+  assertFalse(validateChatText("こん\nばんは").ok);
+  assertFalse(validateChatText("こん\tばんは").ok);
+  assertFalse(validateChatText("こん\u0000ばんは").ok);
+  assertFalse(validateChatText("こん\u007fばんは").ok);
 });
 
 Deno.test("ルームコード正規化: 6桁の数字のみ受理する", () => {
@@ -490,6 +523,153 @@ Deno.test("進行中の参加は観戦扱いになる（§8）", () => {
   const late = joinRoom(manager, host.snapshot.code, "あとから");
   assertExists(late.state);
   assertEquals(late.state.snapshot.youAreSpectator, true);
+  manager.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// チャット（§3.9）
+// ---------------------------------------------------------------------------
+
+Deno.test("チャット: 発言者本人を含む全員に届き、nickname と playerId が入る", () => {
+  const { clock, manager } = setup();
+  const host = createRoom(manager);
+  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
+  assertExists(guest.state);
+  manager.handle(guest.link, { t: "chat", text: "  こんばんは  " });
+  for (const link of [host.link, guest.link]) {
+    const msg = last(link, "chat");
+    assertExists(msg);
+    // 前後の空白は trim され、発言時点の表示名と発言者IDが入る
+    assertEquals(msg.message.text, "こんばんは");
+    assertEquals(msg.message.nickname, "ゲスト");
+    assertEquals(msg.message.playerId, guest.state.snapshot.youId);
+    assertEquals(msg.message.bot, false);
+    assertEquals(msg.message.at, clock.now);
+    assertExists(msg.message.id);
+  }
+  manager.dispose();
+});
+
+Deno.test("チャット: 他のルームには届かない", () => {
+  const { manager } = setup();
+  const roomA = createRoom(manager, "Aホスト");
+  const roomB = createRoom(manager, "Bホスト");
+  manager.handle(roomA.link, { t: "chat", text: "Aルームの発言" });
+  assertEquals(all(roomA.link, "chat").length, 1);
+  assertEquals(all(roomB.link, "chat").length, 0);
+  manager.dispose();
+});
+
+Deno.test("チャット: 不正な本文は INVALID_INPUT で履歴にも残らない", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  manager.handle(host.link, { t: "chat", text: "あ".repeat(CHAT_TEXT_MAX + 1) });
+  assertEquals(last(host.link, "error")?.code, "INVALID_INPUT");
+  manager.handle(host.link, { t: "chat", text: "改\n行" });
+  assertEquals(last(host.link, "error")?.code, "INVALID_INPUT");
+  assertEquals(all(host.link, "chat").length, 0);
+  assertEquals(manager.getRoom(host.snapshot.code)?.chatHistory.length, 0);
+  manager.dispose();
+});
+
+Deno.test("チャット: 10秒に5件を超えると RATE_LIMITED、窓が過ぎればまた送れる（§3.9）", () => {
+  const { clock, manager } = setup();
+  const host = createRoom(manager);
+  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
+  assertExists(guest.state);
+  for (let i = 1; i <= CHAT_RATE_MAX; i++) {
+    manager.handle(host.link, { t: "chat", text: `発言${i}` });
+  }
+  assertEquals(all(host.link, "chat").length, CHAT_RATE_MAX);
+  // 6件目は拒否され、誰にもブロードキャストされない
+  manager.handle(host.link, { t: "chat", text: "超過分" });
+  assertEquals(last(host.link, "error")?.code, "RATE_LIMITED");
+  assertEquals(all(host.link, "chat").length, CHAT_RATE_MAX);
+  assertEquals(all(guest.link, "chat").length, CHAT_RATE_MAX);
+  // レート制限は参加者ごと。他の参加者は制限されない
+  manager.handle(guest.link, { t: "chat", text: "ゲストは送れる" });
+  assertEquals(all(host.link, "chat").length, CHAT_RATE_MAX + 1);
+  // 窓が過ぎればまた送れる
+  clock.advance(CHAT_RATE_WINDOW_MS);
+  manager.handle(host.link, { t: "chat", text: "窓明けの発言" });
+  assertEquals(last(host.link, "chat")?.message.text, "窓明けの発言");
+  manager.dispose();
+});
+
+Deno.test("チャット: 履歴は直近100件のみ・古い順に保持される（§3.9）", () => {
+  const { clock, manager } = setup();
+  const host = createRoom(manager);
+  const total = CHAT_HISTORY_MAX + 5;
+  for (let i = 0; i < total; i++) {
+    manager.handle(host.link, { t: "chat", text: `メッセージ${i}` });
+    assertEquals(last(host.link, "chat")?.message.text, `メッセージ${i}`);
+    // レート制限に掛からないよう窓の 1/CHAT_RATE_MAX ずつ時間を進める
+    clock.advance(CHAT_RATE_WINDOW_MS / CHAT_RATE_MAX);
+  }
+  const history = manager.getRoom(host.snapshot.code)?.chatHistory;
+  assertExists(history);
+  assertEquals(history.length, CHAT_HISTORY_MAX);
+  assertEquals(history[0].text, `メッセージ${total - CHAT_HISTORY_MAX}`);
+  assertEquals(history[history.length - 1].text, `メッセージ${total - 1}`);
+  manager.dispose();
+});
+
+Deno.test("チャット: 途中入室者のスナップショットに履歴が入る（古い順）", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  manager.handle(host.link, { t: "chat", text: "1件目" });
+  manager.handle(host.link, { t: "chat", text: "2件目" });
+  const late = joinRoom(manager, host.snapshot.code, "あとから");
+  assertExists(late.state);
+  assertEquals(late.state.snapshot.chat.map((m) => m.text), ["1件目", "2件目"]);
+  manager.dispose();
+});
+
+Deno.test("チャット: 再接続時のスナップショットに履歴が入る（§3.2 / §3.9）", () => {
+  const { clock, manager } = setup();
+  const host = createRoom(manager);
+  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
+  assertExists(guest.state);
+  const session = guest.state.snapshot.session;
+  assertExists(session);
+  manager.handle(host.link, { t: "chat", text: "切断前の発言" });
+  manager.disconnect(guest.link);
+  manager.handle(host.link, { t: "chat", text: "切断中の発言" });
+  clock.advance(1_000);
+  const back = new MockLink();
+  manager.handle(back, {
+    t: "join",
+    roomCode: host.snapshot.code,
+    nickname: "ゲスト",
+    session,
+  });
+  const restored = last(back, "roomState");
+  assertExists(restored);
+  assertEquals(restored.snapshot.chat.map((m) => m.text), ["切断前の発言", "切断中の発言"]);
+  manager.dispose();
+});
+
+Deno.test("チャット: ゲーム進行中も観戦者も発言できる（§3.9）", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  joinRoom(manager, host.snapshot.code, "ゲスト");
+  manager.handle(host.link, { t: "selectGame", gameId: "official-ogiri" });
+  manager.handle(host.link, { t: "startGame" });
+  const late = joinRoom(manager, host.snapshot.code, "観戦者");
+  assertExists(late.state);
+  assertEquals(late.state.snapshot.youAreSpectator, true);
+  manager.handle(late.link, { t: "chat", text: "観戦席から失礼します" });
+  assertEquals(last(host.link, "chat")?.message.text, "観戦席から失礼します");
+  assertEquals(last(late.link, "chat")?.message.nickname, "観戦者");
+  manager.dispose();
+});
+
+Deno.test("チャット: ルーム未参加の接続からは ROOM_NOT_FOUND", () => {
+  const { manager } = setup();
+  createRoom(manager);
+  const link = new MockLink();
+  manager.handle(link, { t: "chat", text: "どこにも属していない" });
+  assertEquals(last(link, "error")?.code, "ROOM_NOT_FOUND");
   manager.dispose();
 });
 
