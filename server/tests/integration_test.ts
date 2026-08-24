@@ -3,7 +3,8 @@
  * 実サーバーを空きポートで起動し、WebSocket クライアント3人で
  * 雑学クイズを最終結果まで完走させる（§9 のボット結合テストの最小版）。
  * テキストチャット（§3.9）の配信・スナップショット・レート制限、
- * および WS メッセージのレート制限（§3.8。rtcSignal の別枠を含む）も検証する。
+ * および WS メッセージのレート制限（§3.8。rtcSignal の別枠・破棄・ハードキャップを含む）も
+ * 検証する。
  */
 
 import { assert, assertEquals, assertExists } from "@std/assert";
@@ -18,6 +19,7 @@ import {
   type S2C,
   WS_RATE_MAX,
   WS_RATE_WINDOW_MS,
+  WS_SIGNAL_HARD_MAX,
   WS_SIGNAL_RATE_MAX,
 } from "../types.ts";
 
@@ -436,6 +438,21 @@ Deno.test("ユニット: WS レート制限の上限はコンストラクタで�
   assertEquals(general.accept(), false, `一般枠の${WS_RATE_MAX + 1}件目は違反`);
 });
 
+Deno.test("ユニット: rtcSignal のハードキャップはソフト上限より大きい（§3.8）", () => {
+  assert(
+    WS_SIGNAL_RATE_MAX < WS_SIGNAL_HARD_MAX,
+    "破棄で済ませる上限より切断の上限が大きくなければ破棄の余地がない",
+  );
+
+  // ハードキャップ枠も WS_SIGNAL_HARD_MAX 件ちょうどまでセーフ、その次が違反（＝切断）
+  const now = 1_000_000;
+  const hard = new MessageRateLimiter(WS_SIGNAL_HARD_MAX, () => now);
+  for (let i = 1; i <= WS_SIGNAL_HARD_MAX; i++) {
+    assertEquals(hard.accept(), true, `ハードキャップ枠の${i}件目は受理される`);
+  }
+  assertEquals(hard.accept(), false, `ハードキャップ枠の${WS_SIGNAL_HARD_MAX + 1}件目は違反`);
+});
+
 /** ルームを1つ作り、ホストとして参加済みのクライアントを返す */
 async function connectInRoom(port: number): Promise<TestClient> {
   const client = await TestClient.connect(port);
@@ -450,12 +467,17 @@ async function connectInRoom(port: number): Promise<TestClient> {
  */
 const SIGNAL_BURST = WS_RATE_MAX * 2;
 
-/** rtcSignal を n 件連投し、未実装応答（INVALID_INPUT）が返り切るまで待つ */
-async function burstSignals(client: TestClient, count: number): Promise<void> {
-  const before = client.countError("INVALID_INPUT");
+/** rtcSignal を n 件、間を空けずに送る */
+function sendSignals(client: TestClient, count: number): void {
   for (let i = 0; i < count; i++) {
     client.send({ t: "rtcSignal", to: `peer${i}`, payload: { kind: "ice" } });
   }
+}
+
+/** rtcSignal を n 件連投し、未実装応答（INVALID_INPUT）が返り切るまで待つ */
+async function burstSignals(client: TestClient, count: number): Promise<void> {
+  const before = client.countError("INVALID_INPUT");
+  sendSignals(client, count);
   // main では rtcSignal 自体が未実装のため INVALID_INPUT が返る。
   // ここでの検証点は「応答が返り切るまで接続が維持されること」
   await waitUntil(
@@ -478,14 +500,57 @@ Deno.test("結合: rtcSignal は別枠なので 20件/秒 を超えても切断�
   await server.shutdown();
 });
 
-Deno.test("結合: rtcSignal も signal 枠の上限を超えると切断される（§3.8）", async () => {
+/**
+ * ソフト上限（WS_SIGNAL_RATE_MAX）を確実に超える rtcSignal のバースト件数。
+ * 1つの判定窓に収まる速さで送り切れる前提で件数を決めている。
+ */
+const SIGNAL_SOFT_BURST = WS_SIGNAL_RATE_MAX + 50;
+
+/**
+ * ハードキャップ（WS_SIGNAL_HARD_MAX）を超える rtcSignal のバースト件数。
+ * ちょうど最後の1件で超過させる。これより多く送るとサーバーの close フレーム送出後も
+ * 送信が続き、close code が 1008 ではなく異常終了扱いになってしまう。
+ */
+const SIGNAL_HARD_BURST = WS_SIGNAL_HARD_MAX + 1;
+
+Deno.test("結合: rtcSignal はソフト上限を超えても切断されず、超過分だけ破棄される（§3.6 / §3.8）", async () => {
   const server = startServer(0);
   const client = await connectInRoom(server.port);
 
-  // WS_SIGNAL_RATE_MAX 件ちょうどはセーフ、その次の1件で違反になる
-  for (let i = 0; i <= WS_SIGNAL_RATE_MAX; i++) {
-    client.send({ t: "rtcSignal", to: "peer", payload: { kind: "ice" } });
-  }
+  sendSignals(client, SIGNAL_SOFT_BURST);
+  // 受理された分は未実装応答（INVALID_INPUT）で返ってくる
+  await waitUntil(
+    () => client.countError("INVALID_INPUT") >= WS_SIGNAL_RATE_MAX,
+    `rtcSignal ${WS_SIGNAL_RATE_MAX}件への応答`,
+  );
+  // WS は順序が保たれるため、バースト後に送ったチャットが届いた時点で全件が処理済み。
+  // 通常メッセージが処理されること自体が「切断されず接続が生きている」ことの確認でもある。
+  client.send({ t: "chat", text: "バースト後の発言" });
+  await waitUntil(
+    () => client.received().some((m) => m.t === "chat" && m.message.text === "バースト後の発言"),
+    "バースト後のチャット",
+  );
+
+  assertEquals(client.closeCode, null, "ソフト上限の超過では切断されない");
+  assertEquals(
+    client.countError("INVALID_INPUT"),
+    WS_SIGNAL_RATE_MAX,
+    `受理はソフト上限までで、超過 ${SIGNAL_SOFT_BURST - WS_SIGNAL_RATE_MAX} 件は破棄される`,
+  );
+  // 超過1件ごとに返すとエラーの増幅になるため、判定窓につき1回に絞られている
+  assertEquals(client.countError("RATE_LIMITED"), 1, "RATE_LIMITED の通知は判定窓につき1回");
+
+  await client.leaveAndClose();
+  assertEquals(server.manager.roomCount, 0);
+  await server.shutdown();
+});
+
+Deno.test("結合: rtcSignal がハードキャップを超えると乱用とみなして切断される（§3.8）", async () => {
+  const server = startServer(0);
+  const client = await connectInRoom(server.port);
+
+  // 送信はすべて同期ループで済むため、送り終える前に切断されて送信が失敗することはない
+  sendSignals(client, SIGNAL_HARD_BURST);
 
   await Promise.race([client.closed, delay(WAIT_TIMEOUT_MS)]);
   assertEquals(client.closeCode, 1008, "policy violation の 1008 で切断される");
@@ -494,6 +559,11 @@ Deno.test("結合: rtcSignal も signal 枠の上限を超えると切断され�
   const last = received[received.length - 1];
   assertExists(last);
   assert(last.t === "error" && last.code === "RATE_LIMITED", "切断前に RATE_LIMITED が届く");
+  // 切断までに返した RATE_LIMITED は、ソフト上限の通知（窓につき1回）＋ 切断時の1回まで
+  assert(
+    client.countError("RATE_LIMITED") <= 2,
+    `RATE_LIMITED の返信が増幅していない: ${client.countError("RATE_LIMITED")}件`,
+  );
 
   await server.shutdown();
 });
