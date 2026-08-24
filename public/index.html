@@ -764,6 +764,8 @@
             </div>
             <!-- 通話の文字起こし（自分の声のみ・既定OFF）。docs/design/bot-voice.md §5.4 -->
             <p id="voice-caption" class="dim voice-caption" aria-live="polite"></p>
+            <!-- 受信した文字起こし（同室の他人・自分）。最新1〜2行のみ。チャット欄には混ぜない -->
+            <ul id="voice-lines" class="voice-lines" aria-live="polite"></ul>
             <div id="vc-media"></div>
           </section>
 

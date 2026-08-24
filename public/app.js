@@ -158,6 +158,7 @@ function receive(msg) {
         store.save(msg.snapshot.code, msg.snapshot.session);
       }
       Chat.setSelfId(msg.snapshot.youId);
+      Voice.setSelfId(msg.snapshot.youId);
       Bot.setSelfId(msg.snapshot.youId);
       showError("");
       renderAll();
@@ -517,6 +518,7 @@ function bindVoice() {
   Voice.init({
     send,
     captionEl: $("voice-caption"),
+    linesEl: $("voice-lines"),
     onStatus: (event) => {
       $("vc-status").textContent = event.message;
       syncTranscribeLabel();
