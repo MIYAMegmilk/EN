@@ -32,6 +32,9 @@
   /** ポーリングのタイマー */
   let timer = null;
 
+  /** タグID → 表示名。GET /api/room-tags の結果から作る */
+  let tagLabels = new Map();
+
   /** 要素を取得する */
   function $(id) {
     return document.getElementById(id);
@@ -73,6 +76,10 @@
 
     card.appendChild(el("h2", null, room.roomName));
 
+    if (typeof room.description === "string" && room.description.length > 0) {
+      card.appendChild(el("p", "room-desc", room.description));
+    }
+
     const meta = el("p", "room-meta");
     if (room.gameTitle === undefined) {
       meta.textContent = room.playing ? "遊んでいます" : "まだ何をするか決めていません";
@@ -82,6 +89,14 @@
         : `${room.gameTitle} を選んでいます`;
     }
     card.appendChild(meta);
+
+    if (Array.isArray(room.tags) && room.tags.length > 0) {
+      const tagsRow = el("div", "room-tags");
+      for (const tagId of room.tags) {
+        tagsRow.appendChild(el("span", "tag", tagLabels.get(tagId) ?? tagId));
+      }
+      card.appendChild(tagsRow);
+    }
 
     const seats = el("div", "room-seats");
     seats.appendChild(el("span", "tabular", `${room.playerCount} / ${room.capacity} 名`));
@@ -171,6 +186,18 @@
     }
   }
 
+  async function loadTagLabels() {
+    try {
+      const res = await fetch("/api/room-tags", { credentials: "same-origin" });
+      if (!res.ok) return;
+      const body = await res.json();
+      const tags = Array.isArray(body?.tags) ? body.tags : [];
+      tagLabels = new Map(tags.map((t) => [t.id, t.label]));
+    } catch {
+      // 読み込めなくても一覧自体は表示できるので無視する（タグはIDのまま出す）
+    }
+  }
+
   /** 要素を解決してポーリングを始める */
   function init() {
     els.entry = $("entry");
@@ -189,6 +216,7 @@
       if (wasHidden && !hidden) refresh();
       wasHidden = hidden;
     }).observe(els.entry, { attributes: true, attributeFilter: ["class"] });
+    loadTagLabels();
     refresh();
     timer = setInterval(refresh, POLL_MS);
   }
