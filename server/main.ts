@@ -446,6 +446,33 @@ export function buildIceServers(): IceServer[] {
   return servers;
 }
 
+/** kuromoji を倒すための環境変数。`.env` でも環境変数でもよい */
+const KUROMOJI_ENV = "EN_SENRYU_KUROMOJI";
+
+/** これらを設定したときだけ kuromoji を使わない。それ以外はすべて既定（使う） */
+const KUROMOJI_OFF_VALUES = new Set(["0", "false", "off", "no"]);
+
+/**
+ * 川柳判定（§3.10 せり）で kuromoji を使うかどうか。**既定は ON**。
+ *
+ * kuromoji の辞書はサーバープロセスに常駐して +220〜330MB になる（senryu.ts の実測）。
+ * 4GB プラン（§6）に対して約 10%、かつルーム数に比例しない一度きりの定数なので既定で使う。
+ * かなのみに倒すと せり が漢字混じりを拾えず、bot-voice.md の文字起こしが実質発火しない。
+ *
+ * メモリが問題になったときに再デプロイなしで倒せるよう、逃げ道だけ環境変数に出しておく。
+ * `EN_SENRYU_KUROMOJI=0`（false / off / no も可）で かなのみに戻る。
+ */
+export function useKuromojiSenryu(): boolean {
+  let dotenv: Record<string, string> = {};
+  try {
+    dotenv = loadSync({ export: false });
+  } catch {
+    // .env を読めない環境（権限なし等）では環境変数だけを使う
+  }
+  const value = (dotenv[KUROMOJI_ENV] ?? Deno.env.get(KUROMOJI_ENV) ?? "").trim().toLowerCase();
+  return !KUROMOJI_OFF_VALUES.has(value);
+}
+
 /** JSON をそのまま返す。TURN 認証情報や在室人数を含むため保存させない */
 function jsonResponse(body: string): Response {
   return new Response(body, {
@@ -627,8 +654,9 @@ export function startServer(
   kv?: Deno.Kv,
   sandboxManifestPath: string = SANDBOX_MANIFEST_PATH,
 ): ServerHandle {
-  // 川柳判定（§3.10 せり）。kuromoji の辞書は初回の判定時に読み込み、
-  // 読めるまでは かな のみで判定する（漢字混じりはそれまで拾えない）。
+  // 川柳判定（§3.10 せり）。kuromoji は既定で使う（常駐 +220〜330MB。§6 に見積り）。
+  // 初回の判定時に辞書を読み込み、読めるまでは かな のみで判定する。
+  // EN_SENRYU_KUROMOJI=0 で かなのみに倒せる。
   // 辞書のない環境では かな のまま動き続ける（createSenryuDetector 参照）
   //
   // サンドボックスゲームのマニフェスト読み込みも環境変数の読込と同じく起動時の1回だけ
@@ -646,6 +674,7 @@ export function startServer(
   });
   const manager = new RoomManager({
     senryu: createSenryuDetector({
+      kuromoji: useKuromojiSenryu(),
       onReady: (provider) => {
         console.log(
           provider === null
@@ -764,4 +793,10 @@ if (import.meta.main) {
   const kv = await Deno.openKv(Deno.env.get("KV_PATH"));
   const handle = startServer(Number.isInteger(port) && port > 0 ? port : 8000, "127.0.0.1", kv);
   console.log(`宴 -EN- server listening on http://localhost:${handle.port}/`);
+  // 川柳判定がどちらのモードで動くかは起動時に見えるようにしておく（§6）
+  console.log(
+    useKuromojiSenryu()
+      ? `senryu: 初回の発言で kuromoji の辞書を読み込みます（常駐 +220〜330MB。${KUROMOJI_ENV}=0 で無効化）`
+      : `senryu: かなのみで判定します。漢字混じりの句は拾いません（${KUROMOJI_ENV}）`,
+  );
 }

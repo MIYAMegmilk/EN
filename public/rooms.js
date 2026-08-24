@@ -25,7 +25,6 @@
     count: null,
     code: null,
     join: null,
-    nickname: null,
     error: null,
   };
 
@@ -126,19 +125,11 @@
    * 一覧から入店する。
    * 参加コード欄を埋めて既存の入店ボタンを押すだけにして、WS の送信経路を1本に保つ。
    *
-   * あだ名欄はページ上部にあり、一覧まで下がっていると画面外になる。
-   * 黙って戻ると「押しても無反応」に見えるので、理由を出して入力欄まで運ぶ。
+   * あだ名は空欄でよい（省略するとしゅんぴが二つ名を付ける。§3.10）ので、
+   * ここでは止めない。前の操作で出たエラーだけ消してから押す。
    */
   function enterRoom(code) {
     els.code.value = code;
-    if (els.nickname.value.trim().length === 0) {
-      showEntryError("入店するにはあだ名を入れてください");
-      // focus() 自身のスクロールと scrollIntoView がぶつからないよう、スクロールは後で一度だけ行う
-      els.nickname.focus({ preventScroll: true });
-      // #error はあだ名欄のすぐ上にあるので、中央に寄せればエラー文も一緒に見える
-      els.nickname.scrollIntoView({ behavior: "smooth", block: "center" });
-      return;
-    }
     showEntryError("");
     els.join.click();
   }
@@ -205,7 +196,6 @@
     els.count = $("rooms-count");
     els.code = $("code");
     els.join = $("join");
-    els.nickname = $("nickname");
     els.error = $("error");
     if (els.entry === null || els.list === null) return;
     // 退室して一覧に戻ってきた瞬間に取り直す（次のポーリングまで古い一覧を見せない）。

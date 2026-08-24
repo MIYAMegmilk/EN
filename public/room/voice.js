@@ -26,6 +26,12 @@
  *   S2C: { t: "voice", line }        … ルーム内へ配信される文字起こし1行
  *
  * 表示規約（§3.8）: ユーザー由来のテキストは textContent で描画する。
+ *
+ * 受信側（同室の他人・自分の文字起こしの表示）:
+ *   チーム合意（docs/design/bot-voice.md 決定事項）どおり、受信した確定行は
+ *   字幕行に最新1〜2行だけ出す。chatHistory に積まない設計（サーバー側）に
+ *   合わせ、チャット欄には混ぜない。captionEl（自分の未確定文専用）とは別の
+ *   要素（init の linesEl）に描く。
  */
 
 "use strict";
@@ -66,6 +72,12 @@
   /** 連続で再開に失敗したらあきらめる回数 */
   const RESTART_MAX_FAILURES = 5;
 
+  /**
+   * 受信して表示する確定行の保持件数（字幕行に最新1〜2行、チーム合意）。
+   * 古いものから捨てる。チャット欄には混ぜない（chatHistory に積まれないため）。
+   */
+  const MAX_RECEIVED_LINES = 2;
+
   /** 外から注入される設定 */
   const config = {
     /** サーバーへ送る関数（app 側から注入） */
@@ -74,6 +86,8 @@
     onStatus: null,
     /** 認識中の文（未確定）を出す要素。null なら表示しない */
     captionEl: null,
+    /** 受信した確定行（他人・自分）を出す要素。null なら表示しない */
+    linesEl: null,
     /** 認識言語。テストや将来の多言語化のために差し替え可能にしておく */
     lang: LANG,
   };
@@ -97,6 +111,10 @@
     interim: "",
     /** 送った件数・間引いた件数（動作確認用） */
     stats: { sent: 0, dropped: 0 },
+    /** 受信した確定行（直近 MAX_RECEIVED_LINES 件・古い順。自分の発言も含む） */
+    lines: [],
+    /** 自分の playerId（受信行の自分/他人の見分け用。分からなければ null） */
+    selfId: null,
   };
 
   // -------------------------------------------------------------------------
@@ -129,6 +147,54 @@
   function renderCaption() {
     if (config.captionEl === null) return;
     config.captionEl.textContent = state.interim;
+  }
+
+  /** 子要素をすべて取り除く（chat.js と同じ方式） */
+  function clearChildren(node) {
+    while (node.firstChild) node.removeChild(node.firstChild);
+  }
+
+  /**
+   * 受信した VoiceLine の形を確認する（docs/design/bot-voice.md §5.1）。
+   * サーバーからの S2C だが、想定外の形が来たら描画せず黙って捨てる。
+   */
+  function isValidLine(line) {
+    return (
+      typeof line === "object" &&
+      line !== null &&
+      typeof line.id === "string" &&
+      typeof line.playerId === "string" &&
+      typeof line.nickname === "string" &&
+      typeof line.text === "string" &&
+      typeof line.at === "number"
+    );
+  }
+
+  /**
+   * 受信した確定行（直近 MAX_RECEIVED_LINES 件）を描き直す。
+   * ニックネーム・本文はユーザー由来のため textContent のみで描画する（§3.8）。
+   * 自分の発言は控えめな見分け用にクラスを付ける。
+   */
+  function renderLines() {
+    const container = config.linesEl;
+    if (container === null) return;
+    clearChildren(container);
+    for (const line of state.lines) {
+      const item = document.createElement("li");
+      item.className = "voice-line";
+      if (state.selfId !== null && line.playerId === state.selfId) {
+        item.classList.add("voice-line-self");
+      }
+      const nickname = document.createElement("span");
+      nickname.className = "voice-line-nickname";
+      nickname.textContent = line.nickname;
+      item.appendChild(nickname);
+      const text = document.createElement("span");
+      text.className = "voice-line-text";
+      text.textContent = line.text;
+      item.appendChild(text);
+      container.appendChild(item);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -301,6 +367,8 @@
     config.send = options.send;
     config.onStatus = options.onStatus ?? null;
     config.captionEl = options.captionEl ?? null;
+    // 受信した確定行（他人・自分）を出す要素。渡さなければ従来どおり非表示（後方互換）
+    config.linesEl = options.linesEl ?? null;
     if (typeof options.lang === "string" && options.lang.length > 0) {
       config.lang = options.lang;
     }
@@ -337,11 +405,29 @@
 
   /**
    * S2C メッセージを渡す。ルーム側の受信処理からそのまま流し込む。
-   * 見るのは「もう喋る相手がいない」ことが分かるものだけ。
+   * 見るのは「もう喋る相手がいない」（kicked）と「同室の文字起こし1行」（voice）。
    */
   function handleServerMessage(msg) {
     if (typeof msg !== "object" || msg === null) return;
-    if (msg.t === "kicked") setEnabled(false);
+    if (msg.t === "kicked") {
+      setEnabled(false);
+      return;
+    }
+    if (msg.t === "voice") {
+      // スキーマ検証してから使う。想定外の形は捨てる
+      if (!isValidLine(msg.line)) return;
+      state.lines.push(msg.line);
+      if (state.lines.length > MAX_RECEIVED_LINES) {
+        state.lines = state.lines.slice(-MAX_RECEIVED_LINES);
+      }
+      renderLines();
+    }
+  }
+
+  /** 自分の playerId を設定する（受信行の自分/他人の見分け用。chat.js の setSelfId と同じ方式） */
+  function setSelfId(playerId) {
+    state.selfId = playerId;
+    renderLines();
   }
 
   /** 退室時に状態を捨てる */
@@ -350,6 +436,8 @@
     state.sentTimes = [];
     state.lastSentText = "";
     state.stats = { sent: 0, dropped: 0 };
+    state.lines = [];
+    renderLines();
   }
 
   /** デバッグ・テスト用に内部状態を返す */
@@ -361,6 +449,7 @@
       interim: state.interim,
       sent: state.stats.sent,
       dropped: state.stats.dropped,
+      lines: state.lines.slice(),
     };
   }
 
@@ -370,6 +459,7 @@
     setEnabled,
     toggle,
     handleServerMessage,
+    setSelfId,
     reset,
     getState,
     /** テスト用に公開する純粋関数 */
