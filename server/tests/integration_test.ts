@@ -50,6 +50,22 @@ async function waitUntil(condition: () => boolean, label: string): Promise<void>
   }
 }
 
+/** 使い捨てユーザーを登録し、セッション Cookie を返す（ルーム作成にはログインが必須: §3.0） */
+async function registerCookie(base: string): Promise<string> {
+  const res = await fetch(`${base}/api/auth/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      userId: "u" + crypto.randomUUID().replace(/-/g, "").slice(0, 10),
+      password: "correcthorse",
+    }),
+  });
+  assertEquals(res.status, 200);
+  const cookie = res.headers.get("set-cookie")?.split(";")[0];
+  assertExists(cookie);
+  return cookie;
+}
+
 /** テスト用の WebSocket クライアント */
 class TestClient {
   private readonly socket: WebSocket;
@@ -75,9 +91,19 @@ class TestClient {
     });
   }
 
-  /** 接続が確立するまで待つ */
-  static connect(port: number): Promise<TestClient> {
-    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  /**
+   * 接続が確立するまで待つ。cookie を渡すとログイン済みとしてアップグレードされる。
+   * ブラウザは同一オリジンへの WS ハンドシェイクに Cookie を自動で付けるが、
+   * このテストのような生スクリプトからは自分で付ける必要がある。標準の WebSocket
+   * コンストラクタには headers 引数が無いため、Deno 独自拡張の第2引数 { headers }
+   * を使う（Deno 2.9.5 で動作確認済み。将来の Deno 更新で動かなくなった場合は
+   * ここが原因）。
+   */
+  static connect(port: number, cookie?: string): Promise<TestClient> {
+    const socket = cookie !== undefined
+      // deno-lint-ignore no-explicit-any
+      ? new WebSocket(`ws://127.0.0.1:${port}/ws`, { headers: { cookie } } as any)
+      : new WebSocket(`ws://127.0.0.1:${port}/ws`);
     const client = new TestClient(socket);
     return new Promise((resolve, reject) => {
       socket.addEventListener("open", () => resolve(client), { once: true });
@@ -177,7 +203,8 @@ class TestClient {
 }
 
 Deno.test("結合: 3人で雑学クイズを最終結果まで完走する", async () => {
-  const server = startServer(0);
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
   const base = `http://127.0.0.1:${server.port}`;
 
   // 静的配信とセキュリティヘッダ
@@ -192,7 +219,20 @@ Deno.test("結合: 3人で雑学クイズを最終結果まで完走する", asy
   assert(traversal.status !== 200);
   await traversal.body?.cancel();
 
-  const host = await TestClient.connect(server.port);
+  // ルーム作成にはログインが必須（§3.0）。ホストだけ登録してセッション Cookie を得る
+  const registerRes = await fetch(`${base}/api/auth/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      userId: "host" + crypto.randomUUID().replace(/-/g, "").slice(0, 8),
+      password: "correcthorse",
+    }),
+  });
+  assertEquals(registerRes.status, 200);
+  const hostCookie = registerRes.headers.get("set-cookie")?.split(";")[0];
+  assertExists(hostCookie);
+
+  const host = await TestClient.connect(server.port, hostCookie);
   const p2 = await TestClient.connect(server.port);
   const p3 = await TestClient.connect(server.port);
   const clients = [host, p2, p3];
@@ -277,11 +317,15 @@ Deno.test("結合: 3人で雑学クイズを最終結果まで完走する", asy
   for (const client of clients) await client.leaveAndClose();
   assertEquals(server.manager.roomCount, 0);
   await server.shutdown();
+  kv.close();
 });
 
 Deno.test("結合: チャットが全員に届き、途中入室者は履歴を受け取る（§3.9）", async () => {
-  const server = startServer(0);
-  const host = await TestClient.connect(server.port);
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  const base = `http://127.0.0.1:${server.port}`;
+  const hostCookie = await registerCookie(base);
+  const host = await TestClient.connect(server.port, hostCookie);
   const p2 = await TestClient.connect(server.port);
 
   // ルーム作成と参加
@@ -330,6 +374,7 @@ Deno.test("結合: チャットが全員に届き、途中入室者は履歴を�
   for (const client of [host, p2, p3]) await client.leaveAndClose();
   assertEquals(server.manager.roomCount, 0);
   await server.shutdown();
+  kv.close();
 });
 
 Deno.test("ユニット: WS レート制限は窓内 WS_RATE_MAX 件まで受理する（§3.8）", () => {
@@ -403,8 +448,11 @@ Deno.test("結合: 1接続で 20件/秒 を超えると RATE_LIMITED を受け�
 });
 
 Deno.test("結合: 通常の利用ではレート制限で切断されない（§3.8）", async () => {
-  const server = startServer(0);
-  const host = await TestClient.connect(server.port);
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  const base = `http://127.0.0.1:${server.port}`;
+  const hostCookie = await registerCookie(base);
+  const host = await TestClient.connect(server.port, hostCookie);
 
   host.send({ t: "createRoom", nickname: "ホスト", visibility: "private" });
   const created = await host.waitFor((m) => m.t === "roomState", "roomState(host)");
@@ -418,6 +466,7 @@ Deno.test("結合: 通常の利用ではレート制限で切断されない（�
   await host.leaveAndClose();
   assertEquals(server.manager.roomCount, 0);
   await server.shutdown();
+  kv.close();
 });
 
 Deno.test("ユニット: WS レート制限の上限はコンストラクタで受け取った値になる（§3.8）", () => {
@@ -453,9 +502,10 @@ Deno.test("ユニット: rtcSignal のハードキャップはソフト上限よ
   assertEquals(hard.accept(), false, `ハードキャップ枠の${WS_SIGNAL_HARD_MAX + 1}件目は違反`);
 });
 
-/** ルームを1つ作り、ホストとして参加済みのクライアントを返す */
-async function connectInRoom(port: number): Promise<TestClient> {
-  const client = await TestClient.connect(port);
+/** ルームを1つ作り、ホストとして参加済みのクライアントを返す（ルーム作成にはログインが必須: §3.0） */
+async function connectInRoom(port: number, base: string): Promise<TestClient> {
+  const hostCookie = await registerCookie(base);
+  const client = await TestClient.connect(port, hostCookie);
   client.send({ t: "createRoom", nickname: "ホスト", visibility: "private" });
   await client.waitFor((m) => m.t === "roomState", "roomState(host)");
   return client;
@@ -468,8 +518,9 @@ async function connectInRoom(port: number): Promise<TestClient> {
  */
 async function connectSignalPair(
   port: number,
+  base: string,
 ): Promise<{ host: TestClient; peer: TestClient; peerId: string }> {
-  const host = await connectInRoom(port);
+  const host = await connectInRoom(port, base);
   const created = host.received().find(
     (m): m is Extract<S2C, { t: "roomState" }> => m.t === "roomState",
   );
@@ -519,8 +570,10 @@ async function burstSignals(
 }
 
 Deno.test("結合: rtcSignal は別枠なので 20件/秒 を超えても切断されない（§3.6 / §3.8）", async () => {
-  const server = startServer(0);
-  const { host, peer, peerId } = await connectSignalPair(server.port);
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  const base = `http://127.0.0.1:${server.port}`;
+  const { host, peer, peerId } = await connectSignalPair(server.port, base);
 
   await burstSignals(host, peer, peerId, SIGNAL_BURST);
 
@@ -531,6 +584,7 @@ Deno.test("結合: rtcSignal は別枠なので 20件/秒 を超えても切断�
   await host.leaveAndClose();
   assertEquals(server.manager.roomCount, 0);
   await server.shutdown();
+  kv.close();
 });
 
 /**
@@ -547,8 +601,10 @@ const SIGNAL_SOFT_BURST = WS_SIGNAL_RATE_MAX + 50;
 const SIGNAL_HARD_BURST = WS_SIGNAL_HARD_MAX + 1;
 
 Deno.test("結合: rtcSignal はソフト上限を超えても切断されず、超過分だけ破棄される（§3.6 / §3.8）", async () => {
-  const server = startServer(0);
-  const { host, peer, peerId } = await connectSignalPair(server.port);
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  const base = `http://127.0.0.1:${server.port}`;
+  const { host, peer, peerId } = await connectSignalPair(server.port, base);
 
   sendSignals(host, SIGNAL_SOFT_BURST, peerId);
   // 受理された分だけが相手に中継される
@@ -577,11 +633,14 @@ Deno.test("結合: rtcSignal はソフト上限を超えても切断されず、
   await host.leaveAndClose();
   assertEquals(server.manager.roomCount, 0);
   await server.shutdown();
+  kv.close();
 });
 
 Deno.test("結合: rtcSignal がハードキャップを超えると乱用とみなして切断される（§3.8）", async () => {
-  const server = startServer(0);
-  const client = await connectInRoom(server.port);
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  const base = `http://127.0.0.1:${server.port}`;
+  const client = await connectInRoom(server.port, base);
 
   // 宛先は実在しなくてよい。レート判定は WS 層で中継より先に走るため（§3.8）
   // 送信はすべて同期ループで済むため、送り終える前に切断されて送信が失敗することはない
@@ -601,11 +660,14 @@ Deno.test("結合: rtcSignal がハードキャップを超えると乱用とみ
   );
 
   await server.shutdown();
+  kv.close();
 });
 
 Deno.test("結合: rtcSignal の連投は一般枠を消費しない（§3.8）", async () => {
-  const server = startServer(0);
-  const { host, peer, peerId } = await connectSignalPair(server.port);
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  const base = `http://127.0.0.1:${server.port}`;
+  const { host, peer, peerId } = await connectSignalPair(server.port, base);
 
   await burstSignals(host, peer, peerId, SIGNAL_BURST);
 
@@ -622,4 +684,5 @@ Deno.test("結合: rtcSignal の連投は一般枠を消費しない（§3.8）"
   await host.leaveAndClose();
   assertEquals(server.manager.roomCount, 0);
   await server.shutdown();
+  kv.close();
 });

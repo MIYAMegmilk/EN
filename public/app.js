@@ -67,6 +67,21 @@ function showError(text) {
   $("error").textContent = text ?? "";
 }
 
+/** ログイン状態を確認して表示する（§3.0） */
+async function refreshAccount() {
+  const res = await fetch("/api/me", { credentials: "same-origin" });
+  let body = null;
+  try {
+    body = await res.json();
+  } catch {
+    body = null;
+  }
+  const loggedIn = res.ok && body !== null && typeof body.userId === "string";
+  $("account-status").textContent = loggedIn ? `ログイン中: ${body.userId}` : "未ログイン";
+  $("logout").classList.toggle("hidden", !loggedIn);
+  $("login-link").classList.toggle("hidden", loggedIn);
+}
+
 /** サーバーへ送る */
 function send(msg) {
   if (state.ws === null || state.ws.readyState !== WebSocket.OPEN) {
@@ -413,6 +428,10 @@ function bindVc(iceServers) {
 
 /** 操作の割り当て */
 function bind() {
+  $("logout").addEventListener("click", async () => {
+    await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
+    location.href = "/login.html";
+  });
   $("create").addEventListener("click", () => {
     send({ t: "createRoom", nickname: $("nickname").value, visibility: "private" });
   });
@@ -444,6 +463,7 @@ function bind() {
 /** 起動する。ICE 設定を先に取ってから VC を初期化する */
 async function start() {
   bind();
+  refreshAccount();
   bindVc(await fetchIceServers());
   connect();
 }

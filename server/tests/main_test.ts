@@ -1,10 +1,12 @@
 /**
- * HTTP エンドポイントのテスト
+ * server/main.ts のテスト。
  * /api/ice が TURN 認証情報の有無で正しく応答を変えることを確認する（§3.6 / §3.8）。
+ * §6: 本番はリバースプロキシ経由のため、TCP接続元だけでは実クライアントIPが分からない。
+ * clientIp は X-Forwarded-For を優先して実クライアントIPを判定する。
  */
 
 import { assertEquals } from "@std/assert";
-import { startServer } from "../main.ts";
+import { clientIp, startServer } from "../main.ts";
 
 /** 読み取る環境変数 */
 const TURN_KEYS = ["TURN_URL", "TURN_USER", "TURN_PASS"] as const;
@@ -85,4 +87,44 @@ Deno.test("/api/ice: GET 以外は 405", async () => {
   const res = await fetchIce({}, "POST");
   assertEquals(res.status, 405);
   assertEquals(res.headers.get("allow"), "GET");
+});
+
+Deno.test("clientIp: X-Forwarded-For があれば先頭のIPを使う（リバースプロキシ配下）", () => {
+  const req = new Request("http://example.com/", {
+    headers: { "x-forwarded-for": "203.0.113.5, 10.0.0.1" },
+  });
+  assertEquals(clientIp(req, "127.0.0.1"), "203.0.113.5");
+});
+
+Deno.test("clientIp: X-Forwarded-For が無ければ TCP 接続元を使う", () => {
+  const req = new Request("http://example.com/");
+  assertEquals(clientIp(req, "127.0.0.1"), "127.0.0.1");
+});
+
+Deno.test("clientIp: 空文字の X-Forwarded-For は TCP 接続元にフォールバックする", () => {
+  const req = new Request("http://example.com/", {
+    headers: { "x-forwarded-for": "" },
+  });
+  assertEquals(clientIp(req, "127.0.0.1"), "127.0.0.1");
+});
+
+Deno.test("clientIp: 先頭要素の前後の空白を取り除く", () => {
+  const req = new Request("http://example.com/", {
+    headers: { "x-forwarded-for": "  203.0.113.5  , 10.0.0.1" },
+  });
+  assertEquals(clientIp(req, "127.0.0.1"), "203.0.113.5");
+});
+
+Deno.test("clientIp: ::1 からの接続も信頼済みプロキシとして扱う", () => {
+  const req = new Request("http://example.com/", {
+    headers: { "x-forwarded-for": "203.0.113.5" },
+  });
+  assertEquals(clientIp(req, "::1"), "203.0.113.5");
+});
+
+Deno.test("clientIp: プロキシ（localhost）以外からの直接接続は X-Forwarded-For を偽装されても無視する", () => {
+  const req = new Request("http://example.com/", {
+    headers: { "x-forwarded-for": "203.0.113.5" },
+  });
+  assertEquals(clientIp(req, "198.51.100.9"), "198.51.100.9");
 });

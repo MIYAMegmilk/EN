@@ -13,7 +13,8 @@
  * 状態遷移関数（engine.reduce）の呼び出しは同期文脈で行う。このファイルには
  * await を書かない。
  *
- * 軽量スコープ: 認証・公開ルーム・ノック・キック・importGame・24時間自動削除は未実装。
+ * 軽量スコープ: createRoom の認証必須化（AUTH_REQUIRED）は実装済み。
+ * 公開ルーム・ノック・キック・importGame・24時間自動削除は未実装。
  * 接続点は `TODO(チーム分担)` として記してある。
  * VC は rtcSignal の中継のみを受け持つ（§3.6。接続の確立はクライアント側）。
  * §3.8 の WS レート制限（1接続あたり 20件/秒）は main.ts の WebSocket 層で実装済み。
@@ -82,6 +83,8 @@ export type TimerHandle = number;
 export interface ClientLink {
   /** 接続ごとに一意なID */
   readonly id: string;
+  /** WS アップグレード時に Cookie から検証済みのアカウントID。未ログインなら null（§3.0） */
+  readonly userId: string | null;
   /** S2C メッセージを送る */
   send(msg: S2C): void;
   /** 接続を閉じる */
@@ -325,8 +328,10 @@ export class RoomManager {
       sendError(link, "INVALID_INPUT", "すでにルームに参加しています");
       return;
     }
-    // TODO(チーム分担): §3.0 認証必須化。WS アップグレード時の Cookie を検証し、
-    // 未ログインなら AUTH_REQUIRED を返す。ownerUserId には認証済みの userId を入れる。
+    if (link.userId === null) {
+      sendError(link, "AUTH_REQUIRED", "ルーム作成にはログインが必要です");
+      return;
+    }
     if (msg.visibility !== "private") {
       // TODO(チーム分担): §3.1 / §3.1.1 公開ルーム（一覧・ノック・entryToken）
       sendError(link, "INVALID_INPUT", "公開ルームは未実装です");
@@ -348,10 +353,11 @@ export class RoomManager {
     }
     const now = this.now();
     const host = this.newPlayer(nickname.value);
+    host.userId = link.userId;
     const room: Room = {
       code,
       visibility: "private",
-      ownerUserId: "",
+      ownerUserId: link.userId,
       hostId: host.id,
       players: new Map([[host.id, host]]),
       pendingKnocks: new Map(),
