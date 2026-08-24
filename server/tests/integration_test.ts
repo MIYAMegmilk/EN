@@ -40,7 +40,7 @@ function delay(ms: number): Promise<void> {
 /**
  * 条件が満たされるまでポーリングで待つ。
  * TestClient.waitFor はエラー受信で reject するため、エラー応答が正常系であるテスト
- * （未実装の rtcSignal を連投する等）ではこちらを使う。
+ * （レート制限に触れるまで連投する等）ではこちらを使う。
  */
 async function waitUntil(condition: () => boolean, label: string): Promise<void> {
   const deadline = Date.now() + WAIT_TIMEOUT_MS;
@@ -48,6 +48,22 @@ async function waitUntil(condition: () => boolean, label: string): Promise<void>
     if (Date.now() >= deadline) throw new Error(`${label} を待機中にタイムアウトしました`);
     await delay(10);
   }
+}
+
+/** 使い捨てユーザーを登録し、セッション Cookie を返す（ルーム作成にはログインが必須: §3.0） */
+async function registerCookie(base: string): Promise<string> {
+  const res = await fetch(`${base}/api/auth/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      userId: "u" + crypto.randomUUID().replace(/-/g, "").slice(0, 10),
+      password: "correcthorse",
+    }),
+  });
+  assertEquals(res.status, 200);
+  const cookie = res.headers.get("set-cookie")?.split(";")[0];
+  assertExists(cookie);
+  return cookie;
 }
 
 /** テスト用の WebSocket クライアント */
@@ -75,9 +91,19 @@ class TestClient {
     });
   }
 
-  /** 接続が確立するまで待つ */
-  static connect(port: number): Promise<TestClient> {
-    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  /**
+   * 接続が確立するまで待つ。cookie を渡すとログイン済みとしてアップグレードされる。
+   * ブラウザは同一オリジンへの WS ハンドシェイクに Cookie を自動で付けるが、
+   * このテストのような生スクリプトからは自分で付ける必要がある。標準の WebSocket
+   * コンストラクタには headers 引数が無いため、Deno 独自拡張の第2引数 { headers }
+   * を使う（Deno 2.9.5 で動作確認済み。将来の Deno 更新で動かなくなった場合は
+   * ここが原因）。
+   */
+  static connect(port: number, cookie?: string): Promise<TestClient> {
+    const socket = cookie !== undefined
+      // deno-lint-ignore no-explicit-any
+      ? new WebSocket(`ws://127.0.0.1:${port}/ws`, { headers: { cookie } } as any)
+      : new WebSocket(`ws://127.0.0.1:${port}/ws`);
     const client = new TestClient(socket);
     return new Promise((resolve, reject) => {
       socket.addEventListener("open", () => resolve(client), { once: true });
@@ -177,7 +203,8 @@ class TestClient {
 }
 
 Deno.test("結合: 3人で雑学クイズを最終結果まで完走する", async () => {
-  const server = startServer(0);
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
   const base = `http://127.0.0.1:${server.port}`;
 
   // 静的配信とセキュリティヘッダ
@@ -192,7 +219,20 @@ Deno.test("結合: 3人で雑学クイズを最終結果まで完走する", asy
   assert(traversal.status !== 200);
   await traversal.body?.cancel();
 
-  const host = await TestClient.connect(server.port);
+  // ルーム作成にはログインが必須（§3.0）。ホストだけ登録してセッション Cookie を得る
+  const registerRes = await fetch(`${base}/api/auth/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      userId: "host" + crypto.randomUUID().replace(/-/g, "").slice(0, 8),
+      password: "correcthorse",
+    }),
+  });
+  assertEquals(registerRes.status, 200);
+  const hostCookie = registerRes.headers.get("set-cookie")?.split(";")[0];
+  assertExists(hostCookie);
+
+  const host = await TestClient.connect(server.port, hostCookie);
   const p2 = await TestClient.connect(server.port);
   const p3 = await TestClient.connect(server.port);
   const clients = [host, p2, p3];
@@ -277,11 +317,15 @@ Deno.test("結合: 3人で雑学クイズを最終結果まで完走する", asy
   for (const client of clients) await client.leaveAndClose();
   assertEquals(server.manager.roomCount, 0);
   await server.shutdown();
+  kv.close();
 });
 
 Deno.test("結合: チャットが全員に届き、途中入室者は履歴を受け取る（§3.9）", async () => {
-  const server = startServer(0);
-  const host = await TestClient.connect(server.port);
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  const base = `http://127.0.0.1:${server.port}`;
+  const hostCookie = await registerCookie(base);
+  const host = await TestClient.connect(server.port, hostCookie);
   const p2 = await TestClient.connect(server.port);
 
   // ルーム作成と参加
@@ -330,6 +374,7 @@ Deno.test("結合: チャットが全員に届き、途中入室者は履歴を�
   for (const client of [host, p2, p3]) await client.leaveAndClose();
   assertEquals(server.manager.roomCount, 0);
   await server.shutdown();
+  kv.close();
 });
 
 Deno.test("ユニット: WS レート制限は窓内 WS_RATE_MAX 件まで受理する（§3.8）", () => {
@@ -403,8 +448,11 @@ Deno.test("結合: 1接続で 20件/秒 を超えると RATE_LIMITED を受け�
 });
 
 Deno.test("結合: 通常の利用ではレート制限で切断されない（§3.8）", async () => {
-  const server = startServer(0);
-  const host = await TestClient.connect(server.port);
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  const base = `http://127.0.0.1:${server.port}`;
+  const hostCookie = await registerCookie(base);
+  const host = await TestClient.connect(server.port, hostCookie);
 
   host.send({ t: "createRoom", nickname: "ホスト", visibility: "private" });
   const created = await host.waitFor((m) => m.t === "roomState", "roomState(host)");
@@ -418,6 +466,7 @@ Deno.test("結合: 通常の利用ではレート制限で切断されない（�
   await host.leaveAndClose();
   assertEquals(server.manager.roomCount, 0);
   await server.shutdown();
+  kv.close();
 });
 
 Deno.test("ユニット: WS レート制限の上限はコンストラクタで受け取った値になる（§3.8）", () => {
@@ -453,12 +502,35 @@ Deno.test("ユニット: rtcSignal のハードキャップはソフト上限よ
   assertEquals(hard.accept(), false, `ハードキャップ枠の${WS_SIGNAL_HARD_MAX + 1}件目は違反`);
 });
 
-/** ルームを1つ作り、ホストとして参加済みのクライアントを返す */
-async function connectInRoom(port: number): Promise<TestClient> {
-  const client = await TestClient.connect(port);
+/** ルームを1つ作り、ホストとして参加済みのクライアントを返す（ルーム作成にはログインが必須: §3.0） */
+async function connectInRoom(port: number, base: string): Promise<TestClient> {
+  const hostCookie = await registerCookie(base);
+  const client = await TestClient.connect(port, hostCookie);
   client.send({ t: "createRoom", nickname: "ホスト", visibility: "private" });
   await client.waitFor((m) => m.t === "roomState", "roomState(host)");
   return client;
+}
+
+/**
+ * ルームを1つ作り、ホストと中継先の相手が参加済みのクライアントを返す。
+ * rtcSignal は宛先が同室の接続中メンバーでなければ黙って破棄されるため（§3.6）、
+ * 「レート制限を通過した件数」を数えるには実在する相手が要る。
+ */
+async function connectSignalPair(
+  port: number,
+  base: string,
+): Promise<{ host: TestClient; peer: TestClient; peerId: string }> {
+  const host = await connectInRoom(port, base);
+  const created = host.received().find(
+    (m): m is Extract<S2C, { t: "roomState" }> => m.t === "roomState",
+  );
+  assertExists(created);
+
+  const peer = await TestClient.connect(port);
+  peer.send({ t: "join", roomCode: created.snapshot.code, nickname: "相手" });
+  const joined = await peer.waitFor((m) => m.t === "roomState", "roomState(peer)");
+  assert(joined.t === "roomState");
+  return { host, peer, peerId: joined.snapshot.youId };
 }
 
 /**
@@ -467,37 +539,52 @@ async function connectInRoom(port: number): Promise<TestClient> {
  */
 const SIGNAL_BURST = WS_RATE_MAX * 2;
 
-/** rtcSignal を n 件、間を空けずに送る */
-function sendSignals(client: TestClient, count: number): void {
+/** rtcSignal を n 件、間を空けずに宛先 to へ送る */
+function sendSignals(client: TestClient, count: number, to: string): void {
   for (let i = 0; i < count; i++) {
-    client.send({ t: "rtcSignal", to: `peer${i}`, payload: { kind: "ice" } });
+    client.send({ t: "rtcSignal", to, payload: { kind: "ice" } });
   }
 }
 
-/** rtcSignal を n 件連投し、未実装応答（INVALID_INPUT）が返り切るまで待つ */
-async function burstSignals(client: TestClient, count: number): Promise<void> {
-  const before = client.countError("INVALID_INPUT");
-  sendSignals(client, count);
-  // main では rtcSignal 自体が未実装のため INVALID_INPUT が返る。
-  // ここでの検証点は「応答が返り切るまで接続が維持されること」
+/** 中継されて届いた rtcSignal の件数 */
+function countRelayed(peer: TestClient): number {
+  return peer.received().filter((m) => m.t === "rtcSignal").length;
+}
+
+/**
+ * rtcSignal を n 件連投し、相手に中継され切るまで待つ。
+ * レート制限に弾かれた分は中継されないため、届いた件数が受理件数になる。
+ */
+async function burstSignals(
+  host: TestClient,
+  peer: TestClient,
+  peerId: string,
+  count: number,
+): Promise<void> {
+  const before = countRelayed(peer);
+  sendSignals(host, count, peerId);
   await waitUntil(
-    () => client.countError("INVALID_INPUT") >= before + count,
-    `rtcSignal ${count}件への応答`,
+    () => countRelayed(peer) >= before + count,
+    `rtcSignal ${count}件の中継`,
   );
 }
 
 Deno.test("結合: rtcSignal は別枠なので 20件/秒 を超えても切断されない（§3.6 / §3.8）", async () => {
-  const server = startServer(0);
-  const client = await connectInRoom(server.port);
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  const base = `http://127.0.0.1:${server.port}`;
+  const { host, peer, peerId } = await connectSignalPair(server.port, base);
 
-  await burstSignals(client, SIGNAL_BURST);
+  await burstSignals(host, peer, peerId, SIGNAL_BURST);
 
-  assertEquals(client.closeCode, null, "切断されていない");
-  assertEquals(client.countError("RATE_LIMITED"), 0, "RATE_LIMITED は届かない");
+  assertEquals(host.closeCode, null, "切断されていない");
+  assertEquals(host.countError("RATE_LIMITED"), 0, "RATE_LIMITED は届かない");
 
-  await client.leaveAndClose();
+  await peer.leaveAndClose();
+  await host.leaveAndClose();
   assertEquals(server.manager.roomCount, 0);
   await server.shutdown();
+  kv.close();
 });
 
 /**
@@ -514,43 +601,50 @@ const SIGNAL_SOFT_BURST = WS_SIGNAL_RATE_MAX + 50;
 const SIGNAL_HARD_BURST = WS_SIGNAL_HARD_MAX + 1;
 
 Deno.test("結合: rtcSignal はソフト上限を超えても切断されず、超過分だけ破棄される（§3.6 / §3.8）", async () => {
-  const server = startServer(0);
-  const client = await connectInRoom(server.port);
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  const base = `http://127.0.0.1:${server.port}`;
+  const { host, peer, peerId } = await connectSignalPair(server.port, base);
 
-  sendSignals(client, SIGNAL_SOFT_BURST);
-  // 受理された分は未実装応答（INVALID_INPUT）で返ってくる
+  sendSignals(host, SIGNAL_SOFT_BURST, peerId);
+  // 受理された分だけが相手に中継される
   await waitUntil(
-    () => client.countError("INVALID_INPUT") >= WS_SIGNAL_RATE_MAX,
-    `rtcSignal ${WS_SIGNAL_RATE_MAX}件への応答`,
+    () => countRelayed(peer) >= WS_SIGNAL_RATE_MAX,
+    `rtcSignal ${WS_SIGNAL_RATE_MAX}件の中継`,
   );
   // WS は順序が保たれるため、バースト後に送ったチャットが届いた時点で全件が処理済み。
   // 通常メッセージが処理されること自体が「切断されず接続が生きている」ことの確認でもある。
-  client.send({ t: "chat", text: "バースト後の発言" });
+  host.send({ t: "chat", text: "バースト後の発言" });
   await waitUntil(
-    () => client.received().some((m) => m.t === "chat" && m.message.text === "バースト後の発言"),
+    () => host.received().some((m) => m.t === "chat" && m.message.text === "バースト後の発言"),
     "バースト後のチャット",
   );
 
-  assertEquals(client.closeCode, null, "ソフト上限の超過では切断されない");
+  assertEquals(host.closeCode, null, "ソフト上限の超過では切断されない");
   assertEquals(
-    client.countError("INVALID_INPUT"),
+    countRelayed(peer),
     WS_SIGNAL_RATE_MAX,
     `受理はソフト上限までで、超過 ${SIGNAL_SOFT_BURST - WS_SIGNAL_RATE_MAX} 件は破棄される`,
   );
   // 超過1件ごとに返すとエラーの増幅になるため、判定窓につき1回に絞られている
-  assertEquals(client.countError("RATE_LIMITED"), 1, "RATE_LIMITED の通知は判定窓につき1回");
+  assertEquals(host.countError("RATE_LIMITED"), 1, "RATE_LIMITED の通知は判定窓につき1回");
 
-  await client.leaveAndClose();
+  await peer.leaveAndClose();
+  await host.leaveAndClose();
   assertEquals(server.manager.roomCount, 0);
   await server.shutdown();
+  kv.close();
 });
 
 Deno.test("結合: rtcSignal がハードキャップを超えると乱用とみなして切断される（§3.8）", async () => {
-  const server = startServer(0);
-  const client = await connectInRoom(server.port);
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  const base = `http://127.0.0.1:${server.port}`;
+  const client = await connectInRoom(server.port, base);
 
+  // 宛先は実在しなくてよい。レート判定は WS 層で中継より先に走るため（§3.8）
   // 送信はすべて同期ループで済むため、送り終える前に切断されて送信が失敗することはない
-  sendSignals(client, SIGNAL_HARD_BURST);
+  sendSignals(client, SIGNAL_HARD_BURST, "no-such-peer");
 
   await Promise.race([client.closed, delay(WAIT_TIMEOUT_MS)]);
   assertEquals(client.closeCode, 1008, "policy violation の 1008 で切断される");
@@ -566,24 +660,29 @@ Deno.test("結合: rtcSignal がハードキャップを超えると乱用とみ
   );
 
   await server.shutdown();
+  kv.close();
 });
 
 Deno.test("結合: rtcSignal の連投は一般枠を消費しない（§3.8）", async () => {
-  const server = startServer(0);
-  const client = await connectInRoom(server.port);
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  const base = `http://127.0.0.1:${server.port}`;
+  const { host, peer, peerId } = await connectSignalPair(server.port, base);
 
-  await burstSignals(client, SIGNAL_BURST);
+  await burstSignals(host, peer, peerId, SIGNAL_BURST);
 
   // 一般枠が消費されていなければ、バースト直後の通常メッセージも普通に処理される
-  client.send({ t: "chat", text: "バースト後の発言" });
+  host.send({ t: "chat", text: "バースト後の発言" });
   await waitUntil(
-    () => client.received().some((m) => m.t === "chat" && m.message.text === "バースト後の発言"),
+    () => host.received().some((m) => m.t === "chat" && m.message.text === "バースト後の発言"),
     "バースト後のチャット",
   );
-  assertEquals(client.closeCode, null, "切断されていない");
-  assertEquals(client.countError("RATE_LIMITED"), 0, "RATE_LIMITED は届かない");
+  assertEquals(host.closeCode, null, "切断されていない");
+  assertEquals(host.countError("RATE_LIMITED"), 0, "RATE_LIMITED は届かない");
 
-  await client.leaveAndClose();
+  await peer.leaveAndClose();
+  await host.leaveAndClose();
   assertEquals(server.manager.roomCount, 0);
   await server.shutdown();
+  kv.close();
 });

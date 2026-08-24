@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>宴 -EN-（ログイン・開発用動作確認ページ）</title>
+    <style>
+      /* 開発用の最小限の見た目。本番の画面は別途デザインする */
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 0 auto;
+        padding: 1rem;
+        max-width: 30rem;
+        line-height: 1.6;
+      }
+      h1 {
+        font-size: 1.2rem;
+      }
+      h2 {
+        font-size: 1rem;
+        margin: 1.2rem 0 0.4rem;
+      }
+      section {
+        border: 1px solid #ccc;
+        border-radius: 6px;
+        padding: 0.6rem 0.8rem;
+        margin-bottom: 0.8rem;
+      }
+      label {
+        display: block;
+        font-size: 0.85rem;
+        margin-top: 0.4rem;
+      }
+      input,
+      button {
+        font: inherit;
+        padding: 0.4rem 0.5rem;
+        width: 100%;
+        box-sizing: border-box;
+      }
+      button {
+        margin-top: 0.6rem;
+        cursor: pointer;
+      }
+      .muted {
+        color: #666;
+        font-size: 0.85rem;
+      }
+      #error {
+        color: #b00020;
+      }
+      #status {
+        color: #2e7d32;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>宴 -EN- ログイン（開発用動作確認ページ）</h1>
+    <p class="muted">
+      /api/auth/* の疎通確認だけを目的とした暫定ページです。デザインは別途作成します。
+    </p>
+
+    <p id="error" role="alert"></p>
+    <p id="status" role="status"></p>
+    <p id="me-result" class="muted"></p>
+    <p class="muted">
+      <a id="guest-link" href="/index.html">ログインせずに進む（ゲストとして参加）</a>
+    </p>
+
+    <section id="register-section">
+      <h2>新規登録</h2>
+      <label for="register-userid">ユーザーID（半角英数4〜20文字）</label>
+      <input id="register-userid" autocomplete="username" maxlength="20" />
+      <label for="register-password">パスワード（8〜64文字）</label>
+      <input id="register-password" type="password" autocomplete="new-password" maxlength="64" />
+      <button id="register" type="button">登録してログイン</button>
+    </section>
+
+    <section id="login-section">
+      <h2>ログイン</h2>
+      <label for="login-userid">ユーザーID</label>
+      <input id="login-userid" autocomplete="username" maxlength="20" />
+      <label for="login-password">パスワード</label>
+      <input id="login-password" type="password" autocomplete="current-password" maxlength="64" />
+      <button id="login" type="button">ログイン</button>
+    </section>
+
+    <script src="./login.js"></script>
+  </body>
+</html>
