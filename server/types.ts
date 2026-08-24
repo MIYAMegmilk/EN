@@ -17,6 +17,10 @@ export const VC_CAPACITY = 6;
 export const NICKNAME_MAX = 20;
 /** 公開ルーム名の最大文字数（§3.1） */
 export const ROOM_NAME_MAX = 20;
+/** 卓の説明文の最大文字数 */
+export const ROOM_DESCRIPTION_MAX = 100;
+/** 卓に付けられるプリセットタグの上限数 */
+export const ROOM_TAGS_MAX = 5;
 /** ルームコードの桁数（§1） */
 export const ROOM_CODE_LENGTH = 6;
 /** 共有コードの桁数（§3.5） */
