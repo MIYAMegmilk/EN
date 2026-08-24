@@ -151,6 +151,18 @@ function isAllowedOrigin(req: Request): boolean {
   }
 }
 
+/**
+ * クライアントの実IPを求める（§3.8 のレート制限のキーに使う）。
+ * 本番は VPS上のリバースプロキシ経由（§6）のため、TCP 接続元（remoteAddrHostname）は
+ * 常にプロキシのアドレスになる。プロキシが付与する X-Forwarded-For の先頭値を優先する。
+ */
+export function clientIp(req: Request, remoteAddrHostname: string): string {
+  const forwarded = req.headers.get("x-forwarded-for");
+  if (forwarded === null) return remoteAddrHostname;
+  const first = forwarded.split(",")[0]?.trim();
+  return first !== undefined && first.length > 0 ? first : remoteAddrHostname;
+}
+
 /** WebSocket へアップグレードして RoomManager につなぐ */
 async function handleWebSocket(
   req: Request,
@@ -271,11 +283,21 @@ async function handleWebSocket(
 // 静的配信
 // ---------------------------------------------------------------------------
 
-/** public/ を配信する。serveDir が fsRoot の外へ出ないためパストラバーサルは起きない */
-async function handleStatic(req: Request): Promise<Response> {
+/**
+ * public/ を配信する。serveDir が fsRoot の外へ出ないためパストラバーサルは起きない。
+ * トップページはログイン済みなら index.html、未ログインなら login.html を返す。
+ */
+async function handleStatic(req: Request, kv: Deno.Kv | null): Promise<Response> {
   const url = new URL(req.url);
-  // 招待 URL（/r/{code}）は同じ画面を返す（§2）
-  const path = /^\/r\/[0-9]{6}\/?$/.test(url.pathname) ? "/index.html" : url.pathname;
+  let path = url.pathname;
+  if (/^\/r\/[0-9]{6}\/?$/.test(url.pathname)) {
+    // 招待 URL（/r/{code}）は同じ画面を返す（§2）
+    path = "/index.html";
+  } else if (url.pathname === "/") {
+    const token = getCookies(req.headers)[SESSION_COOKIE_NAME];
+    const userId = kv !== null ? await verifySession(kv, token) : null;
+    path = userId !== null ? "/index.html" : "/login.html";
+  }
   const rewritten = new Request(new URL(path + url.search, url.origin), req);
   const res = await serveDir(rewritten, { fsRoot: PUBLIC_DIR, quiet: true });
   const headers = new Headers(res.headers);
@@ -373,12 +395,12 @@ export function startServer(
     if (url.pathname.startsWith("/api/")) {
       if (!isAllowedOrigin(req)) return new Response("forbidden origin", { status: 403 });
       if (auth === null) return new Response("auth not configured", { status: 501 });
-      const res = await auth.handle(req, url, info.remoteAddr.hostname);
+      const res = await auth.handle(req, url, clientIp(req, info.remoteAddr.hostname));
       if (res !== null) return res;
       return new Response("not found", { status: 404 });
     }
     // TODO(チーム分担): §4.0 HTTP API（/api/rooms, /api/games/*）
-    return handleStatic(req);
+    return handleStatic(req, kv ?? null);
   });
   return {
     port: (server.addr as Deno.NetAddr).port,
