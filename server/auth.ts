@@ -4,7 +4,9 @@
  *   POST /api/auth/register … 登録 + ログイン
  *   POST /api/auth/login    … ログイン
  *   POST /api/auth/logout   … ログアウト
- *   GET  /api/me            … ログイン状態の確認
+ *   GET  /api/me            … ログイン状態の確認（軽量プロフィール保存済みなら nickname/tags も返す）
+ *   GET  /api/tags          … プリセット趣味タグ一覧の取得（§3.11、ログイン不要）
+ *   PUT  /api/profile       … 軽量プロフィール（あだ名・趣味タグ）の保存（§3.0 / §3.11、要ログイン）
  *
  * アカウント（User）・認証セッション（AuthSession）は Deno KV に保存する（§5）。
  * ルーム状態とは異なり永続化対象。
@@ -13,7 +15,7 @@
 import { decodeBase64, encodeBase64 } from "@std/encoding/base64";
 import { deleteCookie, getCookies, setCookie } from "@std/http/cookie";
 import { HOBBY_TAGS, type HobbyTagId, isValidHobbyTagId } from "./hobby_tags.ts";
-import { validateNickname } from "./rooms.ts";
+import { validateNickname } from "./validation.ts";
 import type { AuthSession, User } from "./types.ts";
 
 /** userId の文字数制約（§3.0） */

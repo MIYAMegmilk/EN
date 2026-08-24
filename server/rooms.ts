@@ -32,7 +32,6 @@ import {
   DISCONNECT_GRACE_MS,
   err,
   type ErrorCode,
-  NICKNAME_MAX,
   ok,
   type Phase,
   type PhaseDurations,
@@ -77,6 +76,11 @@ import { createKanaProvider, detectSenryuAny, SENRYU_TOLERANCE } from "./senryu.
 import type { SenryuMatch, YomiProvider } from "./senryu.ts";
 import { toSummary } from "./gamedef.ts";
 import { isOfficialGame, OFFICIAL_GAMES } from "./official_games.ts";
+import { charLength, hasControlChar, validateNickname } from "./validation.ts";
+
+/** ニックネームの検証ロジックの本体は validation.ts にある（auth.ts からも使うため）。
+ * 既存のインポート元（server/tests/rooms_test.ts など）を壊さないよう、ここから再エクスポートする */
+export { validateNickname } from "./validation.ts";
 
 // ---------------------------------------------------------------------------
 // 定数
@@ -204,20 +208,6 @@ type RemoveReason = "leave" | "graceExpired";
 // 入力検証
 // ---------------------------------------------------------------------------
 
-/** 文字数はコードポイント単位で数える（サロゲートペア対策） */
-function charLength(s: string): number {
-  return [...s].length;
-}
-
-/** 制御文字を含むか */
-function hasControlChar(s: string): boolean {
-  for (const ch of s) {
-    const cp = ch.codePointAt(0);
-    if (cp !== undefined && (cp < 0x20 || cp === 0x7f)) return true;
-  }
-  return false;
-}
-
 /** チャット本文を検証して正規化する（1..200文字・制御文字禁止、§3.9）。改行も拒否する */
 export function validateChatText(input: unknown): Result<string> {
   if (typeof input !== "string") {
@@ -233,25 +223,6 @@ export function validateChatText(input: unknown): Result<string> {
   }
   if (hasControlChar(trimmed)) {
     return err("INVALID_INPUT", "メッセージに使用できない文字が含まれています");
-  }
-  return ok(trimmed);
-}
-
-/** ニックネームを検証して正規化する（1..20文字・制御文字禁止、§3.1） */
-export function validateNickname(input: unknown): Result<string> {
-  if (typeof input !== "string") {
-    return err("INVALID_INPUT", "ニックネームを入力してください");
-  }
-  const trimmed = input.trim();
-  const length = charLength(trimmed);
-  if (length === 0) {
-    return err("INVALID_INPUT", "ニックネームを入力してください");
-  }
-  if (length > NICKNAME_MAX) {
-    return err("INVALID_INPUT", `ニックネームは${NICKNAME_MAX}文字以内で入力してください`);
-  }
-  if (hasControlChar(trimmed)) {
-    return err("INVALID_INPUT", "ニックネームに使用できない文字が含まれています");
   }
   return ok(trimmed);
 }

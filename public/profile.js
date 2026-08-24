@@ -11,6 +11,9 @@
 
 const TAGS_MAX = 5;
 
+/** プリセット趣味タグの一覧（/api/tags の結果）。保存成功後の再描画にも使う */
+let presetTags = [];
+
 function $(id) {
   return document.getElementById(id);
 }
@@ -68,9 +71,12 @@ async function init() {
   }
 
   const tagsRes = await callApi("/api/tags");
-  const tags = tagsRes.ok ? tagsRes.body.tags : [];
+  presetTags = tagsRes.ok && tagsRes.body !== null ? tagsRes.body.tags : [];
+  if (!tagsRes.ok || tagsRes.body === null) {
+    showError("趣味タグ一覧の取得に失敗しました");
+  }
   const selectedIds = Array.isArray(me.body.tags) ? me.body.tags : [];
-  renderTags(tags, selectedIds);
+  renderTags(presetTags, selectedIds);
   $("profile-nickname").value = typeof me.body.nickname === "string" ? me.body.nickname : "";
 }
 
@@ -87,6 +93,13 @@ $("profile-save").addEventListener("click", async () => {
     body: JSON.stringify({ nickname, tags }),
   });
   if (ok) {
+    // サーバー側でトリム・重複除去された正本の値（body.nickname/tags）を画面に反映する
+    if (typeof body?.nickname === "string") {
+      $("profile-nickname").value = body.nickname;
+    }
+    if (Array.isArray(body?.tags)) {
+      renderTags(presetTags, body.tags);
+    }
     showStatus("プロフィールを保存しました");
   } else {
     showError(`保存に失敗しました (${status}): ${body?.error ?? "unknown error"}`);

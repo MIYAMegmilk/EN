@@ -3,7 +3,7 @@
  * 実サーバーを空きポートで起動し、fetch で register / login / me / logout を確認する。
  */
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertFalse } from "@std/assert";
 import { startServer } from "../main.ts";
 import { SESSION_COOKIE_NAME } from "../auth.ts";
 import type { AuthSession } from "../types.ts";
@@ -255,6 +255,31 @@ Deno.test("me は期限切れセッションを401で拒否する", async () => 
   }
 });
 
+Deno.test("GET /api/me はプロフィール未保存だとnickname/tagsキーを含まない", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const userId = randomUserId();
+    const registerRes = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId, password: "correcthorse" }),
+    });
+    const cookie = cookieFrom(registerRes);
+
+    const meRes = await fetch(`${base}/api/me`, { headers: { cookie } });
+    assertEquals(meRes.status, 200);
+    const meBody = await meRes.json();
+    assertEquals(meBody.userId, userId);
+    assertFalse("nickname" in meBody, "未保存なら nickname キーが無いこと");
+    assertFalse("tags" in meBody, "未保存なら tags キーが無いこと");
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
 Deno.test("GET /api/tags はプリセットタグ一覧を返す（ログイン不要）", async () => {
   const kv = await Deno.openKv(":memory:");
   const server = startServer(0, "127.0.0.1", kv);
@@ -316,6 +341,37 @@ Deno.test("PUT /api/profile: あだ名とタグを保存するとGET /api/meに�
     assertEquals(meBody.userId, userId);
     assertEquals(meBody.nickname, "たろう");
     assertEquals(meBody.tags, ["game", "pet"]);
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("PUT /api/profile: あだ名の前後の空白はトリムされて保存される", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const userId = randomUserId();
+    const registerRes = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId, password: "correcthorse" }),
+    });
+    const cookie = cookieFrom(registerRes);
+
+    const putRes = await fetch(`${base}/api/profile`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ nickname: "  たろう  ", tags: [] }),
+    });
+    assertEquals(putRes.status, 200);
+    const putBody = await putRes.json();
+    assertEquals(putBody.nickname, "たろう");
+
+    const meRes = await fetch(`${base}/api/me`, { headers: { cookie } });
+    const meBody = await meRes.json();
+    assertEquals(meBody.nickname, "たろう");
   } finally {
     await server.shutdown();
     kv.close();
