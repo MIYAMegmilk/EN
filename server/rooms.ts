@@ -13,8 +13,9 @@
  * 状態遷移関数（engine.reduce）の呼び出しは同期文脈で行う。このファイルには
  * await を書かない。
  *
- * 軽量スコープ: 認証・公開ルーム・ノック・キック・レート制限（§3.8 の WS 20件/秒）・
- * VC・importGame・24時間自動削除は未実装。接続点は `TODO(チーム分担)` として記してある。
+ * 軽量スコープ: 認証・公開ルーム・ノック・キック・VC・importGame・24時間自動削除は未実装。
+ * 接続点は `TODO(チーム分担)` として記してある。
+ * §3.8 の WS レート制限（1接続あたり 20件/秒）は main.ts の WebSocket 層で実装済み。
  */
 
 import {
@@ -499,7 +500,8 @@ export class RoomManager {
     }
     const now = this.now();
     entry.room.lastActiveAt = now;
-    // TODO(チーム分担): §3.8 レート制限（1接続あたり 20件/秒 を超えたら切断）
+    // §3.8 の WS レート制限（1接続あたり 20件/秒 を超えたら切断）は接続単位の規定のため、
+    // main.ts の WebSocket 層で実装済み（ここには置かない）
     switch (msg.t) {
       case "leave":
         this.removePlayer(entry, player.id, "leave");

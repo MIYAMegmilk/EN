@@ -11,7 +11,7 @@
 import { serveDir } from "@std/http/file-server";
 import { fromFileUrl } from "@std/path";
 import { type ClientLink, RoomManager } from "./rooms.ts";
-import type { C2S, S2C } from "./types.ts";
+import { type C2S, type S2C, WS_RATE_MAX, WS_RATE_WINDOW_MS } from "./types.ts";
 
 /** WS メッセージ1件の上限（§3.8 の KV 上限に合わせた 64KB） */
 export const MAX_MESSAGE_BYTES = 64 * 1024;
@@ -88,6 +88,30 @@ export function exceedsByteLimit(text: string, limit: number): boolean {
   return new TextEncoder().encode(text).length > limit;
 }
 
+/**
+ * WS メッセージのレート制限（§3.8: 1接続あたり 20件/秒 を超えたら切断）。
+ * 1接続につき1個を持ち、直近 WS_RATE_WINDOW_MS 以内の受信時刻だけをスライディング
+ * ウィンドウとして保持する。時刻はコンストラクタで注入でき、テストから固定できる。
+ */
+export class MessageRateLimiter {
+  /** 判定窓内に受信した時刻（古い順、epoch ms） */
+  private readonly times: number[] = [];
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  /**
+   * メッセージ1件を受信したものとして記録し、受理してよいかを返す。
+   * false は制限超過（＝窓内 WS_RATE_MAX 件を「超えた」件）で、呼び出し側は切断する。
+   */
+  accept(): boolean {
+    const at = this.now();
+    // 窓から外れた時刻は捨ててメモリを増やさない（handleChat と同じ「経過 < 窓」を窓内とする）
+    while (this.times.length > 0 && at - this.times[0] >= WS_RATE_WINDOW_MS) this.times.shift();
+    this.times.push(at);
+    return this.times.length <= WS_RATE_MAX;
+  }
+}
+
 /** JSON.parse 済みの値を C2S として受理できるか判定する */
 export function asC2S(value: unknown): C2S | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
@@ -118,6 +142,7 @@ function handleWebSocket(req: Request, manager: RoomManager): Response {
   }
   const { socket, response } = Deno.upgradeWebSocket(req);
   const link = new SocketLink(socket);
+  const rateLimiter = new MessageRateLimiter();
   socket.onmessage = (event) => {
     const data = event.data;
     if (typeof data !== "string") {
@@ -126,6 +151,21 @@ function handleWebSocket(req: Request, manager: RoomManager): Response {
     }
     if (exceedsByteLimit(data, MAX_MESSAGE_BYTES)) {
       socket.close(1009, "message too large");
+      return;
+    }
+    // レート制限は「1接続あたり」の規定（§3.8）なので、ルーム参加前の連打や
+    // 壊れた JSON・未知の t も数える。そのためパース前のここで判定する。
+    if (!rateLimiter.accept()) {
+      const windowSec = WS_RATE_WINDOW_MS / 1000;
+      link.send({
+        t: "error",
+        code: "RATE_LIMITED",
+        message: `メッセージの送信が多すぎます（${windowSec}秒に${WS_RATE_MAX}件まで）`,
+      });
+      // 1003（受理できない種類のデータ）/ 1009（サイズ超過）と区別し、
+      // 送信ポリシー違反を示す 1008 で閉じる。切断後は onclose → manager.disconnect が
+      // 走るため、§3.2 の60秒猶予でそのまま再接続できる。
+      socket.close(1008, "rate limited");
       return;
     }
     let parsed: unknown;

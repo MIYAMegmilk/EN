@@ -41,6 +41,10 @@ export const CHAT_HISTORY_MAX = 100;
 export const CHAT_RATE_WINDOW_MS = 10_000;
 /** チャットのレート制限: 判定窓内に送れる最大件数（§3.9） */
 export const CHAT_RATE_MAX = 5;
+/** WS メッセージのレート制限: 判定窓（ミリ秒、§3.8） */
+export const WS_RATE_WINDOW_MS = 1_000;
+/** WS メッセージのレート制限: 判定窓内に受理できる最大件数。超過で切断（§3.8） */
+export const WS_RATE_MAX = 20;
 
 // ---------------------------------------------------------------------------
 // §5 データモデル
