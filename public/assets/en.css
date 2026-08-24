@@ -432,3 +432,144 @@ select {
   color: var(--gold-2);
   font-size: 13px;
 }
+
+/* 通話の文字起こし（字幕）。docs/design/bot-voice.md §5.4 / §7 */
+.voice-caption:empty {
+  display: none;
+}
+
+.voice-caption {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+/* ── bot（しゅんぴ / せり / ぐっちー）表示。docs/design/bot.md §2 / §4 ── */
+.bot-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.bot-toggles-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.bot-toggle {
+  padding: 6px 12px;
+  font-size: 12.5px;
+}
+
+.bot-toggle-off {
+  color: var(--dim);
+}
+
+.bot-stage:empty {
+  display: none;
+}
+
+.bot-card {
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.bot-card-title {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: 14.5px;
+  color: var(--cream);
+}
+
+/* 川柳テロップ。上句・中句・下句を縦に積む */
+.bot-senryu-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bot-senryu-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+}
+
+.bot-senryu-text {
+  font-family: var(--serif);
+  font-size: 16px;
+  color: var(--cream);
+  overflow-wrap: anywhere;
+}
+
+.bot-senryu-mora {
+  font-size: 11px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.bot-card-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0 0;
+}
+
+.bot-senryu-author {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.bot-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border: 1px solid var(--gold-3);
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  color: var(--gold-2);
+}
+
+.bot-card-action {
+  margin-top: 12px;
+}
+
+.bot-poll {
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: rgba(255, 255, 255, 0.02);
+  margin-top: 14px;
+}
+
+.bot-poll-title {
+  margin: 0 0 10px;
+  font-family: var(--serif);
+  font-size: 14.5px;
+  color: var(--cream);
+}
+
+.bot-poll-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.bot-poll-chosen {
+  border-color: transparent;
+  background: linear-gradient(180deg, var(--gold-2), var(--gold-3));
+  color: var(--gold-ink);
+  font-weight: 700;
+}
+
+.bot-poll-remaining {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--dim);
+}

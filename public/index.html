@@ -751,6 +751,7 @@
               <button id="vc-join" class="btn" type="button">VCに参加</button>
               <button id="vc-mute" class="btn" type="button">ミュート</button>
               <button id="vc-camera" class="btn" type="button">カメラON</button>
+              <button id="vc-transcribe" class="btn" type="button">文字起こしON</button>
               <button id="vc-leave" class="btn" type="button">VC退出</button>
               <p id="vc-status">未参加</p>
             </div>
@@ -761,8 +762,12 @@
               <!-- 判定モードの表示。iOS Safari 実機ではコンソールを見られないため画面に出す -->
               <span id="vc-quality-mode" class="dim"></span>
             </div>
+            <!-- 通話の文字起こし（自分の声のみ・既定OFF）。docs/design/bot-voice.md §5.4 -->
+            <p id="voice-caption" class="dim voice-caption" aria-live="polite"></p>
             <div id="vc-media"></div>
           </section>
+
+          <section id="bot" class="card block hidden"></section>
 
           <section id="phase" class="card block hidden">
             <h2 id="phase-title"></h2>
@@ -822,7 +827,9 @@
 
     <script src="./rooms.js"></script>
     <script src="./room/vc.js"></script>
+    <script src="./room/voice.js"></script>
     <script src="./room/chat.js"></script>
+    <script src="./room/bot.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>
