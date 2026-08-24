@@ -5,7 +5,7 @@
 - 担当: ひろし（bot）
 - 前提: 詳細仕様書 [overall.md](../spec/overall.md) v0.5 §3.10、全体設計書 [overall.md](overall.md) v1.0
 - 関連: 通話の文字起こしは [bot-voice.md](bot-voice.md)
-- 状態: **`public/room/bot.js` と kuromoji 配線は実装済み。画面への差し込みはちいかわへ依頼中**（§4）
+- 状態: **実装・画面への差し込みとも完了**。差し込みは #12 で ちいかわ が対応（§4）
 
 ---
 
@@ -90,54 +90,78 @@ Bot.getState();               // デバッグ・テスト用
 
 一度も発言のないルームや、川柳判定を使わないテストでは辞書を読まない。
 
-### メモリの申し送り
+### メモリの申し送り（既定 ON のまま、逃げ道を足した）
 
-実測（Deno 2.9 / Windows）: **初期化 560ms・RSS 404MB・辞書 17MB**。
-デプロイ先は Xserver VPS 4GB（§6）なので収まるが、**プロセス常駐で +385MB は小さくない**。
-§6 のメモリ見積りとあわせて、チームで一度目を通してほしい。
-必要なら `createSenryuDetector()` を呼ばない（＝ `RoomManager` に渡さない）だけで
-従来のかなのみに戻せる。
+実測（Deno 2.9 / Windows）: **初期化 390〜560ms・辞書 17MB**。
 
-## 4. 画面への差し込み依頼（→ ちいかわ）
+常駐量は測り直した。`startServer` に接続を1本つないで発言1回、を5回:
 
-`public/index.html` と `public/app.js` は担当外なので触っていない。**この2箇所が入るまで bot.js は動かない。**
-
-```diff
-   <script src="./room/vc.js"></script>
-   <script src="./room/chat.js"></script>
-+  <script src="./room/bot.js"></script>
-   <script src="./app.js"></script>
+```
+RSS 57MB → 384MB / 277MB / 384MB / 277MB / 381MB
 ```
 
-卓上（`#vc`）とチャット（`#chat`）のあいだあたりに空の器を1つ。
+**+220〜330MB の2値に振れる**（GC のタイミング。以前 +385MB と書いたのは単体計測の上振れ）。
+§6 には余裕を見て **400MB を見込む**と書いた。
+4GB に対して約 10% で、**ルーム数に比例しない一度きりの定数**である。
 
-```diff
-+  <section id="bot" class="card block hidden"></section>
+`senryu.ts` のコメント自身が「本番投入は §6 のメモリ見積りとあわせてチーム合意のうえで」と
+書いているのに、初版は合意を取らないまま無条件で有効になっていた。**足りなかったのは
+見積りの開示であって、機能そのものではない**と判断し、次のようにした。
+
+- **既定は有効のまま**。かなのみに倒すと せり が漢字混じりを拾えず、
+  [bot-voice.md](bot-voice.md) の文字起こしが実質発火しない（音声認識の出力は漢字かな混じり）。
+  ①と同じ「実装済みなのに動かない」を作るほうが痛い
+- **§6 に見積りを書き出して ack を求める**。これが本来やるべきだったこと
+- **逃げ道だけ環境変数に出した**。`EN_SENRYU_KUROMOJI=0`（`false` / `off` / `no` も可）で
+  かなのみに戻る。メモリが問題になったときコード変更・再デプロイなしで倒せる
+
+```
+未設定 / 上記以外の値  → kuromoji を読み込む（既定。漢字混じりも拾う。常駐 +220〜330MB）
+EN_SENRYU_KUROMOJI=0  → かなのみ（漢字が1文字でも混ざると拾えない）
 ```
 
-`app.js` には3行。
+- 判定は `main.ts` の `useKuromojiSenryu()`。`.env` でも環境変数でもよい（`buildIceServers` と同じ読み方）
+- **意図の読めない値では倒さない**。`disable` などと書いても有効のまま。
+  誤記で機能が黙って死ぬより、明示的に倒したときだけ倒れるほうがよい
+- どちらのモードで動いているかは起動時にログへ出る
+- `createSenryuDetector({ kuromoji })` が唯一の分岐点。false なら辞書を一切読まず `onReady` も呼ばれない
 
-```js
-Bot.init({ send, container: $("bot"), onError: (m) => { $("error").textContent = m; } });
+**宿題**: §6 の ack が取れたら `deno.json` の imports へ `npm:kuromoji@0.1.2` を移す。
+いまは未合意の共有設定を触らないよう動的 import のままで、`deno.lock` にだけ載っている。
+既定 ON である以上これは本番依存なので、明示したほうがよい。
 
-// 受信ループに
-Bot.handleServerMessage(msg);
-// roomState の分岐に（chat.js と同じ場所）
-Bot.setSelfId(msg.snapshot.youId);
-// 退室・キック処理に
-Bot.reset();
-// 表示切替（chat と同じ条件）
-$("bot").classList.toggle("hidden", snapshot === null);
-```
+## 4. 画面への差し込み（#12 で完了）
 
-CSS クラスは `bot-toggles` / `bot-stage` / `bot-poll` / `bot-card` / `bot-senryu-*` /
-`bot-poll-*` / `bot-badge` を使っている。`public/assets/en.css` への追加もお願いしたい
-（未定義でも動作はするが、川柳テロップは縦に積んだほうが映える）。
+`public/index.html` と `public/app.js` は担当外なので触らず、この §4 に必要な差分を書いて
+依頼として出していた。**2026-08-24、ちいかわが #12 で対応済み**（`0008625`
+「feat: voice.js と bot.js を画面に配線する（§3.6 / §3.10）」）。voice.js も同時に配線された。
+
+入ったもの:
+
+| 場所 | 内容 |
+|---|---|
+| `index.html` | `app.js` より前に `<script src="./room/bot.js"></script>` |
+| `index.html` | `#vc` と `#phase` のあいだに `<section id="bot" class="card block hidden"></section>` |
+| `app.js` | 受信ループの `Bot.handleServerMessage` / `roomState` の `Bot.setSelfId` |
+| `app.js` | 退室・キックの `Bot.reset` / `renderAll` の表示切替 / `Bot.init({ send, container: $("bot"), onError: showError })` |
+| `en.css` | `bot-*` のスタイル（川柳は縦積み） |
 
 **前提（解決済み）**: `main.ts` の `C2S_TYPES` に `setBot` / `endPollVote` が入っておらず、
 bot.js が正しく送っても `asC2S` で落ちる状態だったが、**#10 で修正済み**。
 `types.ts` の `C2S` 型と `C2S_TYPES` を双方向で照合するテストも入ったので、
 今後この種の取りこぼしは検出される。
+
+### 残っている小さな穴（体裁のみ）
+
+`bot.js` が付けるクラスのうち、次の4つが `en.css` に未定義:
+
+```
+.bot-card-game  .bot-card-poll-result  .bot-card-senryu  .bot-poll-button
+```
+
+いずれも `.bot-card` か `.btn` が併記されているので壊れはしない。実害があるのは
+`.bot-card-game` だけで、ゲーム提案カードのタイトルと「これで遊ぶ」ボタンが横並びにならず
+縦積みになる。`en.css` は担当外なので、直すなら依頼の形になる。急ぎではない。
 
 ## 5. テスト
 
@@ -149,9 +173,14 @@ bot.js が正しく送っても `asC2S` で落ちる状態だったが、**#10 �
   - `botPollClosed` で結果表示とタイマー解放・別 pollId の無視
   - 再接続でアンケートとカードが戻る・キックで状態を捨てる
   - **音声合成 API に触れていないこと**（§3.10 の回帰よけ）
-- `server/tests/senryu_test.ts` +3 … `createSenryuDetector` の遅延ロード・漢字混じり検出
+- `server/tests/senryu_test.ts` +4 … `createSenryuDetector` の遅延ロード・漢字混じり検出・`kuromoji: false` の逃げ道
+- `server/tests/main_test.ts` +4 … `useKuromojiSenryu()` の値解釈3件と、`startServer` 経由で倒したときの挙動
 
-`deno test -A` → **323 passed / 0 failed**。
+`deno test -A` → **364 passed / 0 failed**。
+
+kuromoji を**有効にした状態**の end-to-end（`startServer` + 環境変数なしで漢字を拾うこと）は
+自動テストに入れていない。CI で辞書をもう一度読み込むと1プロセスで +300MB 級が二重になるため。
+代わりに手で確認した（既定: 漢字混じり検出 1・RSS 57→384MB / `=0`: 検出 0・RSS 57→59MB）。
 
 ## 6. 未決・宿題
 
@@ -160,4 +189,11 @@ bot.js が正しく送っても `asC2S` で落ちる状態だったが、**#10 �
   担当表から「音声」を削ってほしい（担当外ファイルなので未修正）
 - 全体設計書 §2 のファイル一覧に `public/room/voice.js` が載っていない（同上）
 - 川柳テロップの演出（フェードイン・一定時間で消す）は未実装。いまは次のカードが来るまで出しっぱなし
-- kuromoji の常駐メモリについてチームの合意（§3）
+- `en.css` の `bot-*` に4クラス未定義（§4 末尾）。体裁のみで急ぎではない
+- **ぐっちーの話題カードのタグ照合が効いていない**。`chooseTopic` は参加者の共通タグに
+  対応するカードを優先するが、`rooms.ts` の `botContext` が `commonTags: []` を固定で渡している
+  （`TODO(チーム分担): §3.11 趣味タグが入ったら参加者の共通タグを渡す`）。
+  こちら側（`bot_templates.ts` のタグID）は正しくしたので、あとは渡してもらえば効く。
+  §3.11 のプロフィール実装と合わせてちいかわへ依頼する
+- **kuromoji の常駐メモリについてチームの ack**（§3）。仕様書 §6 に見積りを書き出したので、そこへの承認をもらう
+- ack が取れたら `deno.json` の imports へ `npm:kuromoji@0.1.2` を移す（§3 の宿題）
