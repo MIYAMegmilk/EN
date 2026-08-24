@@ -12,8 +12,9 @@
 
 import { decodeBase64, encodeBase64 } from "@std/encoding/base64";
 import { deleteCookie, getCookies, setCookie } from "@std/http/cookie";
+import { HOBBY_TAGS, type HobbyTagId, isValidHobbyTagId } from "./hobby_tags.ts";
+import { validateNickname } from "./rooms.ts";
 import type { AuthSession, User } from "./types.ts";
-import { HOBBY_TAGS } from "./hobby_tags.ts";
 
 /** userId の文字数制約（§3.0） */
 export const USER_ID_MIN = 4;
@@ -31,6 +32,8 @@ const SESSION_TOKEN_BYTES = 32;
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /** セッション Cookie 名 */
 export const SESSION_COOKIE_NAME = "session";
+/** 軽量プロフィールに保存できる趣味タグの上限（§3.11） */
+export const PROFILE_TAGS_MAX = 5;
 
 /** ログイン試行のレート制限（§3.8: IPごとに5回/分） */
 const LOGIN_LIMIT = 5;
@@ -196,6 +199,9 @@ export class AuthApi {
     if (url.pathname === "/api/tags" && req.method === "GET") {
       return this.tags();
     }
+    if (url.pathname === "/api/profile" && req.method === "PUT") {
+      return await this.saveProfile(req);
+    }
     return null;
   }
 
@@ -281,13 +287,56 @@ export class AuthApi {
     return jsonResponse({ tags: HOBBY_TAGS });
   }
 
+  /** ログイン中ユーザーのあだ名・趣味タグを保存する（§3.0 / §3.11、要ログイン） */
+  private async saveProfile(req: Request): Promise<Response> {
+    const token = getCookies(req.headers)[SESSION_COOKIE_NAME];
+    const userId = await verifySession(this.#kv, token);
+    if (userId === null) {
+      return errorResponse(401, "ログインしていません");
+    }
+
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return errorResponse(400, "リクエストの形式が正しくありません");
+    }
+    const { nickname, tags } = (body ?? {}) as { nickname?: unknown; tags?: unknown };
+
+    const nicknameResult = validateNickname(nickname);
+    if (!nicknameResult.ok) {
+      return errorResponse(400, nicknameResult.message);
+    }
+    if (!Array.isArray(tags) || !tags.every(isValidHobbyTagId)) {
+      return errorResponse(400, "趣味タグはプリセットの中から選んでください");
+    }
+    const uniqueTags = [...new Set(tags as HobbyTagId[])];
+    if (uniqueTags.length > PROFILE_TAGS_MAX) {
+      return errorResponse(400, `趣味タグは${PROFILE_TAGS_MAX}個以内で選んでください`);
+    }
+
+    const userKey = ["user", userId];
+    const entry = await this.#kv.get<User>(userKey);
+    if (entry.value === null) {
+      return errorResponse(404, "アカウントが見つかりません");
+    }
+    const updated: User = { ...entry.value, nickname: nicknameResult.value, tags: uniqueTags };
+    await this.#kv.set(userKey, updated);
+
+    return jsonResponse({ nickname: updated.nickname, tags: updated.tags });
+  }
+
   private async me(req: Request): Promise<Response> {
     const token = getCookies(req.headers)[SESSION_COOKIE_NAME];
     const userId = await verifySession(this.#kv, token);
     if (userId === null) {
       return errorResponse(401, "ログインしていません");
     }
-    return jsonResponse({ userId });
+    const entry = await this.#kv.get<User>(["user", userId]);
+    const body: { userId: string; nickname?: string; tags?: string[] } = { userId };
+    if (entry.value?.nickname !== undefined) body.nickname = entry.value.nickname;
+    if (entry.value?.tags !== undefined) body.tags = entry.value.tags;
+    return jsonResponse(body);
   }
 
   /** セッションを新規発行し、Cookie 付きのレスポンスを返す（register/login 共通） */
