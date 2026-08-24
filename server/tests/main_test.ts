@@ -3,10 +3,21 @@
  * /api/ice が TURN 認証情報の有無で正しく応答を変えることを確認する（§3.6 / §3.8）。
  * §6: 本番はリバースプロキシ経由のため、TCP接続元だけでは実クライアントIPが分からない。
  * clientIp は X-Forwarded-For を優先して実クライアントIPを判定する。
+ * /api/rooms は稼働中の公開ルームだけを返す（§2 / §4.0）。
  */
 
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { clientIp, startServer } from "../main.ts";
+import type { ClientLink } from "../rooms.ts";
+import type { PublicRoomSummary, S2C } from "../types.ts";
+
+/** 受信内容を捨てるだけの接続。ルームを立てる副作用だけが要るテストで使う */
+class MockLink implements ClientLink {
+  readonly id = crypto.randomUUID();
+  constructor(readonly userId: string | null = "testUser") {}
+  send(_msg: S2C): void {}
+  close(): void {}
+}
 
 /** 読み取る環境変数 */
 const TURN_KEYS = ["TURN_URL", "TURN_USER", "TURN_PASS"] as const;
@@ -127,4 +138,57 @@ Deno.test("clientIp: プロキシ（localhost）以外からの直接接続は X
     headers: { "x-forwarded-for": "203.0.113.5" },
   });
   assertEquals(clientIp(req, "198.51.100.9"), "198.51.100.9");
+});
+
+// ---------------------------------------------------------------------------
+// 公開ルーム一覧（§4.0 GET /api/rooms）
+// ---------------------------------------------------------------------------
+
+Deno.test("/api/rooms: 公開ルームが無ければ空配列を返す", async () => {
+  const handle = startServer(0);
+  try {
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/rooms`);
+    assertEquals(res.status, 200);
+    assertEquals(res.headers.get("cache-control"), "no-store");
+    assertEquals(await res.json(), { rooms: [] });
+  } finally {
+    await handle.shutdown();
+  }
+});
+
+Deno.test("/api/rooms: 稼働中の公開ルームを返し、招待制は載せない", async () => {
+  const handle = startServer(0);
+  const link = new MockLink("owner1");
+  try {
+    handle.manager.handle(link, {
+      t: "createRoom",
+      nickname: "ホスト",
+      visibility: "public",
+      roomName: "とりあえず生",
+    });
+    handle.manager.handle(new MockLink("owner2"), {
+      t: "createRoom",
+      nickname: "ホスト",
+      visibility: "private",
+    });
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/rooms`);
+    const body = await res.json() as { rooms: PublicRoomSummary[] };
+    assertEquals(body.rooms.length, 1);
+    assertEquals(body.rooms[0].roomName, "とりあえず生");
+    assertEquals(body.rooms[0].playerCount, 1);
+    assert(/^[0-9]{6}$/.test(body.rooms[0].code));
+  } finally {
+    await handle.shutdown();
+  }
+});
+
+Deno.test("/api/rooms: GET 以外は 405", async () => {
+  const handle = startServer(0);
+  try {
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/rooms`, { method: "POST" });
+    assertEquals(res.status, 405);
+    await res.body?.cancel();
+  } finally {
+    await handle.shutdown();
+  }
 });
