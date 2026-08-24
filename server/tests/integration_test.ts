@@ -339,7 +339,10 @@ Deno.test("結合: チャットが全員に届き、途中入室者は履歴を�
   // 発言者本人を含む全員に届く
   host.send({ t: "chat", text: "こんばんは" });
   for (const client of [host, p2]) {
-    const msg = await client.waitFor((m) => m.t === "chat", "chat(1件目)");
+    const msg = await client.waitFor(
+      (m) => m.t === "chat" && !m.message.bot,
+      "chat(1件目)",
+    );
     assert(msg.t === "chat");
     assertEquals(msg.message.text, "こんばんは");
     assertEquals(msg.message.nickname, "ホスト");
@@ -348,7 +351,10 @@ Deno.test("結合: チャットが全員に届き、途中入室者は履歴を�
   }
   p2.send({ t: "chat", text: "よろしくです" });
   for (const client of [host, p2]) {
-    const msg = await client.waitFor((m) => m.t === "chat", "chat(2件目)");
+    const msg = await client.waitFor(
+      (m) => m.t === "chat" && !m.message.bot,
+      "chat(2件目)",
+    );
     assert(msg.t === "chat");
     assertEquals(msg.message.nickname, "ふたり目");
   }
@@ -358,7 +364,11 @@ Deno.test("結合: チャットが全員に届き、途中入室者は履歴を�
   p3.send({ t: "join", roomCode: code, nickname: "みたり目" });
   const joined3 = await p3.waitFor((m) => m.t === "roomState", "roomState(p3)");
   assert(joined3.t === "roomState");
-  assertEquals(joined3.snapshot.chat.map((m) => m.text), ["こんばんは", "よろしくです"]);
+  // bot の挨拶（§3.10）が混ざるので、人の発言だけを比べる
+  assertEquals(
+    joined3.snapshot.chat.filter((m) => !m.bot).map((m) => m.text),
+    ["こんばんは", "よろしくです"],
+  );
 
   // レート制限: 10秒窓で6件目は RATE_LIMITED（waitFor はエラー受信で reject する）
   for (let i = 1; i <= CHAT_RATE_MAX; i++) {

@@ -8,6 +8,7 @@
  *   - C2S メッセージを EngineEvent に変換し、EngineEffect を S2C として配信
  *   - フェーズタイマーの設置と無効化
  *   - テキストチャットの検証・レート制限・履歴保持・配信（§3.9）
+ *   - ルームの出来事を BotEvent に変換し、bot の発話をチャットへ配信（§3.10）
  *
  * 規約（§3.2 規約2）: ルームごとに1本のキューでイベントを直列処理し、
  * 状態遷移関数（engine.reduce）の呼び出しは同期文脈で行う。このファイルには
@@ -43,6 +44,7 @@ import {
   ROOM_CODE_LENGTH,
   type RoomSnapshot,
   type S2C,
+  type ScoreEntry,
   type ScoringMode,
   VC_CAPACITY,
 } from "./types.ts";
@@ -56,6 +58,20 @@ import {
   reduce,
   startGame,
 } from "./engine.ts";
+import {
+  BOT_IDS,
+  type BotEffect,
+  type BotEvent,
+  type BotState,
+  BOTS,
+  type BotUtterance,
+  createBotState,
+  END_POLL_MS,
+  pickNickname,
+  reduce as botReduce,
+} from "./bot.ts";
+import { createKanaProvider, detectSenryuAny, SENRYU_TOLERANCE } from "./senryu.ts";
+import type { SenryuMatch, YomiProvider } from "./senryu.ts";
 import { toSummary } from "./gamedef.ts";
 import { isOfficialGame, OFFICIAL_GAMES } from "./official_games.ts";
 
@@ -71,6 +87,30 @@ export const NON_VOTE_JUDGE_SEC = 5;
 
 /** ルームコード採番のリトライ上限 */
 const ROOM_CODE_ATTEMPTS = 50;
+
+/**
+ * bot に定期イベント（tick）を送る間隔（ミリ秒）。
+ * bot.ts の沈黙判定はこの粒度で呼ばれる前提で閾値を決めている。
+ */
+export const BOT_TICK_MS = 60_000;
+
+/** bot の沈黙判定を止める「人がまだ触っている」操作（§3.10） */
+const GAME_ACTION_TYPES: ReadonlySet<C2S["t"]> = new Set<C2S["t"]>([
+  "selectGame",
+  "startGame",
+  "skipPhase",
+  "submitInput",
+  "submitVote",
+]);
+
+/** 順位表から1位のあだ名を拾って bot の結果イベントにする。同点1位は先頭を採る */
+function botResultEvent(
+  t: "roundResult" | "finalResult",
+  scores: readonly ScoreEntry[],
+): BotEvent {
+  const top = scores.find((row) => row.rank === 1);
+  return top === undefined ? { t } : { t, topNickname: top.nickname };
+}
 
 // ---------------------------------------------------------------------------
 // 外部との接点
@@ -99,7 +139,22 @@ export type RoomManagerOptions = {
   setTimer?: (fn: () => void, ms: number) => TimerHandle;
   /** タイマーを解除する */
   clearTimer?: (handle: TimerHandle) => void;
+  /** 0 以上 1 未満の乱数（bot の文面選択・二つ名。テストでは固定値を渡す） */
+  rng?: () => number;
+  /**
+   * 川柳判定（§3.10 せり）。省略時はかなプロバイダのみで判定する。
+   * kuromoji（漢字混じり対応）は読み込みが非同期なので、使う場合は
+   * 起動時に作ったものを main.ts からここへ渡す。
+   */
+  senryu?: (text: string) => SenryuMatch | null;
 };
+
+/** かなプロバイダだけで川柳を判定する既定の実装。辞書を持たない環境でも動く */
+export function createDefaultSenryuDetector(
+  providers: readonly YomiProvider[] = [createKanaProvider()],
+): (text: string) => SenryuMatch | null {
+  return (text) => detectSenryuAny(text, providers, { tolerance: SENRYU_TOLERANCE });
+}
 
 // ---------------------------------------------------------------------------
 // 内部の保持データ
@@ -121,6 +176,12 @@ type RoomEntry = {
   graceTimers: Map<string, TimerHandle>;
   /** チャットのレート制限用。playerId → 判定窓内の発言時刻（古い順、§3.9） */
   chatTimes: Map<string, number[]>;
+  /** bot 3体の状態（§3.10） */
+  bot: BotState;
+  /** bot への定期 tick タイマー */
+  botTimer: TimerHandle | null;
+  /** 終了アンケートの締切タイマー（§3.10） */
+  botPollTimer: TimerHandle | null;
 };
 
 /** 接続がどのルームの誰に紐づいているか */
@@ -224,6 +285,8 @@ export class RoomManager {
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => TimerHandle;
   private readonly clearTimer: (handle: TimerHandle) => void;
+  private readonly rng: () => number;
+  private readonly senryu: (text: string) => SenryuMatch | null;
 
   constructor(options: RoomManagerOptions = {}) {
     this.now = options.now ?? (() => Date.now());
@@ -231,6 +294,8 @@ export class RoomManager {
       ((fn, ms) => setTimeout(fn, ms) as unknown as TimerHandle);
     this.clearTimer = options.clearTimer ??
       ((handle) => clearTimeout(handle as unknown as number));
+    this.rng = options.rng ?? Math.random;
+    this.senryu = options.senryu ?? createDefaultSenryuDetector();
   }
 
   /** 稼働中のルーム数（テスト・監視用） */
@@ -279,6 +344,7 @@ export class RoomManager {
       player.disconnectedAt = now;
       entry.room.lastActiveAt = now;
       this.applyEngineEvent(entry, { t: "playerLeft", playerId: player.id, now });
+      this.applyBotEvent(entry, { t: "playerDisconnected", playerId: player.id });
       this.broadcast(entry, { t: "playerLeft", player: this.toPublic(entry, player) });
       this.armGraceTimer(entry, player.id);
     });
@@ -378,8 +444,12 @@ export class RoomManager {
       phaseTimer: null,
       graceTimers: new Map(),
       chatTimes: new Map(),
+      bot: createBotState(now),
+      botTimer: null,
+      botPollTimer: null,
     };
     this.rooms.set(code, entry);
+    this.armBotTimer(entry);
     this.links.set(link.id, { link, roomCode: code, playerId: host.id });
     // TODO(チーム分担): §3.1 最終アクティビティから24時間で自動削除する掃除処理
     this.sendSnapshot(entry, host);
@@ -421,16 +491,27 @@ export class RoomManager {
     }
     // TODO(チーム分担): §3.1 キック済み sessionToken（room.blockedSessions）の拒否（BLOCKED）
     // TODO(チーム分担): §3.1.1 公開ルームは entryToken の検証・消費を必須にする（INVALID_TOKEN）
-    const nickname = validateNickname(msg.nickname);
-    if (!nickname.ok) {
-      sendError(link, nickname.code, nickname.message);
-      return;
+    // あだ名を省略した参加者にはしゅんぴが二つ名を付ける（§3.0 / §3.10）。
+    // 空文字は「入力し忘れ」と区別できないので、従来どおり検証で弾く
+    let assignedNickname: string | undefined;
+    let nicknameValue: string;
+    if (msg.nickname === undefined) {
+      const taken = new Set([...room.players.values()].map((p) => p.nickname));
+      assignedNickname = pickNickname(taken, this.rng);
+      nicknameValue = assignedNickname;
+    } else {
+      const nickname = validateNickname(msg.nickname);
+      if (!nickname.ok) {
+        sendError(link, nickname.code, nickname.message);
+        return;
+      }
+      nicknameValue = nickname.value;
     }
     if (room.players.size >= ROOM_CAPACITY) {
       sendError(link, "ROOM_FULL", `このルームは満員です（定員${ROOM_CAPACITY}人）`);
       return;
     }
-    const player = this.newPlayer(nickname.value);
+    const player = this.newPlayer(nicknameValue);
     room.players.set(player.id, player);
     room.lastActiveAt = now;
     entry.links.set(player.id, link);
@@ -442,6 +523,14 @@ export class RoomManager {
       now,
     });
     this.sendSnapshot(entry, player);
+    // 入室者本人にスナップショットを送ってから bot に喋らせる。
+    // 逆順だと挨拶が履歴に載る前のスナップショットを掴んで、本人にだけ見えない
+    this.applyBotEvent(
+      entry,
+      assignedNickname === undefined
+        ? { t: "playerJoined", playerId: player.id, nickname: player.nickname }
+        : { t: "playerJoined", playerId: player.id, nickname: player.nickname, assignedNickname },
+    );
     this.broadcastExcept(entry, player.id, {
       t: "playerJoined",
       player: this.toPublic(entry, player),
@@ -462,6 +551,11 @@ export class RoomManager {
     entry.links.set(player.id, link);
     this.links.set(link.id, { link, roomCode: entry.room.code, playerId: player.id });
     this.applyEngineEvent(entry, { t: "playerRejoined", playerId: player.id, now });
+    this.applyBotEvent(entry, {
+      t: "playerRejoined",
+      playerId: player.id,
+      nickname: player.nickname,
+    });
     this.sendSnapshot(entry, player);
     this.broadcastExcept(entry, player.id, {
       t: "playerJoined",
@@ -509,6 +603,10 @@ export class RoomManager {
     entry.room.lastActiveAt = now;
     // §3.8 の WS レート制限（1接続あたり 20件/秒 を超えたら切断）は接続単位の規定のため、
     // main.ts の WebSocket 層で実装済み（ここには置かない）
+    //
+    // ゲーム操作は沈黙判定の起点になるので、受理・却下にかかわらず bot に伝える（§3.10）。
+    // 却下された操作も「人がまだ触っている」証拠であり、bot が話題を投下する理由にはならない
+    if (GAME_ACTION_TYPES.has(msg.t)) this.applyBotEvent(entry, { t: "gameAction" });
     switch (msg.t) {
       case "leave":
         this.removePlayer(entry, player.id, "leave");
@@ -551,6 +649,12 @@ export class RoomManager {
         return;
       case "chat":
         this.handleChat(entry, state, player, msg.text, now);
+        return;
+      case "setBot":
+        this.handleSetBot(entry, state, msg);
+        return;
+      case "endPollVote":
+        this.handleEndPollVote(entry, state, player, msg);
         return;
       // TODO(チーム分担): §3.1.1 knock / approveKnock / rejectKnock（公開ルーム）
       case "knock":
@@ -699,6 +803,172 @@ export class RoomManager {
       entry.room.chatHistory.splice(0, entry.room.chatHistory.length - CHAT_HISTORY_MAX);
     }
     this.broadcast(entry, { t: "chat", message });
+    // 発言を配信してから bot に渡す。せりの川柳返しが元の発言より先に出ないようにする
+    this.applyBotEvent(entry, {
+      t: "message",
+      playerId: player.id,
+      nickname: player.nickname,
+      text: message.text,
+      source: "chat",
+    });
+  }
+
+  /** bot の ON/OFF（ホストのみ、§3.10）。botId 省略で3体まとめて切り替える */
+  private handleSetBot(
+    entry: RoomEntry,
+    state: LinkState,
+    msg: Extract<C2S, { t: "setBot" }>,
+  ): void {
+    if (!this.requireHost(entry, state)) return;
+    if (typeof msg.enabled !== "boolean") {
+      sendError(state.link, "INVALID_INPUT", "bot の指定が正しくありません");
+      return;
+    }
+    if (msg.botId !== undefined && !BOT_IDS.includes(msg.botId)) {
+      sendError(state.link, "INVALID_INPUT", "そのような bot はいません");
+      return;
+    }
+    const event: BotEvent = msg.botId === undefined
+      ? { t: "setBot", enabled: msg.enabled }
+      : { t: "setBot", botId: msg.botId, enabled: msg.enabled };
+    this.applyBotEvent(entry, event, state.link);
+    this.broadcast(entry, { t: "botState", bots: { ...entry.bot.enabled } });
+  }
+
+  /** 終了アンケートへの投票（§3.10）。過半数が揃えば締切前でも締まる */
+  private handleEndPollVote(
+    entry: RoomEntry,
+    state: LinkState,
+    player: Player,
+    msg: Extract<C2S, { t: "endPollVote" }>,
+  ): void {
+    if (typeof msg.pollId !== "string" || typeof msg.agree !== "boolean") {
+      sendError(state.link, "INVALID_INPUT", "投票の形式が正しくありません");
+      return;
+    }
+    this.applyBotEvent(
+      entry,
+      { t: "endPollVote", pollId: msg.pollId, playerId: player.id, agree: msg.agree },
+      state.link,
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // bot 連携（§3.10）
+  // -------------------------------------------------------------------------
+
+  /**
+   * ルームの出来事を bot に流し、発話と副作用を反映する。
+   * bot は engine と同じく純粋関数なので、配信・タイマーはすべてここが持つ。
+   * origin を渡した呼び出し（投票など）だけ、拒否理由を送信元に返す。
+   */
+  private applyBotEvent(entry: RoomEntry, event: BotEvent, origin?: ClientLink): void {
+    const result = botReduce(entry.bot, event, this.botContext(entry));
+    entry.bot = result.state;
+    if (result.error !== undefined) {
+      if (origin !== undefined) {
+        sendError(origin, result.error, result.message ?? "処理できませんでした");
+      }
+      return;
+    }
+    this.publishBotUtterances(entry, result.utterances);
+    this.applyBotEffects(entry, result.effects);
+  }
+
+  /** bot に渡す外部依存を組み立てる */
+  private botContext(entry: RoomEntry) {
+    return {
+      now: this.now(),
+      // 過半数の母数は「接続中の参加者」。一時切断は entry.links から外れる
+      connectedPlayerIds: [...entry.links.keys()],
+      // TODO(チーム分担): §3.11 趣味タグが入ったら参加者の共通タグを渡す
+      commonTags: [] as readonly string[],
+      rng: this.rng,
+      senryu: this.senryu,
+      games: [...entry.room.availableGames.values()].map((g) => ({ id: g.id, title: g.title })),
+      newPollId: () => crypto.randomUUID(),
+    };
+  }
+
+  /** bot の発話をチャット履歴に積んで配信する。発話はチャットのみ（§3.10） */
+  private publishBotUtterances(entry: RoomEntry, utterances: readonly BotUtterance[]): void {
+    if (utterances.length === 0) return;
+    const now = this.now();
+    for (const utterance of utterances) {
+      const message: ChatMessage = {
+        id: crypto.randomUUID(),
+        playerId: null,
+        nickname: BOTS[utterance.botId].name,
+        text: utterance.text,
+        at: now,
+        bot: true,
+        botId: utterance.botId,
+        botKind: utterance.kind,
+      };
+      if (utterance.card !== undefined) message.card = utterance.card;
+      entry.room.chatHistory.push(message);
+      this.broadcast(entry, { t: "chat", message });
+    }
+    // 履歴の上限は人の発言と同じ扱い（§3.9）
+    if (entry.room.chatHistory.length > CHAT_HISTORY_MAX) {
+      entry.room.chatHistory.splice(0, entry.room.chatHistory.length - CHAT_HISTORY_MAX);
+    }
+  }
+
+  /** bot が要求した副作用を実行する */
+  private applyBotEffects(entry: RoomEntry, effects: readonly BotEffect[]): void {
+    for (const effect of effects) {
+      switch (effect.t) {
+        case "pollStarted":
+          this.armBotPollTimer(entry, effect.deadline);
+          break;
+        case "pollClosed":
+          this.cancelBotPollTimer(entry);
+          // お開きの合意が取れても部屋は自動では閉じない。解散するかはホストの判断（§3.10）
+          this.broadcast(entry, {
+            t: "botPollClosed",
+            pollId: effect.pollId,
+            agreed: effect.agreed,
+          });
+          break;
+      }
+    }
+  }
+
+  /** bot への定期 tick を張り直す。沈黙検知・ゲーム提案はこれで動く */
+  private armBotTimer(entry: RoomEntry): void {
+    const code = entry.room.code;
+    entry.botTimer = this.setTimer(() => {
+      this.enqueue(code, () => {
+        if (this.rooms.get(code) !== entry) return;
+        entry.botTimer = null;
+        this.applyBotEvent(entry, { t: "tick" });
+        // tick でルームが消えることはないが、念のため生存を確認してから張り直す
+        if (this.rooms.get(code) === entry) this.armBotTimer(entry);
+      });
+    }, BOT_TICK_MS);
+  }
+
+  /** 終了アンケートの締切にタイマーを張る。tick 任せだと最大60秒ずれるため */
+  private armBotPollTimer(entry: RoomEntry, deadline: number): void {
+    this.cancelBotPollTimer(entry);
+    const code = entry.room.code;
+    const delay = Math.max(0, deadline - this.now());
+    entry.botPollTimer = this.setTimer(() => {
+      this.enqueue(code, () => {
+        if (this.rooms.get(code) !== entry) return;
+        entry.botPollTimer = null;
+        // 締切に達したアンケートは tick が締める
+        this.applyBotEvent(entry, { t: "tick" });
+      });
+    }, delay);
+  }
+
+  /** 終了アンケートの締切タイマーを解除する */
+  private cancelBotPollTimer(entry: RoomEntry): void {
+    if (entry.botPollTimer === null) return;
+    this.clearTimer(entry.botPollTimer);
+    entry.botPollTimer = null;
   }
 
   // -------------------------------------------------------------------------
@@ -741,9 +1011,11 @@ export class RoomManager {
       switch (effect.t) {
         case "phaseChanged":
           this.broadcastPhase(entry);
+          this.applyBotEvent(entry, { t: "phaseChanged", phase: effect.phase });
           break;
         case "roundResult":
           this.broadcast(entry, { t: "roundResult", scores: effect.scores });
+          this.applyBotEvent(entry, botResultEvent("roundResult", effect.scores));
           break;
         case "finalResult":
           this.broadcast(entry, { t: "finalResult", scores: effect.scores });
@@ -752,6 +1024,7 @@ export class RoomManager {
             const player = entry.room.players.get(row.playerId);
             if (player !== undefined) player.score += row.totalScore;
           }
+          this.applyBotEvent(entry, botResultEvent("finalResult", effect.scores));
           break;
         case "ended":
           break;
@@ -827,6 +1100,8 @@ export class RoomManager {
     room.players.delete(playerId);
     room.lastActiveAt = now;
     this.applyEngineEvent(entry, { t: "playerKicked", playerId, now });
+    // 退室が確定したので終了アンケートの票も無効にする（§3.10）
+    this.applyBotEvent(entry, { t: "playerLeft", playerId });
     this.broadcast(entry, { t: "playerLeft", player: this.toPublic(entry, player) });
     if (room.hostId === playerId) {
       const successor = [...room.players.keys()][0];
@@ -855,6 +1130,11 @@ export class RoomManager {
     }
     for (const handle of entry.graceTimers.values()) this.clearTimer(handle);
     entry.graceTimers.clear();
+    if (entry.botTimer !== null) {
+      this.clearTimer(entry.botTimer);
+      entry.botTimer = null;
+    }
+    this.cancelBotPollTimer(entry);
   }
 
   // -------------------------------------------------------------------------
@@ -926,10 +1206,16 @@ export class RoomManager {
       deadline: game?.deadline ?? null,
       view: this.viewFor(entry, viewer.id),
       chat: [...room.chatHistory],
+      bots: { ...entry.bot.enabled },
       session: viewer.sessionToken,
       serverTime: this.now(),
     };
     if (room.roomName !== undefined) snapshot.roomName = room.roomName;
+    // 集計中のアンケートは再接続でも復元する。締切だけ渡し、投票済みかは持たせない
+    const poll = entry.bot.gucchi.poll;
+    if (poll !== null) {
+      snapshot.botPoll = { pollId: poll.id, deadline: poll.startedAt + END_POLL_MS };
+    }
     // TODO(チーム分担): §3.1.1 公開ルームではホストにのみ pendingKnocks を載せる
     return snapshot;
   }
