@@ -13,7 +13,14 @@ import { loadSync } from "@std/dotenv";
 import { serveDir } from "@std/http/file-server";
 import { fromFileUrl } from "@std/path";
 import { type ClientLink, RoomManager } from "./rooms.ts";
-import type { C2S, S2C } from "./types.ts";
+import {
+  type C2S,
+  type S2C,
+  WS_RATE_MAX,
+  WS_RATE_WINDOW_MS,
+  WS_SIGNAL_HARD_MAX,
+  WS_SIGNAL_RATE_MAX,
+} from "./types.ts";
 
 /** WS メッセージ1件の上限（§3.8 の KV 上限に合わせた 64KB） */
 export const MAX_MESSAGE_BYTES = 64 * 1024;
@@ -35,6 +42,7 @@ const C2S_TYPES: ReadonlySet<string> = new Set([
   "submitInput",
   "submitVote",
   "importGame",
+  "chat",
   "rtcSignal",
   "leave",
 ]);
@@ -89,6 +97,37 @@ export function exceedsByteLimit(text: string, limit: number): boolean {
   return new TextEncoder().encode(text).length > limit;
 }
 
+/**
+ * WS メッセージのレート制限（§3.8: 1接続あたり 20件/秒 を超えたら切断）。
+ * 1接続につき用途ごとに1個を持ち、直近 WS_RATE_WINDOW_MS 以内の受信時刻だけをスライディング
+ * ウィンドウとして保持する。判定窓内の上限 max はコンストラクタで受け取る（一般枠は
+ * WS_RATE_MAX、rtcSignal 枠はソフト上限 WS_SIGNAL_RATE_MAX とハードキャップ
+ * WS_SIGNAL_HARD_MAX の2個）。
+ * 時刻もコンストラクタで注入でき、テストから固定できる。
+ */
+export class MessageRateLimiter {
+  /** 判定窓内に受信した時刻（古い順、epoch ms） */
+  private readonly times: number[] = [];
+
+  constructor(
+    private readonly max: number,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  /**
+   * メッセージ1件を受信したものとして記録し、受理してよいかを返す。
+   * false は制限超過（＝窓内 max 件を「超えた」件）。超過時の処置は呼び出し側が決める
+   * （一般枠と rtcSignal のハードキャップは切断、rtcSignal のソフト上限は破棄）。
+   */
+  accept(): boolean {
+    const at = this.now();
+    // 窓から外れた時刻は捨ててメモリを増やさない（handleChat と同じ「経過 < 窓」を窓内とする）
+    while (this.times.length > 0 && at - this.times[0] >= WS_RATE_WINDOW_MS) this.times.shift();
+    this.times.push(at);
+    return this.times.length <= this.max;
+  }
+}
+
 /** JSON.parse 済みの値を C2S として受理できるか判定する */
 export function asC2S(value: unknown): C2S | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
@@ -119,24 +158,90 @@ function handleWebSocket(req: Request, manager: RoomManager): Response {
   }
   const { socket, response } = Deno.upgradeWebSocket(req);
   const link = new SocketLink(socket);
+  // レート制限は「1接続あたり」の規定（§3.8）だが、用途で枠を分ける。VC のシグナリング
+  // （§3.6）はフルメッシュの trickle ICE が短時間に集中するため、一般枠（20件/秒）では
+  // 正当な利用者を切断してしまう。rtcSignal だけは別枠（100件/秒）で数える。
+  const generalLimiter = new MessageRateLimiter(WS_RATE_MAX);
+  // signal 枠は2段構え。ソフト上限（100件/秒）の超過は当該メッセージを破棄するだけで
+  // 切断しない。WS は全用途1本共用（§3.2）なので、ここで切断するとチャットもゲーム進行も
+  // 巻き添えで落ちるが、VC は §3.6 のとおりフォールバックできるため破棄で足りる。
+  // ハードキャップ（500件/秒）の超過だけは乱用とみなして切断する。
+  const signalLimiter = new MessageRateLimiter(WS_SIGNAL_RATE_MAX);
+  const signalHardLimiter = new MessageRateLimiter(WS_SIGNAL_HARD_MAX);
+  // ソフト上限超過を最後に通知した時刻（epoch ms）。未通知は null。
+  // 超過1件ごとに RATE_LIMITED を返すとエラーの増幅になる（100件を超えて送られた分だけ
+  // 返信が増える）ため、判定窓（WS_RATE_WINDOW_MS）につき最大1回だけ通知する。
+  let signalNoticeAt: number | null = null;
   socket.onmessage = (event) => {
     const data = event.data;
     if (typeof data !== "string") {
       socket.close(1003, "text frames only");
       return;
     }
+    // サイズ超過はパース前の安価な判定なので先に置く
     if (exceedsByteLimit(data, MAX_MESSAGE_BYTES)) {
       socket.close(1009, "message too large");
       return;
     }
-    let parsed: unknown;
+    // どちらの枠で数えるかの判断に t が要るため、レート判定より先にパースする。
+    // ガベージ連投では JSON.parse のコストを切断前に払うことになるが、1件 64KB 上限 ×
+    // 21件（rtcSignal を名乗る場合も WS_SIGNAL_HARD_MAX + 1 件）で切断されるため
+    // 許容範囲とする。
+    let parsed: unknown = null;
+    let parseFailed = false;
     try {
       parsed = JSON.parse(data);
     } catch {
+      parseFailed = true;
+    }
+    const msg = parseFailed ? null : asC2S(parsed);
+    // rtcSignal と確定したものだけを signal 枠へ回す。壊れた JSON や未知の t は必ず
+    // 一般枠で数える（数えないとガベージの連投を切断できなくなるため）。
+    // ルーム参加前の連打も「1接続あたり」の規定どおり一般枠で数える。
+    const isSignal = msg !== null && msg.t === "rtcSignal";
+    const windowSec = WS_RATE_WINDOW_MS / 1000;
+    // 1003（受理できない種類のデータ）/ 1009（サイズ超過）と区別し、送信ポリシー違反を示す
+    // 1008 で閉じる。切断後は onclose → manager.disconnect が走るため、§3.2 の60秒猶予で
+    // そのまま再接続できる。
+    const disconnect = (max: number) => {
+      link.send({
+        t: "error",
+        code: "RATE_LIMITED",
+        message: `メッセージの送信が多すぎます（${windowSec}秒に${max}件まで）`,
+      });
+      socket.close(1008, "rate limited");
+    };
+    if (isSignal) {
+      // 両方の枠に記録してから判定する（同じ受信列を別々の上限で数える）
+      const withinSoft = signalLimiter.accept();
+      const withinHard = signalHardLimiter.accept();
+      if (!withinHard) {
+        disconnect(WS_SIGNAL_HARD_MAX);
+        return;
+      }
+      if (!withinSoft) {
+        // ソフト上限の超過は当該メッセージを破棄するだけで切断しない（§3.6 / §3.8）。
+        // 通知は判定窓につき1回に絞り、超過分の件数だけ返信が増えるのを防ぐ。
+        const at = Date.now();
+        if (signalNoticeAt === null || at - signalNoticeAt >= WS_RATE_WINDOW_MS) {
+          signalNoticeAt = at;
+          link.send({
+            t: "error",
+            code: "RATE_LIMITED",
+            message:
+              `シグナリングの送信が多すぎます（${windowSec}秒に${WS_SIGNAL_RATE_MAX}件まで）。超過分は破棄しました`,
+          });
+        }
+        return;
+      }
+    } else if (!generalLimiter.accept()) {
+      disconnect(WS_RATE_MAX);
+      return;
+    }
+    if (parseFailed) {
       link.send({ t: "error", code: "INVALID_INPUT", message: "メッセージを解釈できませんでした" });
       return;
     }
-    const msg = asC2S(parsed);
     if (msg === null) {
       link.send({
         t: "error",

@@ -103,6 +103,7 @@ function connect() {
     receive(msg);
     // VC は参加者の増減とシグナリングを同じ WS で受け取る（§3.2 / §3.6）
     VC.handleServerMessage(msg);
+    Chat.handleServerMessage(msg);
   };
 }
 
@@ -117,6 +118,7 @@ function receive(msg) {
       if (typeof msg.snapshot.session === "string") {
         store.save(msg.snapshot.code, msg.snapshot.session);
       }
+      Chat.setSelfId(msg.snapshot.youId);
       showError("");
       renderAll();
       break;
@@ -157,6 +159,7 @@ function receive(msg) {
     case "kicked":
       store.drop();
       state.snapshot = null;
+      Chat.reset();
       showError("ルームから退出しました");
       renderAll();
       break;
@@ -189,6 +192,7 @@ function renderAll() {
   $("entry").classList.toggle("hidden", snapshot !== null);
   $("room").classList.toggle("hidden", snapshot === null);
   $("vc").classList.toggle("hidden", snapshot === null);
+  $("chat").classList.toggle("hidden", snapshot === null);
   $("phase").classList.toggle("hidden", snapshot === null);
   renderVc();
   if (snapshot === null) return;
@@ -425,7 +429,15 @@ function bind() {
     send({ t: "leave" });
     store.drop();
     state.snapshot = null;
+    Chat.reset();
     renderAll();
+  });
+  Chat.init({
+    send,
+    listEl: $("chat-log"),
+    inputEl: $("chat-text"),
+    formEl: $("chat-form"),
+    onError: showError,
   });
 }
 
