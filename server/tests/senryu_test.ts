@@ -462,6 +462,14 @@ Deno.test("createSenryuDetector: 呼ばれるまで辞書を読まない", () =>
   assertEquals(ready, 0);
 });
 
+Deno.test("createSenryuDetector: kuromoji: false なら辞書を読まない（逃げ道。§6）", () => {
+  const detect = createSenryuDetector({ kuromoji: false });
+  // かなの句は従来どおり拾う
+  assert(detect("ふるいけやかわずとびこむみずのおと") !== null);
+  // 漢字混じりは拾わない。これが倒したときの代償
+  assertEquals(detect("古池や蛙飛び込む水の音"), null, "倒してあるのに漢字混じりを拾っている");
+});
+
 Deno.test({
   name: "createSenryuDetector: 辞書が読めたら漢字混じりも拾うようになる",
   // 読み込み完了を待つので、他のテストと時間を取り合わないよう単独で走らせる
@@ -474,9 +482,15 @@ Deno.test({
       resolve = r;
     });
     const detect = createSenryuDetector({ onReady: (p) => resolve(p) });
+    // 倒した側。同時に作って、読み込みの引き金も同じだけ引く。
+    // 実時間で測るのではなく「既定の側が読み終わった」を基準に、
+    // 倒した側が読み込みを始めていないことを確かめる
+    let offReady = 0;
+    const detectOff = createSenryuDetector({ kuromoji: false, onReady: () => offReady++ });
 
     // 1回目の呼び出しが読み込みの引き金。この時点ではまだ かな のみ
     assertEquals(detect(kanji), null, "読み込み前に漢字混じりを拾えてしまっている");
+    assertEquals(detectOff(kanji), null);
 
     const provider = await ready;
     if (provider === null) {
@@ -488,5 +502,10 @@ Deno.test({
     assertEquals(match.lines, ["古池や", "蛙飛び込む", "水の音"]);
     // かなの句も引き続き拾える（kuromoji はかなだけの文で解析が破綻するため）
     assert(detect("ふるいけやかわずとびこむみずのおと") !== null);
+
+    // 既定の側が読み終わったあとでも、倒した側は かな のまま
+    assertEquals(offReady, 0, "倒してあるのに辞書の読み込みが始まっている");
+    assertEquals(detectOff(kanji), null, "倒してあるのに漢字混じりを拾っている");
+    assert(detectOff("ふるいけやかわずとびこむみずのおと") !== null);
   },
 });
