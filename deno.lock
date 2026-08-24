@@ -5,6 +5,7 @@
     "jsr:@std/cli@^1.0.32": "1.0.32",
     "jsr:@std/dotenv@~0.225.7": "0.225.8",
     "jsr:@std/encoding@^1.0.11": "1.0.11",
+    "jsr:@std/encoding@^1.0.7": "1.0.11",
     "jsr:@std/fmt@^1.0.10": "1.0.10",
     "jsr:@std/fs@^1.0.24": "1.0.24",
     "jsr:@std/html@^1.0.7": "1.0.7",
@@ -46,7 +47,7 @@
       "integrity": "73a98e05ff58aa18bea562d286172e6c815b1eddd4fcab194beda19e3683b88c",
       "dependencies": [
         "jsr:@std/cli",
-        "jsr:@std/encoding",
+        "jsr:@std/encoding@^1.0.11",
         "jsr:@std/fmt",
         "jsr:@std/fs",
         "jsr:@std/html",
@@ -79,6 +80,7 @@
     "dependencies": [
       "jsr:@std/assert@^1.0.14",
       "jsr:@std/dotenv@~0.225.7",
+      "jsr:@std/encoding@^1.0.7",
       "jsr:@std/http@^1.0.20",
       "jsr:@std/path@^1.1.2"
     ]

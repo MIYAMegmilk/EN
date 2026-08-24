@@ -1,0 +1,87 @@
+/**
+ * 開発用の動作確認スクリプト
+ * /api/auth/* の疎通を手で確かめるための暫定実装。
+ *
+ * 表示規約（§3.8 / CLAUDE.md セキュリティ基準）:
+ * ユーザー由来のテキストは必ず textContent で描画し、innerHTML は使わない。
+ */
+
+"use strict";
+
+function $(id) {
+  return document.getElementById(id);
+}
+
+function showError(message) {
+  $("error").textContent = message;
+  $("status").textContent = "";
+}
+
+function showStatus(message) {
+  $("status").textContent = message;
+  $("error").textContent = "";
+}
+
+async function callApi(path, options) {
+  const res = await fetch(path, {
+    credentials: "same-origin",
+    ...options,
+  });
+  let body = null;
+  try {
+    body = await res.json();
+  } catch {
+    body = null;
+  }
+  return { ok: res.ok, status: res.status, body };
+}
+
+async function refreshMe() {
+  const { ok, body } = await callApi("/api/me");
+  const el = $("me-result");
+  if (ok && body && typeof body.userId === "string") {
+    el.textContent = `ログイン中: ${body.userId}`;
+  } else {
+    el.textContent = "未ログイン";
+  }
+}
+
+$("register").addEventListener("click", async () => {
+  const userId = $("register-userid").value;
+  const password = $("register-password").value;
+  const { ok, status, body } = await callApi("/api/auth/register", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ userId, password }),
+  });
+  if (ok) {
+    showStatus(`登録・ログインしました（userId: ${body.userId}）`);
+    location.href = "/index.html";
+  } else {
+    showError(`登録に失敗しました (${status}): ${body?.error ?? "unknown error"}`);
+  }
+});
+
+$("login").addEventListener("click", async () => {
+  const userId = $("login-userid").value;
+  const password = $("login-password").value;
+  const { ok, status, body } = await callApi("/api/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ userId, password }),
+  });
+  if (ok) {
+    showStatus(`ログインしました（userId: ${body.userId}）`);
+    location.href = "/index.html";
+  } else {
+    showError(`ログインに失敗しました (${status}): ${body?.error ?? "unknown error"}`);
+  }
+});
+
+$("logout").addEventListener("click", async () => {
+  await callApi("/api/auth/logout", { method: "POST" });
+  showStatus("ログアウトしました");
+  await refreshMe();
+});
+
+refreshMe();

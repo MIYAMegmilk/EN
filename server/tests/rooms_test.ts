@@ -77,11 +77,13 @@ class FakeClock {
   }
 }
 
-/** 受信内容を貯めるだけの接続 */
+/** 受信内容を貯めるだけの接続。デフォルトはログイン済み扱い（未ログインのテストは明示的に null を渡す） */
 class MockLink implements ClientLink {
   readonly id = crypto.randomUUID();
   readonly received: S2C[] = [];
   closed = false;
+
+  constructor(readonly userId: string | null = "testUser") {}
 
   send(msg: S2C): void {
     this.received.push(msg);
@@ -219,6 +221,28 @@ Deno.test("ルーム作成: 公開ルームは未実装として拒否する", (
   assertExists(error);
   assertEquals(error.code, "INVALID_INPUT");
   assertEquals(manager.roomCount, 0);
+  manager.dispose();
+});
+
+Deno.test("ルーム作成: 未ログインは AUTH_REQUIRED", () => {
+  const { manager } = setup();
+  const link = new MockLink(null);
+  manager.handle(link, { t: "createRoom", nickname: "ホスト", visibility: "private" });
+  assertEquals(last(link, "error")?.code, "AUTH_REQUIRED");
+  assertEquals(manager.roomCount, 0);
+  manager.dispose();
+});
+
+Deno.test("ルーム作成: 作成者の userId が ownerUserId に記録される", () => {
+  const { manager } = setup();
+  const link = new MockLink("owner1");
+  manager.handle(link, { t: "createRoom", nickname: "ホスト", visibility: "private" });
+  const state = last(link, "roomState");
+  assertExists(state);
+  const room = manager.getRoom(state.snapshot.code);
+  assertExists(room);
+  assertEquals(room.ownerUserId, "owner1");
+  assertEquals(room.players.get(room.hostId)?.userId, "owner1");
   manager.dispose();
 });
 
