@@ -134,9 +134,10 @@ CSS クラスは `bot-toggles` / `bot-stage` / `bot-poll` / `bot-card` / `bot-se
 `bot-poll-*` / `bot-badge` を使っている。`public/assets/en.css` への追加もお願いしたい
 （未定義でも動作はするが、川柳テロップは縦に積んだほうが映える）。
 
-**あわせて**: `main.ts` の `C2S_TYPES` に `setBot` / `endPollVote` が入っていない件
-（[bot-voice.md](bot-voice.md) §5.2 で報告済み）が直らないと、**bot.js のトグルと投票は
-サーバーに届かない**。bot.js 側は正しく送るが `asC2S` で落ちる。こちらを先にお願いしたい。
+**前提（解決済み）**: `main.ts` の `C2S_TYPES` に `setBot` / `endPollVote` が入っておらず、
+bot.js が正しく送っても `asC2S` で落ちる状態だったが、**#10 で修正済み**。
+`types.ts` の `C2S` 型と `C2S_TYPES` を双方向で照合するテストも入ったので、
+今後この種の取りこぼしは検出される。
 
 ## 5. テスト
 
