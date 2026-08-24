@@ -80,6 +80,12 @@ async function refreshAccount() {
   $("account-status").textContent = loggedIn ? `ログイン中: ${body.userId}` : "未ログイン";
   $("logout").classList.toggle("hidden", !loggedIn);
   $("login-link").classList.toggle("hidden", loggedIn);
+  $("profile-link").classList.toggle("hidden", !loggedIn);
+
+  // 保存済みのあだ名があれば入室欄に自動入力する（§3.0）。ユーザーが既に入力していたら上書きしない
+  if (loggedIn && typeof body.nickname === "string" && $("nickname").value === "") {
+    $("nickname").value = body.nickname;
+  }
 }
 
 /** サーバーへ送る */

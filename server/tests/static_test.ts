@@ -3,7 +3,7 @@
  * ブラウザ実行なしで検証できる範囲（配信されるHTMLの中身）だけを見る。
  */
 
-import { assert } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { startServer } from "../main.ts";
 
 Deno.test("login.html: ゲストとして進むリンクが index.html を指している", async () => {
@@ -35,6 +35,42 @@ Deno.test("index.html: ログインリンクが login.html を指している（
     assert(
       /id="login-link"[^>]*class="hidden"|class="hidden"[^>]*id="login-link"/.test(html),
       "login-link は初期状態で hidden クラスが付いている必要があります",
+    );
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("profile.html: あだ名入力欄・タグ一覧・保存ボタンが存在する", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/profile.html`);
+    assertEquals(res.status, 200);
+    const html = await res.text();
+    assert(html.includes('id="profile-nickname"'), "あだ名入力欄が必要です");
+    assert(html.includes('id="profile-tags"'), "タグ一覧を描画するコンテナが必要です");
+    assert(html.includes('id="profile-save"'), "保存ボタンが必要です");
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("index.html: プロフィールリンクが profile.html を指している（初期状態は隠れている）", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/index.html`);
+    const html = await res.text();
+    assert(
+      html.includes('id="profile-link"') && html.includes('href="/profile.html"'),
+      "index.html に profile.html へのリンクが必要です",
+    );
+    assert(
+      /id="profile-link"[^>]*class="hidden"|class="hidden"[^>]*id="profile-link"/.test(html),
+      "profile-link は初期状態で hidden クラスが付いている必要があります",
     );
   } finally {
     await server.shutdown();

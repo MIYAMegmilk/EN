@@ -73,6 +73,10 @@ export type User = {
   salt: string;
   /** 登録時刻（epoch ms） */
   createdAt: number;
+  /** 軽量プロフィールのあだ名。未保存なら undefined（§3.0） */
+  nickname?: string;
+  /** 軽量プロフィールの趣味タグID配列。最大5個・未保存なら undefined（§3.11） */
+  tags?: string[];
 };
 
 /** 認証セッション。KV `authSession:{token}` に保存する（§3.0） */

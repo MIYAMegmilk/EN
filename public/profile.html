@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>宴 -EN- 身支度</title>
+    <link rel="stylesheet" href="./assets/en.css" />
+    <style>
+      /*
+       * 要素の ID は profile.js が参照しているため変えない。
+       * 配色・部品は assets/en.css の共通トークンを使う（index.html / login.html と揃える）。
+       */
+      main {
+        max-width: 480px;
+        margin: 0 auto;
+        padding: 26px 20px 60px;
+      }
+
+      .sheet {
+        padding: 26px 26px 30px;
+      }
+
+      .sheet h1 {
+        font-family: var(--serif);
+        font-size: 24px;
+        margin: 0 0 8px;
+        color: var(--cream);
+        letter-spacing: 0.05em;
+      }
+
+      .lead {
+        color: var(--muted);
+        font-size: 12.5px;
+        line-height: 1.9;
+        margin: 0 0 20px;
+      }
+
+      .messages {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-bottom: 16px;
+      }
+
+      .messages:not(:has(> *:not(:empty))) {
+        margin-bottom: 0;
+      }
+
+      #status {
+        color: #a8c58a;
+        font-size: 12.5px;
+        margin: 0;
+      }
+
+      /* 趣味タグ。チェックボックスをピル状のトグルとして見せる */
+      #profile-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      #profile-tags label {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 14px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-pill);
+        background: var(--panel-3);
+        color: var(--muted);
+        font-size: 12.5px;
+        cursor: pointer;
+        transition: border-color 0.15s, color 0.15s, background 0.15s;
+      }
+
+      #profile-tags label:hover {
+        border-color: var(--gold-3);
+      }
+
+      #profile-tags input[type="checkbox"] {
+        accent-color: var(--gold);
+      }
+
+      #profile-tags label:has(input:checked) {
+        border-color: var(--gold-3);
+        background: linear-gradient(180deg, rgba(230, 166, 63, 0.16), rgba(200, 134, 42, 0.1));
+        color: var(--gold-2);
+      }
+    </style>
+  </head>
+  <body class="wood">
+    <header class="appbar">
+      <span class="brand">宴 -EN-</span>
+      <span class="spacer"></span>
+      <a href="/index.html" class="btn">お座敷に戻る</a>
+    </header>
+
+    <main>
+      <div class="card sheet">
+        <p class="eyebrow">PROFILE</p>
+        <h1>身支度</h1>
+        <p class="lead">あだ名と趣味タグを整えて、卓に出てください。</p>
+
+        <div class="messages">
+          <p id="error" class="alert" role="alert"></p>
+          <p id="status" role="status"></p>
+        </div>
+
+        <section id="profile-section">
+          <div class="field">
+            <label for="profile-nickname">あだ名（20文字以内）</label>
+            <input class="input" id="profile-nickname" maxlength="20" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label>趣味タグ（最大5個・プリセットから選択）</label>
+            <div id="profile-tags"></div>
+          </div>
+          <button id="profile-save" class="btn btn-gold btn-block" type="button">保存</button>
+        </section>
+      </div>
+    </main>
+
+    <script src="./profile.js"></script>
+  </body>
+</html>

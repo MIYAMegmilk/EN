@@ -292,7 +292,9 @@ TypeScript の discriminated union で先に固定し、実装はこの型に従
 | `POST /api/auth/register` | 不要 | `{ userId, password }` → 登録+ログイン。Cookie 発行 |
 | `POST /api/auth/login` | 不要 | `{ userId, password }` → Cookie 発行 |
 | `POST /api/auth/logout` | 要 | セッション破棄 |
-| `GET /api/me` | 任意 | ログイン状態の確認（`{ userId }` または 401） |
+| `GET /api/me` | 任意 | ログイン状態の確認（`{ userId }`。軽量プロフィール保存済みなら `nickname` / `tags` も含む。未ログインは401） |
+| `GET /api/tags` | 不要 | プリセット趣味タグ一覧（§3.11）。`{ tags: { id, label }[] }` |
+| `PUT /api/profile` | 要 | 軽量プロフィール（あだ名・趣味タグ）の保存（§3.0 / §3.11）。`{ nickname, tags }` → 保存後の正本値を返す |
 | `GET /api/rooms` | 不要 | 稼働中公開ルームの配列（一覧の10秒ポーリング用） |
 | スタジオ CRUD (`/api/games` 系) | 要 | 定義の作成/更新/削除/一覧。詳細は設計書で確定 |
 
@@ -365,8 +367,8 @@ type ErrorCode =
 - C2S: `joinQueue` / `leaveQueue`（ランダムマッチ §3.1.2）、`chat`（§3.9）、`setBot`（bot ON/OFF、host only §3.10）
 - S2C: `queueStatus` / `matched`（マッチ成立→自動入室）、`chat`（発言者情報付き。bot 発言はフラグで区別）
 - `Room.visibility` の意味変更に伴う追加: 公開ルームの入室方式（open / knock）、合言葉ルームの合言葉（サーバー内のみ保持しクライアントへ送らない）
-- 趣味タグ（§3.11）: `PlayerPublic.tags`（タグID配列）、`join` / `joinQueue` / `createRoom` へのタグ指定、`GET /api/tags`（プリセット対応表）、公開ルーム一覧へのルームタグ
-- あだ名保存（§3.0）: `PUT /api/profile`（あだ名・タグの保存、要ログイン）、`GET /api/me` の応答にあだ名・タグを含める
+- 趣味タグ（§3.11）: `PlayerPublic.tags`（タグID配列）、`join` / `joinQueue` / `createRoom` へのタグ指定、公開ルーム一覧へのルームタグ（`GET /api/tags` は実装済み。§4.0参照）
+- あだ名保存（§3.0）: 実装済み（`PUT /api/profile`、`GET /api/me` の応答へのあだ名・タグ反映。§4.0参照）
 
 ## 5. データモデル
 
@@ -376,6 +378,8 @@ type User = {
   passwordHash: string;    // PBKDF2-HMAC-SHA256 600,000回
   salt: string;
   createdAt: number;
+  nickname?: string;       // 軽量プロフィールのあだ名。未保存なら undefined（§3.0）
+  tags?: string[];         // 軽量プロフィールの趣味タグID配列。最大5個・未保存なら undefined（§3.11）
 };
 // KV: user:{userId} / authSession:{token} → { userId, expiresAt }
 

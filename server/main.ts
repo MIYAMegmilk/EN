@@ -7,8 +7,9 @@
  *   GET /api/rooms … 稼働中の公開ルーム一覧（§4.0。認証不要・10秒ポーリング）
  *   その他         … public/ の静的配信
  *
- * 軽量スコープ: §4.0 の HTTP API のうち認証（/api/auth/*, /api/me）と公開ルーム一覧は
- * 実装済み。スタジオ CRUD は未実装。
+ * 軽量スコープ: §4.0 の HTTP API のうち認証（/api/auth/*, /api/me）、公開ルーム一覧、
+ * 軽量プロフィール（GET /api/tags, PUT /api/profile、§3.11）は実装済み。
+ * スタジオ CRUD は未実装。
  */
 
 import { loadSync } from "@std/dotenv";
