@@ -33,6 +33,14 @@ export const KNOCK_TTL_MS = 60_000;
 export const DISCONNECT_GRACE_MS = 60_000;
 /** 1ルームで保留にできるノックの最大件数（§3.8） */
 export const PENDING_KNOCK_MAX = 5;
+/** チャット1件の最大文字数（§3.9） */
+export const CHAT_TEXT_MAX = 200;
+/** ルームが保持するチャット履歴の最大件数（§3.9） */
+export const CHAT_HISTORY_MAX = 100;
+/** チャットのレート制限: 判定窓（ミリ秒、§3.9） */
+export const CHAT_RATE_WINDOW_MS = 10_000;
+/** チャットのレート制限: 判定窓内に送れる最大件数（§3.9） */
+export const CHAT_RATE_MAX = 5;
 
 // ---------------------------------------------------------------------------
 // §5 データモデル
@@ -108,6 +116,22 @@ export type PendingEntry = {
   used: boolean;
 };
 
+/** チャット1件（§3.9）。bot 発言は playerId が null で bot: true */
+export type ChatMessage = {
+  /** 発言の一意ID */
+  id: string;
+  /** 発言者の playerId。bot 発言は null */
+  playerId: string | null;
+  /** 発言時点の表示名 */
+  nickname: string;
+  /** 本文。200文字以内・制御文字なし */
+  text: string;
+  /** 発言時刻（epoch ms） */
+  at: number;
+  /** bot の発言か（§3.10） */
+  bot: boolean;
+};
+
 /** ルーム。プロセスメモリ上のみで保持し KV には置かない（§5） */
 export type Room = {
   /** 6桁の参加コード */
@@ -134,6 +158,8 @@ export type Room = {
   selectedGameId: string | null;
   /** 進行中のゲーム状態。未開始は null */
   game: GameState | null;
+  /** チャット履歴。直近 CHAT_HISTORY_MAX 件のみ・古い順（§3.9） */
+  chatHistory: ChatMessage[];
   /** 作成時刻（epoch ms） */
   createdAt: number;
   /** 最終アクティビティ時刻（epoch ms、24時間で自動削除） */
@@ -535,6 +561,8 @@ export type RoomSnapshot = {
   deadline: number | null;
   /** 現フェーズの表示データ */
   view: PhaseView;
+  /** チャット履歴。直近 CHAT_HISTORY_MAX 件のみ・古い順（§3.9） */
+  chat: ChatMessage[];
   /** 保留中のノック。ホストにのみ入る（§3.2 原則3） */
   pendingKnocks?: KnockPublic[];
   /** 受信者自身のセッショントークン。再接続時に join.session として送り返す（§3.2） */
@@ -585,6 +613,7 @@ export type C2S =
   | { t: "submitInput"; value: string | number }
   | { t: "submitVote"; targetPlayerId: string }
   | { t: "importGame"; shareCode: string }
+  | { t: "chat"; text: string }
   | { t: "rtcSignal"; to: string; payload: unknown }
   | { t: "leave" };
 
@@ -606,6 +635,7 @@ export type S2C =
   | { t: "roundResult"; scores: ScoreEntry[] }
   | { t: "finalResult"; scores: ScoreEntry[] }
   | { t: "hostChanged"; playerId: string }
+  | { t: "chat"; message: ChatMessage }
   | { t: "rtcSignal"; from: string; payload: unknown }
   | { t: "error"; code: ErrorCode; message: string };
 

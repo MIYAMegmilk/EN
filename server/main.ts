@@ -33,6 +33,7 @@ const C2S_TYPES: ReadonlySet<string> = new Set([
   "submitInput",
   "submitVote",
   "importGame",
+  "chat",
   "rtcSignal",
   "leave",
 ]);

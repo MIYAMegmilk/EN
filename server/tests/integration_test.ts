@@ -2,13 +2,14 @@
  * 結合スモークテスト
  * 実サーバーを空きポートで起動し、WebSocket クライアント3人で
  * 雑学クイズを最終結果まで完走させる（§9 のボット結合テストの最小版）。
+ * テキストチャット（§3.9）の配信・スナップショット・レート制限も検証する。
  */
 
 import { assert, assertEquals, assertExists } from "@std/assert";
 import { startServer } from "../main.ts";
 import { QUIZ } from "../official_games.ts";
 import { CORRECT_BASE_POINT, CORRECT_SPEED_BONUS } from "../engine.ts";
-import type { C2S, Phase, S2C } from "../types.ts";
+import { type C2S, CHAT_RATE_MAX, type Phase, type S2C } from "../types.ts";
 
 /** 1メッセージを待つ上限（ミリ秒） */
 const WAIT_TIMEOUT_MS = 5_000;
@@ -209,6 +210,59 @@ Deno.test("結合: 3人で雑学クイズを最終結果まで完走する", asy
   assertEquals([...room.players.values()][0].score, first * QUIZ.rounds);
 
   for (const client of clients) await client.leaveAndClose();
+  assertEquals(server.manager.roomCount, 0);
+  await server.shutdown();
+});
+
+Deno.test("結合: チャットが全員に届き、途中入室者は履歴を受け取る（§3.9）", async () => {
+  const server = startServer(0);
+  const host = await TestClient.connect(server.port);
+  const p2 = await TestClient.connect(server.port);
+
+  // ルーム作成と参加
+  host.send({ t: "createRoom", nickname: "ホスト", visibility: "private" });
+  const created = await host.waitFor((m) => m.t === "roomState", "roomState(host)");
+  assert(created.t === "roomState");
+  const code = created.snapshot.code;
+  p2.send({ t: "join", roomCode: code, nickname: "ふたり目" });
+  await p2.waitFor((m) => m.t === "roomState", "roomState(p2)");
+
+  // 発言者本人を含む全員に届く
+  host.send({ t: "chat", text: "こんばんは" });
+  for (const client of [host, p2]) {
+    const msg = await client.waitFor((m) => m.t === "chat", "chat(1件目)");
+    assert(msg.t === "chat");
+    assertEquals(msg.message.text, "こんばんは");
+    assertEquals(msg.message.nickname, "ホスト");
+    assertEquals(msg.message.bot, false);
+    assertExists(msg.message.playerId);
+  }
+  p2.send({ t: "chat", text: "よろしくです" });
+  for (const client of [host, p2]) {
+    const msg = await client.waitFor((m) => m.t === "chat", "chat(2件目)");
+    assert(msg.t === "chat");
+    assertEquals(msg.message.nickname, "ふたり目");
+  }
+
+  // 途中入室者のスナップショットに履歴が古い順で入る
+  const p3 = await TestClient.connect(server.port);
+  p3.send({ t: "join", roomCode: code, nickname: "みたり目" });
+  const joined3 = await p3.waitFor((m) => m.t === "roomState", "roomState(p3)");
+  assert(joined3.t === "roomState");
+  assertEquals(joined3.snapshot.chat.map((m) => m.text), ["こんばんは", "よろしくです"]);
+
+  // レート制限: 10秒窓で6件目は RATE_LIMITED（waitFor はエラー受信で reject する）
+  for (let i = 1; i <= CHAT_RATE_MAX; i++) {
+    p3.send({ t: "chat", text: `連投${i}` });
+  }
+  p3.send({ t: "chat", text: "超過分" });
+  const limited = await p3
+    .waitFor(() => false, "RATE_LIMITED")
+    .then(() => null)
+    .catch((e: unknown) => e);
+  assert(limited instanceof Error && limited.message.includes("RATE_LIMITED"));
+
+  for (const client of [host, p2, p3]) await client.leaveAndClose();
   assertEquals(server.manager.roomCount, 0);
   await server.shutdown();
 });

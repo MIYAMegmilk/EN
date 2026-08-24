@@ -1,23 +1,29 @@
 /**
  * ルーム管理層
- * 詳細仕様書 §3.1 / §3.2 / §8 に対応する。
+ * 詳細仕様書 §3.1 / §3.2 / §3.9 / §8 に対応する。
  *
  * 責務:
  *   - ルームのメモリ保持と6桁コードの採番
  *   - 参加 / 再接続 / 切断 / 退室化 / ホスト委譲
  *   - C2S メッセージを EngineEvent に変換し、EngineEffect を S2C として配信
  *   - フェーズタイマーの設置と無効化
+ *   - テキストチャットの検証・レート制限・履歴保持・配信（§3.9）
  *
  * 規約（§3.2 規約2）: ルームごとに1本のキューでイベントを直列処理し、
  * 状態遷移関数（engine.reduce）の呼び出しは同期文脈で行う。このファイルには
  * await を書かない。
  *
- * 軽量スコープ: 認証・公開ルーム・ノック・キック・レート制限・VC・importGame・
- * 24時間自動削除は未実装。接続点は `TODO(チーム分担)` として記してある。
+ * 軽量スコープ: 認証・公開ルーム・ノック・キック・レート制限（§3.8 の WS 20件/秒）・
+ * VC・importGame・24時間自動削除は未実装。接続点は `TODO(チーム分担)` として記してある。
  */
 
 import {
   type C2S,
+  CHAT_HISTORY_MAX,
+  CHAT_RATE_MAX,
+  CHAT_RATE_WINDOW_MS,
+  CHAT_TEXT_MAX,
+  type ChatMessage,
   DISCONNECT_GRACE_MS,
   err,
   type ErrorCode,
@@ -108,6 +114,8 @@ type RoomEntry = {
   phaseTimer: TimerHandle | null;
   /** 切断猶予タイマー（playerId → ハンドル） */
   graceTimers: Map<string, TimerHandle>;
+  /** チャットのレート制限用。playerId → 判定窓内の発言時刻（古い順、§3.9） */
+  chatTimes: Map<string, number[]>;
 };
 
 /** 接続がどのルームの誰に紐づいているか */
@@ -139,6 +147,25 @@ function hasControlChar(s: string): boolean {
     if (cp !== undefined && (cp < 0x20 || cp === 0x7f)) return true;
   }
   return false;
+}
+
+/** チャット本文を検証して正規化する（1..200文字・制御文字禁止、§3.9）。改行も拒否する */
+export function validateChatText(input: unknown): Result<string> {
+  if (typeof input !== "string") {
+    return err("INVALID_INPUT", "メッセージを入力してください");
+  }
+  const trimmed = input.trim();
+  const length = charLength(trimmed);
+  if (length === 0) {
+    return err("INVALID_INPUT", "メッセージを入力してください");
+  }
+  if (length > CHAT_TEXT_MAX) {
+    return err("INVALID_INPUT", `メッセージは${CHAT_TEXT_MAX}文字以内で入力してください`);
+  }
+  if (hasControlChar(trimmed)) {
+    return err("INVALID_INPUT", "メッセージに使用できない文字が含まれています");
+  }
+  return ok(trimmed);
 }
 
 /** ニックネームを検証して正規化する（1..20文字・制御文字禁止、§3.1） */
@@ -331,6 +358,7 @@ export class RoomManager {
       availableGames: new Map(OFFICIAL_GAMES.map((g) => [g.id, g])),
       selectedGameId: null,
       game: null,
+      chatHistory: [],
       createdAt: now,
       lastActiveAt: now,
     };
@@ -341,6 +369,7 @@ export class RoomManager {
       draining: false,
       phaseTimer: null,
       graceTimers: new Map(),
+      chatTimes: new Map(),
     };
     this.rooms.set(code, entry);
     this.links.set(link.id, { link, roomCode: code, playerId: host.id });
@@ -507,6 +536,9 @@ export class RoomManager {
           state.link,
         );
         return;
+      case "chat":
+        this.handleChat(entry, state, player, msg.text, now);
+        return;
       // TODO(チーム分担): §3.1.1 knock / approveKnock / rejectKnock（公開ルーム）
       case "knock":
       case "approveKnock":
@@ -578,6 +610,57 @@ export class RoomManager {
     room.game = result.state;
     this.applyEffects(entry, result.effects);
     this.syncPhaseTimer(entry);
+  }
+
+  // -------------------------------------------------------------------------
+  // チャット（§3.9）
+  // -------------------------------------------------------------------------
+
+  /**
+   * チャット発言を処理する。フェーズによる制限は設けず、観戦者も発言できる（§3.9）。
+   * 受理したら履歴に積み、発言者本人を含むルーム内の全接続へ配信する。
+   */
+  private handleChat(
+    entry: RoomEntry,
+    state: LinkState,
+    player: Player,
+    text: unknown,
+    now: number,
+  ): void {
+    const validated = validateChatText(text);
+    if (!validated.ok) {
+      sendError(state.link, validated.code, validated.message);
+      return;
+    }
+    // レート制限（1参加者 5件/10秒、§3.9）。窓から外れた時刻は捨ててメモリを増やさない
+    const times = (entry.chatTimes.get(player.id) ?? [])
+      .filter((at) => now - at < CHAT_RATE_WINDOW_MS);
+    if (times.length >= CHAT_RATE_MAX) {
+      entry.chatTimes.set(player.id, times);
+      sendError(
+        state.link,
+        "RATE_LIMITED",
+        `発言が多すぎます（${CHAT_RATE_WINDOW_MS / 1000}秒に${CHAT_RATE_MAX}件まで）`,
+      );
+      return;
+    }
+    times.push(now);
+    entry.chatTimes.set(player.id, times);
+    // TODO(チーム分担): §3.10 bot 発言の投稿口
+    const message: ChatMessage = {
+      id: crypto.randomUUID(),
+      playerId: player.id,
+      nickname: player.nickname,
+      text: validated.value,
+      at: now,
+      bot: false,
+    };
+    entry.room.chatHistory.push(message);
+    // 履歴は直近 CHAT_HISTORY_MAX 件のみ保持する（古い方から捨てる、§3.9）
+    if (entry.room.chatHistory.length > CHAT_HISTORY_MAX) {
+      entry.room.chatHistory.splice(0, entry.room.chatHistory.length - CHAT_HISTORY_MAX);
+    }
+    this.broadcast(entry, { t: "chat", message });
   }
 
   // -------------------------------------------------------------------------
@@ -695,6 +778,8 @@ export class RoomManager {
     if (player === undefined) return;
     const now = this.now();
     this.cancelGraceTimer(entry, playerId);
+    // レート制限の記録も参加者と一緒に破棄する
+    entry.chatTimes.delete(playerId);
     const link = entry.links.get(playerId);
     entry.links.delete(playerId);
     if (link !== undefined) {
@@ -720,6 +805,7 @@ export class RoomManager {
     this.clearRoomTimers(entry);
     for (const link of entry.links.values()) this.links.delete(link.id);
     entry.links.clear();
+    entry.chatTimes.clear();
     this.rooms.delete(entry.room.code);
   }
 
@@ -801,6 +887,7 @@ export class RoomManager {
       phase: game?.phase ?? "lobby",
       deadline: game?.deadline ?? null,
       view: this.viewFor(entry, viewer.id),
+      chat: [...room.chatHistory],
       session: viewer.sessionToken,
       serverTime: this.now(),
     };

@@ -101,6 +101,7 @@ function connect() {
     }
     log("←", msg);
     receive(msg);
+    Chat.handleServerMessage(msg);
   };
 }
 
@@ -115,6 +116,7 @@ function receive(msg) {
       if (typeof msg.snapshot.session === "string") {
         store.save(msg.snapshot.code, msg.snapshot.session);
       }
+      Chat.setSelfId(msg.snapshot.youId);
       showError("");
       renderAll();
       break;
@@ -155,6 +157,7 @@ function receive(msg) {
     case "kicked":
       store.drop();
       state.snapshot = null;
+      Chat.reset();
       showError("ルームから退出しました");
       renderAll();
       break;
@@ -186,6 +189,7 @@ function renderAll() {
   const snapshot = state.snapshot;
   $("entry").classList.toggle("hidden", snapshot !== null);
   $("room").classList.toggle("hidden", snapshot === null);
+  $("chat").classList.toggle("hidden", snapshot === null);
   $("phase").classList.toggle("hidden", snapshot === null);
   if (snapshot === null) return;
 
@@ -361,7 +365,15 @@ function bind() {
     send({ t: "leave" });
     store.drop();
     state.snapshot = null;
+    Chat.reset();
     renderAll();
+  });
+  Chat.init({
+    send,
+    listEl: $("chat-log"),
+    inputEl: $("chat-text"),
+    formEl: $("chat-form"),
+    onError: showError,
   });
 }
 
