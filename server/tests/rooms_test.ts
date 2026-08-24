@@ -14,6 +14,7 @@ import {
   RoomManager,
   validateChatText,
   validateNickname,
+  validateRoomName,
 } from "../rooms.ts";
 import { DEFAULT_PHASE_DURATIONS } from "../engine.ts";
 import type { S2C } from "../types.ts";
@@ -24,6 +25,7 @@ import {
   CHAT_TEXT_MAX,
   DISCONNECT_GRACE_MS,
   ROOM_CAPACITY,
+  ROOM_NAME_MAX,
   VC_CAPACITY,
 } from "../types.ts";
 
@@ -133,6 +135,15 @@ function createRoom(manager: RoomManager, nickname = "ホスト") {
   return { link, snapshot: state.snapshot };
 }
 
+/** 公開ルームを作り、ホストの接続とスナップショットを返す */
+function createPublicRoom(manager: RoomManager, roomName: string, nickname = "ホスト") {
+  const link = new MockLink();
+  manager.handle(link, { t: "createRoom", nickname, visibility: "public", roomName });
+  const state = last(link, "roomState");
+  assertExists(state);
+  return { link, snapshot: state.snapshot };
+}
+
 /** 既存ルームに参加させる */
 function joinRoom(manager: RoomManager, code: string, nickname: string) {
   const link = new MockLink();
@@ -218,14 +229,142 @@ Deno.test("ルーム作成: 作成者がホストとして入室し、6桁コー
   manager.dispose();
 });
 
-Deno.test("ルーム作成: 公開ルームは未実装として拒否する", () => {
+Deno.test("ルーム作成: 公開ルームはルーム名付きで作成できる（§3.1）", () => {
+  const { manager } = setup();
+  const link = new MockLink();
+  manager.handle(link, {
+    t: "createRoom",
+    nickname: "ホスト",
+    visibility: "public",
+    roomName: "  金曜の反省会  ",
+  });
+  const state = last(link, "roomState");
+  assertExists(state);
+  assertEquals(state.snapshot.visibility, "public");
+  // 前後の空白は落として保存する
+  assertEquals(state.snapshot.roomName, "金曜の反省会");
+  assertEquals(manager.roomCount, 1);
+  manager.dispose();
+});
+
+Deno.test("ルーム作成: 公開ルームにルーム名が無ければ INVALID_INPUT（§3.1）", () => {
   const { manager } = setup();
   const link = new MockLink();
   manager.handle(link, { t: "createRoom", nickname: "ホスト", visibility: "public" });
-  const error = last(link, "error");
-  assertExists(error);
-  assertEquals(error.code, "INVALID_INPUT");
+  assertEquals(last(link, "error")?.code, "INVALID_INPUT");
   assertEquals(manager.roomCount, 0);
+  manager.dispose();
+});
+
+Deno.test("ルーム作成: ルーム名が20文字を超えたら INVALID_INPUT（§3.1）", () => {
+  const { manager } = setup();
+  const link = new MockLink();
+  manager.handle(link, {
+    t: "createRoom",
+    nickname: "ホスト",
+    visibility: "public",
+    roomName: "あ".repeat(ROOM_NAME_MAX + 1),
+  });
+  assertEquals(last(link, "error")?.code, "INVALID_INPUT");
+  assertEquals(manager.roomCount, 0);
+  manager.dispose();
+});
+
+Deno.test("ルーム作成: 未知の公開設定は INVALID_INPUT", () => {
+  const { manager } = setup();
+  const link = new MockLink();
+  manager.handle(link, {
+    t: "createRoom",
+    nickname: "ホスト",
+    visibility: "secret" as "public",
+    roomName: "卓",
+  });
+  assertEquals(last(link, "error")?.code, "INVALID_INPUT");
+  assertEquals(manager.roomCount, 0);
+  manager.dispose();
+});
+
+Deno.test("ルーム名検証: 前後の空白を除去して受理する", () => {
+  const res = validateRoomName("  金曜の反省会  ");
+  assert(res.ok);
+  assertEquals(res.value, "金曜の反省会");
+});
+
+Deno.test("ルーム名検証: 空・制御文字・文字列以外は拒否する（§3.8）", () => {
+  assertFalse(validateRoomName("金曜の\u0007反省会").ok);
+  assertFalse(validateRoomName("   ").ok);
+  assertFalse(validateRoomName(42).ok);
+});
+
+// ---------------------------------------------------------------------------
+// 公開ルーム一覧（§2 / §4.0 GET /api/rooms）
+// ---------------------------------------------------------------------------
+
+Deno.test("公開ルーム一覧: 公開ルームだけを返し、招待制は載せない（§3.1）", () => {
+  const { manager } = setup();
+  createRoom(manager); // 招待制
+  createPublicRoom(manager, "とりあえず生");
+  const list = manager.listPublicRooms();
+  assertEquals(list.length, 1);
+  assertEquals(list[0].roomName, "とりあえず生");
+  assertEquals(list[0].playerCount, 1);
+  assertEquals(list[0].capacity, ROOM_CAPACITY);
+  assertEquals(list[0].playing, false);
+  assertEquals(list[0].gameTitle, undefined);
+  manager.dispose();
+});
+
+Deno.test("公開ルーム一覧: 新しく立った卓が先頭に来る", () => {
+  const { clock, manager } = setup();
+  createPublicRoom(manager, "先に立った卓");
+  clock.advance(1000);
+  createPublicRoom(manager, "あとに立った卓");
+  const list = manager.listPublicRooms();
+  assertEquals(list.map((r) => r.roomName), ["あとに立った卓", "先に立った卓"]);
+  manager.dispose();
+});
+
+Deno.test("公開ルーム一覧: 在室人数と選択中のゲームを反映する", () => {
+  const { manager } = setup();
+  const host = createPublicRoom(manager, "深夜のラーメン談議");
+  joinRoom(manager, host.snapshot.code, "ゆい");
+  manager.handle(host.link, { t: "selectGame", gameId: host.snapshot.availableGames[0].id });
+  const list = manager.listPublicRooms();
+  assertEquals(list[0].playerCount, 2);
+  assertEquals(list[0].gameTitle, host.snapshot.availableGames[0].title);
+  assertEquals(list[0].playing, false);
+  manager.dispose();
+});
+
+Deno.test("公開ルーム一覧: 一覧に回答・チャット・あだ名は含めない（§3.2 原則3）", () => {
+  const { manager } = setup();
+  const host = createPublicRoom(manager, "無言で呑む卓");
+  joinRoom(manager, host.snapshot.code, "ないしょのあだ名");
+  const serialized = JSON.stringify(manager.listPublicRooms());
+  assertFalse(serialized.includes("ないしょのあだ名"));
+  assertFalse(serialized.includes("ホスト"));
+  manager.dispose();
+});
+
+Deno.test("参加: 公開ルームはコードだけで入室できる（オープン入室 §3.1）", () => {
+  const { manager } = setup();
+  const host = createPublicRoom(manager, "はじめてのホッピー");
+  const guest = joinRoom(manager, host.snapshot.code, "ゆい");
+  assertExists(guest.state);
+  assertEquals(guest.state.snapshot.visibility, "public");
+  assertEquals(guest.state.snapshot.roomName, "はじめてのホッピー");
+  assertEquals(guest.state.snapshot.players.length, 2);
+  manager.dispose();
+});
+
+Deno.test("参加: 公開ルームも満員なら ROOM_FULL（§3.1）", () => {
+  const { manager } = setup();
+  const host = createPublicRoom(manager, "満席の卓");
+  for (let i = 1; i < ROOM_CAPACITY; i++) {
+    joinRoom(manager, host.snapshot.code, `客${i}`);
+  }
+  const overflow = joinRoom(manager, host.snapshot.code, "あふれた人");
+  assertEquals(last(overflow.link, "error")?.code, "ROOM_FULL");
   manager.dispose();
 });
 

@@ -1,0 +1,434 @@
+/*
+ * 宴 -EN- 共通スタイル。
+ * 配色・文字組み・部品を1か所に集め、各ページはページ固有の指定だけを持つ。
+ *
+ * 外部フォント・外部CDNは読み込まない（§3.8 CSP: default-src 'self'）。
+ * インラインの <script> / on* 属性も CSP で弾かれるので使わない（style は 'unsafe-inline' 可）。
+ */
+
+/* ── トークン ───────────────────────────────────────── */
+:root {
+  --ink: #100b07;
+  --wood: #1b120b;
+  --panel: #241a11;
+  --panel-2: #2b2016;
+  --panel-3: #33261a;
+  --line: #3d2c1c;
+  --line-soft: #2e2117;
+
+  --text: #ece0cf;
+  --cream: #f6ecdc;
+  --muted: #a48d70;
+  --dim: #7b6750;
+
+  --gold: #e6a63f;
+  --gold-2: #f3c368;
+  --gold-3: #c8862a;
+  --gold-ink: #2a1a06;
+
+  --red: #b02a24;
+  --red-2: #8c1f1a;
+  --green: #7fa85c;
+
+  --r-sm: 4px;
+  --r-md: 8px;
+  --r-lg: 14px;
+  --r-pill: 999px;
+
+  --serif: "Hiragino Mincho ProN", "Yu Mincho", "YuMincho", "Noto Serif JP", serif;
+  --sans: "Hiragino Kaku Gothic ProN", "Yu Gothic", "Noto Sans JP", system-ui, sans-serif;
+
+  --shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--ink);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--gold);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+/* 木目の壁。縦板の並びを薄い縞で表す */
+.wood {
+  background-color: var(--wood);
+  background-image:
+    repeating-linear-gradient(
+      90deg,
+      rgba(0, 0, 0, 0.34) 0 1px,
+      rgba(255, 255, 255, 0.018) 1px 3px,
+      rgba(0, 0, 0, 0) 3px 34px
+    ),
+    radial-gradient(120% 80% at 50% 0%, rgba(230, 166, 63, 0.13), transparent 62%);
+}
+
+/* ── 共通部品 ───────────────────────────────────────── */
+.eyebrow {
+  font-family: var(--serif);
+  font-size: 11px;
+  letter-spacing: 0.34em;
+  text-transform: uppercase;
+  color: var(--gold-3);
+  margin: 0 0 6px;
+}
+
+.mincho {
+  font-family: var(--serif);
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.dim {
+  color: var(--dim);
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.card {
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow);
+}
+
+/* ボタン */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--panel-3);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, transform 0.06s;
+}
+
+.btn:hover {
+  border-color: var(--gold-3);
+  background: #3b2c1d;
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn-gold {
+  border-color: transparent;
+  background: linear-gradient(180deg, var(--gold-2), var(--gold-3));
+  color: var(--gold-ink);
+  font-weight: 700;
+}
+
+.btn-gold:hover {
+  background: linear-gradient(180deg, #f7d182, #d4922f);
+  border-color: transparent;
+}
+
+.btn-red {
+  border-color: transparent;
+  background: linear-gradient(180deg, #c33630, var(--red-2));
+  color: #fff;
+  font-weight: 700;
+}
+
+.btn-block {
+  width: 100%;
+}
+
+.btn-lg {
+  padding: 14px 20px;
+  font-size: 15px;
+}
+
+/* 暖簾をくぐる系の広字送りボタン */
+.btn-noren {
+  font-family: var(--serif);
+  letter-spacing: 0.7em;
+  text-indent: 0.7em;
+  font-size: 16px;
+}
+
+/* 入力 */
+.field {
+  margin-bottom: 14px;
+}
+
+.field > label {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.input {
+  width: 100%;
+  padding: 11px 13px;
+  background: #150e08;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  color: var(--cream);
+  outline: none;
+}
+
+.input::placeholder {
+  color: #5f4f3c;
+}
+
+.input:focus {
+  border-color: var(--gold-3);
+  box-shadow: 0 0 0 3px rgba(230, 166, 63, 0.13);
+}
+
+/* タグ・バッジ */
+.tag {
+  display: inline-block;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.badge-gold {
+  border-color: var(--gold-3);
+  color: var(--gold-2);
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--gold);
+  flex: none;
+}
+
+.dot-off {
+  background: #55452f;
+}
+
+.dot-green {
+  background: var(--green);
+}
+
+/* 顔（あだ名の頭文字） */
+.face {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: linear-gradient(160deg, #4a3722, #2c2016);
+  border: 1px solid var(--line);
+  font-family: var(--serif);
+  font-size: 12px;
+  color: var(--cream);
+  flex: none;
+}
+
+.faces {
+  display: flex;
+  align-items: center;
+}
+
+.faces .face + .face {
+  margin-left: -6px;
+}
+
+/* ヘッダー（プロフィール／一覧で共有） */
+.appbar {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  padding: 12px 22px;
+  background: #16100a;
+  border-bottom: 1px solid var(--line-soft);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.brand {
+  font-family: var(--serif);
+  font-size: 17px;
+  color: var(--cream);
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+.navlinks {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.navlinks a {
+  padding: 5px 13px;
+  border-radius: var(--r-pill);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.navlinks a:hover {
+  color: var(--cream);
+  text-decoration: none;
+}
+
+.navlinks a[aria-current="page"] {
+  background: var(--panel-3);
+  border: 1px solid var(--line);
+  color: var(--cream);
+}
+
+.spacer {
+  flex: 1;
+}
+
+/* 区切り線に文字を挟む */
+.rule {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 20px 0 14px;
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.rule::before,
+.rule::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line-soft);
+}
+
+/* トグル */
+.toggle {
+  position: relative;
+  width: 38px;
+  height: 21px;
+  border-radius: var(--r-pill);
+  background: #4a3c2b;
+  border: none;
+  cursor: pointer;
+  flex: none;
+  padding: 0;
+}
+
+.toggle::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #d8c9b4;
+  transition: transform 0.16s;
+}
+
+.toggle[aria-pressed="true"] {
+  background: linear-gradient(180deg, var(--gold-2), var(--gold-3));
+}
+
+.toggle[aria-pressed="true"]::after {
+  transform: translateX(17px);
+  background: #fff8ea;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/*
+ * 表示の出し分け。
+ * app.js が classList.toggle("hidden", …) で切り替えるため、
+ * ページ側の ID セレクタ（詳細度100）に負けないよう !important を付ける。
+ */
+.hidden {
+  display: none !important;
+}
+
+/* エラー表示。中身が空のときは場所を取らない */
+.alert:empty {
+  display: none;
+}
+
+.alert {
+  margin: 0;
+  padding: 10px 16px;
+  border: 1px solid #6d2420;
+  border-radius: var(--r-md);
+  background: rgba(176, 42, 36, 0.13);
+  color: #f0bbb6;
+  font-size: 13px;
+}
+
+.notice:empty {
+  display: none;
+}
+
+.notice {
+  margin: 0;
+  padding: 10px 16px;
+  border: 1px solid var(--gold-dim, #8a6a2e);
+  border-radius: var(--r-md);
+  background: rgba(230, 166, 63, 0.08);
+  color: var(--gold-2);
+  font-size: 13px;
+}

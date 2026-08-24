@@ -480,7 +480,11 @@ function bind() {
     location.href = "/login.html";
   });
   $("create").addEventListener("click", () => {
-    send({ t: "createRoom", nickname: $("nickname").value, visibility: "private" });
+    // 公開ルームはルーム名必須（§3.1）。一覧（rooms.js）に載るのはこちらだけ
+    const visibility = $("visibility").value === "public" ? "public" : "private";
+    const msg = { t: "createRoom", nickname: $("nickname").value, visibility };
+    if (visibility === "public") msg.roomName = $("room-name").value;
+    send(msg);
   });
   $("join").addEventListener("click", () => {
     send({ t: "join", roomCode: $("code").value, nickname: $("nickname").value });

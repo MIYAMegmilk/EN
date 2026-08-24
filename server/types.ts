@@ -604,6 +604,28 @@ export type PhaseView =
   | RoundResultPhaseView
   | FinalResultPhaseView;
 
+/**
+ * 公開ルーム一覧の1行（§2 公開ルーム一覧 / §4.0 `GET /api/rooms`）。
+ * 未ログインでも取得できるため、部屋の中身が漏れる情報は入れない。
+ * あだ名・チャット・ゲームの進行内容は含めず、人数と灯りの有無だけを見せる。
+ */
+export type PublicRoomSummary = {
+  /** 6桁の参加コード。公開ルームはこのコードでそのまま入室できる（オープン入室） */
+  code: string;
+  /** ルーム名。公開ルームは必須（20文字以内） */
+  roomName: string;
+  /** 現在の在室人数（切断猶予中の人も含む） */
+  playerCount: number;
+  /** 定員 */
+  capacity: number;
+  /** 遊んでいるゲームのタイトル。ロビーで未選択なら入らない */
+  gameTitle?: string;
+  /** ゲーム進行中か（lobby 以外） */
+  playing: boolean;
+  /** 作成時刻（epoch ms）。「何時から灯りがついているか」の表示に使う */
+  createdAt: number;
+};
+
 /** 参加・再接続時に送るフル状態（§4.1 roomState） */
 export type RoomSnapshot = {
   /** 6桁の参加コード */

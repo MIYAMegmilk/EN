@@ -2,12 +2,13 @@
  * サーバーのエントリポイント
  * 詳細仕様書 §3.2 / §3.8 / §4 に対応する。
  *
- *   GET /ws       … WebSocket。全リアルタイム用途を1本で共用する（§3.2）
- *   GET /api/ice  … WebRTC の ICE サーバー設定（§3.6）
- *   その他        … public/ の静的配信
+ *   GET /ws        … WebSocket。全リアルタイム用途を1本で共用する（§3.2）
+ *   GET /api/ice   … WebRTC の ICE サーバー設定（§3.6）
+ *   GET /api/rooms … 稼働中の公開ルーム一覧（§4.0。認証不要・10秒ポーリング）
+ *   その他         … public/ の静的配信
  *
- * 軽量スコープ: §4.0 の HTTP API のうち認証（/api/auth/*, /api/me）は実装済み。
- * 公開ルーム一覧・スタジオ CRUD は未実装。
+ * 軽量スコープ: §4.0 の HTTP API のうち認証（/api/auth/*, /api/me）と公開ルーム一覧は
+ * 実装済み。スタジオ CRUD は未実装。
  */
 
 import { loadSync } from "@std/dotenv";
@@ -347,8 +348,8 @@ export function buildIceServers(): IceServer[] {
   return servers;
 }
 
-/** 起動時に作った応答本文をそのまま返す。認証情報を含むため保存させない */
-function iceResponse(body: string): Response {
+/** JSON をそのまま返す。TURN 認証情報や在室人数を含むため保存させない */
+function jsonResponse(body: string): Response {
   return new Response(body, {
     status: 200,
     headers: {
@@ -395,7 +396,14 @@ export function startServer(
       if (req.method !== "GET") {
         return new Response("method not allowed", { status: 405, headers: { allow: "GET" } });
       }
-      return iceResponse(iceBody);
+      return jsonResponse(iceBody);
+    }
+    // 公開ルーム一覧（§4.0）。認証不要・10秒ポーリング前提なのでキャッシュさせない
+    if (url.pathname === "/api/rooms") {
+      if (req.method !== "GET") {
+        return new Response("method not allowed", { status: 405, headers: { allow: "GET" } });
+      }
+      return jsonResponse(JSON.stringify({ rooms: manager.listPublicRooms() }));
     }
     if (url.pathname.startsWith("/api/")) {
       if (!isAllowedOrigin(req)) return new Response("forbidden origin", { status: 403 });

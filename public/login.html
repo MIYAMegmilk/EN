@@ -3,87 +3,274 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>宴 -EN-（ログイン・開発用動作確認ページ）</title>
+    <title>宴 -EN- ログイン</title>
+    <link rel="stylesheet" href="./assets/en.css" />
     <style>
-      /* 開発用の最小限の見た目。本番の画面は別途デザインする */
       body {
-        font-family: system-ui, sans-serif;
-        margin: 0 auto;
-        padding: 1rem;
-        max-width: 30rem;
-        line-height: 1.6;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
       }
-      h1 {
-        font-size: 1.2rem;
+
+      /* 暖簾。上辺から5枚の布が下がっている */
+      .noren {
+        display: grid;
+        grid-template-columns: 1fr 1.05fr 1fr 1.05fr 1fr;
+        gap: 5px;
+        height: 96px;
+        padding: 0 3.5vw;
+        flex: none;
       }
-      h2 {
-        font-size: 1rem;
-        margin: 1.2rem 0 0.4rem;
+
+      .noren span {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: var(--serif);
+        font-size: 22px;
+        letter-spacing: 0.22em;
+        text-indent: 0.22em;
+        border-radius: 0 0 3px 3px;
+        box-shadow: 0 8px 18px rgba(0, 0, 0, 0.4);
       }
-      section {
-        border: 1px solid #ccc;
-        border-radius: 6px;
-        padding: 0.6rem 0.8rem;
-        margin-bottom: 0.8rem;
+
+      .cloth-red {
+        background: linear-gradient(180deg, #a8241f, #8d1c18);
       }
-      label {
-        display: block;
-        font-size: 0.85rem;
-        margin-top: 0.4rem;
+
+      .cloth-cream {
+        background: linear-gradient(180deg, #f0e4cf, #e2d2b6);
+        color: #4a2b16;
       }
-      input,
-      button {
-        font: inherit;
-        padding: 0.4rem 0.5rem;
+
+      /* 提灯 */
+      .lantern {
+        position: absolute;
+        top: 84px;
+        width: 54px;
+        height: 74px;
+        border-radius: 50% / 42%;
+        background: radial-gradient(60% 55% at 40% 30%, #d4463c, #9d1f1a 70%, #7a1512);
+        box-shadow: 0 0 42px rgba(200, 60, 40, 0.3);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: var(--serif);
+        font-size: 19px;
+        color: #ffeccd;
+        pointer-events: none;
+      }
+
+      .lantern-l {
+        left: 4vw;
+      }
+
+      .lantern-r {
+        right: 4vw;
+        top: 104px;
+      }
+
+      main {
+        flex: 1;
+        display: flex;
+        justify-content: center;
+        padding: 26px 20px 0;
+      }
+
+      .sheet {
         width: 100%;
-        box-sizing: border-box;
+        max-width: 400px;
+        padding: 30px 32px 34px;
+        border-radius: var(--r-lg) var(--r-lg) 0 0;
+        background: linear-gradient(180deg, rgba(44, 32, 22, 0.94), rgba(30, 21, 14, 0.94));
+        border: 1px solid var(--line-soft);
+        border-bottom: none;
+        box-shadow: var(--shadow);
       }
-      button {
-        margin-top: 0.6rem;
-        cursor: pointer;
+
+      .sheet h1 {
+        font-family: var(--serif);
+        font-size: 30px;
+        margin: 0 0 10px;
+        color: var(--cream);
+        letter-spacing: 0.05em;
       }
-      .muted {
-        color: #666;
-        font-size: 0.85rem;
+
+      .lead {
+        color: var(--muted);
+        font-size: 12.5px;
+        line-height: 1.9;
+        margin: 0 0 20px;
       }
-      #error {
-        color: #b00020;
+
+      /* 通知の並び。空のときは余白も出さない（:empty で消える） */
+      .messages {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-bottom: 16px;
       }
+
+      .messages:not(:has(> *:not(:empty))) {
+        margin-bottom: 0;
+      }
+
       #status {
-        color: #2e7d32;
+        color: #a8c58a;
+        font-size: 12.5px;
+        margin: 0;
+      }
+
+      #me-result {
+        font-size: 11.5px;
+        margin: 0;
+      }
+
+      .fineprint {
+        display: block;
+        margin: -4px 0 16px;
+        font-size: 11.5px;
+      }
+
+      /* 新規登録。開かないと出てこない副導線にする */
+      details {
+        margin-top: 18px;
+        border: 1px solid var(--line-soft);
+        border-radius: var(--r-md);
+      }
+
+      summary {
+        padding: 11px 14px;
+        font-size: 13px;
+        color: var(--muted);
+        cursor: pointer;
+        list-style: none;
+      }
+
+      summary::-webkit-details-marker {
+        display: none;
+      }
+
+      summary::after {
+        content: "＋";
+        float: right;
+        color: var(--gold-3);
+      }
+
+      details[open] summary::after {
+        content: "−";
+      }
+
+      summary:hover {
+        color: var(--cream);
+      }
+
+      .details-body {
+        padding: 4px 14px 16px;
+        border-top: 1px solid var(--line-soft);
+      }
+
+      footer {
+        flex: none;
+        text-align: center;
+        padding: 22px 16px 18px;
+        font-family: var(--serif);
+        font-size: 11px;
+        letter-spacing: 0.3em;
+        color: #5d4c39;
+      }
+
+      @media (max-width: 560px) {
+        .lantern {
+          display: none;
+        }
+        .noren span {
+          font-size: 17px;
+        }
       }
     </style>
   </head>
-  <body>
-    <h1>宴 -EN- ログイン（開発用動作確認ページ）</h1>
-    <p class="muted">
-      /api/auth/* の疎通確認だけを目的とした暫定ページです。デザインは別途作成します。
-    </p>
+  <body class="wood">
+    <div class="noren" aria-hidden="true">
+      <span class="cloth-red"></span>
+      <span class="cloth-cream">宴</span>
+      <span class="cloth-red"></span>
+      <span class="cloth-cream">EN</span>
+      <span class="cloth-red"></span>
+    </div>
+    <div class="lantern lantern-l" aria-hidden="true">酒</div>
+    <div class="lantern lantern-r" aria-hidden="true">呑</div>
 
-    <p id="error" role="alert"></p>
-    <p id="status" role="status"></p>
-    <p id="me-result" class="muted"></p>
-    <p class="muted">
-      <a id="guest-link" href="/index.html">ログインせずに進む（ゲストとして参加）</a>
-    </p>
+    <main>
+      <div class="sheet">
+        <p class="eyebrow">IRASSHAI</p>
+        <h1>いらっしゃい</h1>
+        <p class="lead">
+          今夜も一杯、どこからでも。<br />
+          お名前を書いて暖簾をくぐってください。
+        </p>
 
-    <section id="register-section">
-      <h2>新規登録</h2>
-      <label for="register-userid">ユーザーID（半角英数4〜20文字）</label>
-      <input id="register-userid" autocomplete="username" maxlength="20" />
-      <label for="register-password">パスワード（8〜64文字）</label>
-      <input id="register-password" type="password" autocomplete="new-password" maxlength="64" />
-      <button id="register" type="button">登録してログイン</button>
-    </section>
+        <div class="messages">
+          <p id="error" class="alert" role="alert"></p>
+          <p id="status" role="status"></p>
+          <p id="me-result" class="dim"></p>
+        </div>
 
-    <section id="login-section">
-      <h2>ログイン</h2>
-      <label for="login-userid">ユーザーID</label>
-      <input id="login-userid" autocomplete="username" maxlength="20" />
-      <label for="login-password">パスワード</label>
-      <input id="login-password" type="password" autocomplete="current-password" maxlength="64" />
-      <button id="login" type="button">ログイン</button>
-    </section>
+        <section id="login-section">
+          <div class="field">
+            <label for="login-userid">ユーザーID</label>
+            <input
+              class="input"
+              id="login-userid"
+              autocomplete="username"
+              maxlength="20"
+              placeholder="taro2026"
+            />
+          </div>
+          <div class="field">
+            <label for="login-password">パスワード</label>
+            <input
+              class="input"
+              id="login-password"
+              type="password"
+              autocomplete="current-password"
+              maxlength="64"
+            />
+          </div>
+          <button id="login" class="btn btn-gold btn-block btn-lg btn-noren" type="button">
+            のれんをくぐる
+          </button>
+          <span class="fineprint dim">パスワードの再発行はできません</span>
+        </section>
+
+        <div class="rule">または</div>
+
+        <a id="guest-link" class="btn btn-block" href="/index.html">ふらっと（ゲスト）で入る</a>
+
+        <details id="register-section">
+          <summary>はじめての方はこちら（新規登録）</summary>
+          <div class="details-body">
+            <div class="field">
+              <label for="register-userid">ユーザーID（半角英数 4〜20文字）</label>
+              <input class="input" id="register-userid" autocomplete="username" maxlength="20" />
+            </div>
+            <div class="field">
+              <label for="register-password">パスワード（8〜64文字）</label>
+              <input
+                class="input"
+                id="register-password"
+                type="password"
+                autocomplete="new-password"
+                maxlength="64"
+              />
+            </div>
+            <button id="register" class="btn btn-block" type="button">登録して暖簾をくぐる</button>
+          </div>
+        </details>
+      </div>
+    </main>
+
+    <footer>OPEN 18:00 — LAST ORDER 02:00</footer>
 
     <script src="./login.js"></script>
   </body>

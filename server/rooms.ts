@@ -15,7 +15,8 @@
  * await を書かない。
  *
  * 軽量スコープ: createRoom の認証必須化（AUTH_REQUIRED）は実装済み。
- * 公開ルーム・ノック・キック・importGame・24時間自動削除は未実装。
+ * 公開ルームは「オープン入室」まで実装済み（作成・一覧・コードだけでの入室）。
+ * 承認制（ノック）・キック・importGame・24時間自動削除は未実装。
  * 接続点は `TODO(チーム分担)` として記してある。
  * VC は rtcSignal の中継のみを受け持つ（§3.6。接続の確立はクライアント側）。
  * §3.8 の WS レート制限（1接続あたり 20件/秒）は main.ts の WebSocket 層で実装済み。
@@ -38,10 +39,12 @@ import {
   type PhaseView,
   type Player,
   type PlayerPublic,
+  type PublicRoomSummary,
   type Result,
   type Room,
   ROOM_CAPACITY,
   ROOM_CODE_LENGTH,
+  ROOM_NAME_MAX,
   type RoomSnapshot,
   type S2C,
   type ScoreEntry,
@@ -62,8 +65,8 @@ import {
   BOT_IDS,
   type BotEffect,
   type BotEvent,
-  type BotState,
   BOTS,
+  type BotState,
   type BotUtterance,
   createBotState,
   END_POLL_MS,
@@ -253,6 +256,28 @@ export function validateNickname(input: unknown): Result<string> {
   return ok(trimmed);
 }
 
+/**
+ * 公開ルームのルーム名を検証して正規化する（1..20文字・制御文字禁止、§3.1）。
+ * 一覧は未ログインでも見えるので、ここを通った文字列だけが外に出る。
+ */
+export function validateRoomName(input: unknown): Result<string> {
+  if (typeof input !== "string") {
+    return err("INVALID_INPUT", "ルーム名を入力してください");
+  }
+  const trimmed = input.trim();
+  const length = charLength(trimmed);
+  if (length === 0) {
+    return err("INVALID_INPUT", "ルーム名を入力してください");
+  }
+  if (length > ROOM_NAME_MAX) {
+    return err("INVALID_INPUT", `ルーム名は${ROOM_NAME_MAX}文字以内で入力してください`);
+  }
+  if (hasControlChar(trimmed)) {
+    return err("INVALID_INPUT", "ルーム名に使用できない文字が含まれています");
+  }
+  return ok(trimmed);
+}
+
 /** ルームコードを正規化する。6桁の数字でなければ null */
 export function normalizeRoomCode(input: unknown): string | null {
   if (typeof input !== "string") return null;
@@ -306,6 +331,37 @@ export class RoomManager {
   /** ルームを取得する（テスト用。返り値は内部状態そのもの） */
   getRoom(code: string): Room | undefined {
     return this.rooms.get(code)?.room;
+  }
+
+  /**
+   * 稼働中の公開ルーム一覧（§2 公開ルーム一覧 / §4.0 `GET /api/rooms`）。
+   * 招待制ルームは載せない。コードを知らない人に漏らさないため（§3.1）。
+   * 新しく立った卓が上に来るよう createdAt の降順で返す。
+   */
+  listPublicRooms(): PublicRoomSummary[] {
+    const list: PublicRoomSummary[] = [];
+    for (const entry of this.rooms.values()) {
+      const room = entry.room;
+      if (room.visibility !== "public" || room.roomName === undefined) continue;
+      const game = room.game;
+      const summary: PublicRoomSummary = {
+        code: room.code,
+        roomName: room.roomName,
+        playerCount: room.players.size,
+        capacity: ROOM_CAPACITY,
+        playing: game !== null && game.phase !== "lobby",
+        createdAt: room.createdAt,
+      };
+      // 選択中のゲームは「何をして遊んでいる卓か」の手がかりとして出す。
+      // 進行内容（お題・回答・得点）は一覧には一切含めない
+      const selected = room.selectedGameId === null
+        ? undefined
+        : room.availableGames.get(room.selectedGameId);
+      if (selected !== undefined) summary.gameTitle = selected.title;
+      list.push(summary);
+    }
+    list.sort((a, b) => b.createdAt - a.createdAt);
+    return list;
   }
 
   /** C2S メッセージを1件処理する */
@@ -398,10 +454,19 @@ export class RoomManager {
       sendError(link, "AUTH_REQUIRED", "ルーム作成にはログインが必要です");
       return;
     }
-    if (msg.visibility !== "private") {
-      // TODO(チーム分担): §3.1 / §3.1.1 公開ルーム（一覧・ノック・entryToken）
-      sendError(link, "INVALID_INPUT", "公開ルームは未実装です");
+    if (msg.visibility !== "public" && msg.visibility !== "private") {
+      sendError(link, "INVALID_INPUT", "公開設定が不正です");
       return;
+    }
+    // 公開ルームはルーム名必須（§3.1）。一覧に出る唯一のユーザー由来テキストなのでここで検証する
+    let roomName: string | undefined;
+    if (msg.visibility === "public") {
+      const validated = validateRoomName(msg.roomName);
+      if (!validated.ok) {
+        sendError(link, validated.code, validated.message);
+        return;
+      }
+      roomName = validated.value;
     }
     const nickname = validateNickname(msg.nickname);
     if (!nickname.ok) {
@@ -422,7 +487,7 @@ export class RoomManager {
     host.userId = link.userId;
     const room: Room = {
       code,
-      visibility: "private",
+      visibility: msg.visibility,
       ownerUserId: link.userId,
       hostId: host.id,
       players: new Map([[host.id, host]]),
@@ -435,6 +500,7 @@ export class RoomManager {
       chatHistory: [],
       createdAt: now,
       lastActiveAt: now,
+      ...(roomName === undefined ? {} : { roomName }),
     };
     const entry: RoomEntry = {
       room,
@@ -490,7 +556,9 @@ export class RoomManager {
       // 猶予超過で退室済みなど、既知でないセッションは新規参加として扱う
     }
     // TODO(チーム分担): §3.1 キック済み sessionToken（room.blockedSessions）の拒否（BLOCKED）
-    // TODO(チーム分担): §3.1.1 公開ルームは entryToken の検証・消費を必須にする（INVALID_TOKEN）
+    // 公開ルームは「オープン入室」として扱い、コードだけで入れる（§3.1）。
+    // TODO(チーム分担): §3.1.1 承認制（ノック → entryToken の検証・消費）。
+    // 入室方式（open / knock）を Room に持たせたうえで、knock の側だけ必須にする
     // あだ名を省略した参加者にはしゅんぴが二つ名を付ける（§3.0 / §3.10）。
     // 空文字は「入力し忘れ」と区別できないので、従来どおり検証で弾く
     let assignedNickname: string | undefined;
