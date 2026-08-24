@@ -4,10 +4,11 @@
  * §6: 本番はリバースプロキシ経由のため、TCP接続元だけでは実クライアントIPが分からない。
  * clientIp は X-Forwarded-For を優先して実クライアントIPを判定する。
  * /api/rooms は稼働中の公開ルームだけを返す（§2 / §4.0）。
+ * asC2S は types.ts の C2S 型と同じ t を受理しなければならない（§4.1、末尾の照合テスト）。
  */
 
 import { assert, assertEquals } from "@std/assert";
-import { clientIp, startServer } from "../main.ts";
+import { asC2S, C2S_TYPES, clientIp, startServer } from "../main.ts";
 import type { ClientLink } from "../rooms.ts";
 import type { PublicRoomSummary, S2C } from "../types.ts";
 
@@ -191,4 +192,67 @@ Deno.test("/api/rooms: GET 以外は 405", async () => {
   } finally {
     await handle.shutdown();
   }
+});
+
+// ---------------------------------------------------------------------------
+// C2S の受理集合の照合（§4.1）
+//
+// 過去に C2S_TYPES から setBot / endPollVote が抜け落ち、rooms.ts にハンドラがあるのに
+// 実際の WebSocket 経由では asC2S に弾かれて機能しない、という不具合が出た。
+// rooms_bot_test.ts は RoomManager を直接叩くため main.ts の asC2S を通らず、この齟齬を
+// 検出できなかった。TypeScript の型は実行時に列挙できないので、types.ts のソースから
+// C2S 型の t を抜き出して C2S_TYPES と集合として突き合わせ、過不足を機械的に検出する。
+// ---------------------------------------------------------------------------
+
+/**
+ * types.ts のソースから C2S 型の union に現れる t のリテラルを抽出する。
+ * S2C 等の t を拾わないよう、`export type C2S =` から次の `export` までに範囲を限定する。
+ */
+async function c2sTypesFromSource(): Promise<Set<string>> {
+  const source = await Deno.readTextFile(new URL("../types.ts", import.meta.url));
+  const start = source.indexOf("export type C2S =");
+  assert(start >= 0, "types.ts に `export type C2S =` が見つからない（実装変更で抽出が空振り）");
+  const after = source.indexOf("\nexport ", start + 1);
+  const block = after >= 0 ? source.slice(start, after) : source.slice(start);
+  const found = new Set<string>();
+  for (const m of block.matchAll(/\bt:\s*"([^"]+)"/g)) found.add(m[1]);
+  assert(found.size > 0, "C2S 型から t を1件も抽出できなかった（抽出の正規表現が空振り）");
+  return found;
+}
+
+Deno.test("C2S_TYPES: types.ts の C2S 型と過不足なく一致する", async () => {
+  const declared = await c2sTypesFromSource();
+  const missing = [...declared].filter((t) => !C2S_TYPES.has(t));
+  const extra = [...C2S_TYPES].filter((t) => !declared.has(t));
+  assertEquals(missing, [], `C2S_TYPES に不足している t: ${missing.join(", ")}`);
+  assertEquals(extra, [], `C2S 型に存在しないのに C2S_TYPES にある t: ${extra.join(", ")}`);
+});
+
+Deno.test("asC2S: types.ts の C2S 型に載っている t はすべて受理する", async () => {
+  for (const t of await c2sTypesFromSource()) {
+    assert(asC2S({ t }) !== null, `asC2S が ${t} を弾いた（C2S_TYPES に足りていない）`);
+  }
+});
+
+Deno.test("asC2S: bot の ON/OFF と終了アンケートの投票を受理する（§3.10）", () => {
+  assertEquals(asC2S({ t: "setBot", botId: "shunpi", enabled: true }), {
+    t: "setBot",
+    botId: "shunpi",
+    enabled: true,
+  });
+  assertEquals(asC2S({ t: "setBot", enabled: false }), { t: "setBot", enabled: false });
+  assertEquals(asC2S({ t: "endPollVote", pollId: "p1", agree: true }), {
+    t: "endPollVote",
+    pollId: "p1",
+    agree: true,
+  });
+});
+
+Deno.test("asC2S: 未知の t や t 以外の形は弾く", () => {
+  assertEquals(asC2S({ t: "nonexistent" }), null);
+  assertEquals(asC2S({ t: 1 }), null);
+  assertEquals(asC2S({}), null);
+  assertEquals(asC2S(null), null);
+  assertEquals(asC2S([{ t: "chat", text: "こんばんは" }]), null);
+  assertEquals(asC2S("chat"), null);
 });
