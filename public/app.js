@@ -26,6 +26,70 @@ function el(tag, text) {
   return node;
 }
 
+/** プリセット部屋タグの一覧（/api/room-tags の結果）。作成フォームの描画に使う */
+let presetRoomTags = [];
+
+/** 作成直後に PATCH で反映する説明文・タグ。作成ボタン押下時にセットし、roomState 受信後にクリアする */
+let pendingRoomMeta = null;
+
+/** 卓を立てるフォームのタグ選択肢を描画する */
+function renderRoomTagsPicker(tags) {
+  const container = $("room-tags");
+  container.textContent = "";
+  for (const tag of tags) {
+    const label = document.createElement("label");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = tag.id;
+    label.appendChild(checkbox);
+    label.appendChild(document.createTextNode(tag.label));
+    container.appendChild(label);
+  }
+}
+
+/** チェック済みのタグIDを取得する */
+function checkedRoomTagIds() {
+  return [...document.querySelectorAll('#room-tags input[type="checkbox"]:checked')]
+    .map((el) => el.value);
+}
+
+/** 卓作成の直後に説明文・タグを反映する。失敗しても卓自体は使えるので握りつぶしてエラー表示のみ行う */
+async function applyPendingRoomMeta(code, meta) {
+  try {
+    const res = await fetch(`/api/rooms/${code}`, {
+      method: "PATCH",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(meta),
+    });
+    if (!res.ok) {
+      let message = "説明文・タグの保存に失敗しました";
+      try {
+        const body = await res.json();
+        if (typeof body?.error === "string") message = body.error;
+      } catch {
+        // JSONで返らなかった場合は既定の文言のまま
+      }
+      showError(message);
+    }
+  } catch {
+    showError("説明文・タグの保存に失敗しました");
+  }
+}
+
+/** 起動時にプリセット部屋タグを読み込む */
+async function loadRoomTags() {
+  try {
+    const res = await fetch("/api/room-tags", { credentials: "same-origin" });
+    if (!res.ok) return;
+    const body = await res.json();
+    presetRoomTags = Array.isArray(body?.tags) ? body.tags : [];
+    renderRoomTagsPicker(presetRoomTags);
+  } catch {
+    // 読み込めなくてもタグなしで卓は作れるので無視する
+  }
+}
+
 /** ページ内の状態 */
 const state = {
   ws: null,
@@ -166,6 +230,11 @@ function receive(msg) {
       Voice.setSelfId(msg.snapshot.youId);
       Bot.setSelfId(msg.snapshot.youId);
       showError("");
+      if (pendingRoomMeta !== null) {
+        const meta = pendingRoomMeta;
+        pendingRoomMeta = null;
+        applyPendingRoomMeta(msg.snapshot.code, meta);
+      }
       renderAll();
       break;
     case "playerJoined":
@@ -213,6 +282,7 @@ function receive(msg) {
       renderAll();
       break;
     case "error":
+      pendingRoomMeta = null;
       showError(`${msg.code}: ${msg.message}`);
       break;
     default:
@@ -550,10 +620,19 @@ function bind() {
     // 公開ルームはルーム名必須（§3.1）。一覧（rooms.js）に載るのはこちらだけ
     const visibility = $("visibility").value === "public" ? "public" : "private";
     const msg = { t: "createRoom", nickname: $("nickname").value, visibility };
-    if (visibility === "public") msg.roomName = $("room-name").value;
+    if (visibility === "public") {
+      msg.roomName = $("room-name").value;
+      pendingRoomMeta = {
+        description: $("room-description").value,
+        tags: checkedRoomTagIds(),
+      };
+    } else {
+      pendingRoomMeta = null;
+    }
     send(msg);
   });
   $("join").addEventListener("click", () => {
+    pendingRoomMeta = null;
     // 空欄なら nickname を積まない。省略するとしゅんぴが二つ名を付ける（§3.10）。
     // 空文字は「入力し忘れ」と区別できないのでサーバーが弾く（types.ts の join 参照）
     const msg = { t: "join", roomCode: $("code").value };
@@ -604,6 +683,7 @@ function bind() {
 /** 起動する。ICE 設定を先に取ってから VC を初期化する */
 async function start() {
   bind();
+  loadRoomTags();
   refreshAccount();
   bindVc(await fetchIceServers());
   connect();

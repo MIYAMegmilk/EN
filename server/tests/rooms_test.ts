@@ -14,6 +14,7 @@ import {
   RoomManager,
   validateChatText,
   validateNickname,
+  validateRoomDescription,
   validateRoomName,
   VOICE_RATE_MAX,
   VOICE_RATE_WINDOW_MS,
@@ -1389,4 +1390,74 @@ Deno.test("退室: 全員が退室するとサンドボックス稼働中でも�
   manager.handle(host.link, { t: "leave" });
   assertEquals(manager.roomCount, 0);
   manager.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// 卓の説明文・タグ（一覧表示用）
+// ---------------------------------------------------------------------------
+
+Deno.test("説明文検証: 前後の空白を除去して受理し、空文字も許可する", () => {
+  const trimmed = validateRoomDescription("  今夜は焼酎の会です  ");
+  assert(trimmed.ok);
+  assertEquals(trimmed.value, "今夜は焼酎の会です");
+
+  const empty = validateRoomDescription("");
+  assert(empty.ok);
+  assertEquals(empty.value, "");
+});
+
+Deno.test("説明文検証: 101文字以上・制御文字・文字列以外を拒否する", () => {
+  assertFalse(validateRoomDescription("あ".repeat(101)).ok);
+  assertFalse(validateRoomDescription("あ\nい").ok);
+  assertFalse(validateRoomDescription(123).ok);
+  assert(validateRoomDescription("あ".repeat(100)).ok);
+});
+
+Deno.test("setRoomMeta: オーナーが説明文・タグを設定すると一覧に反映される", () => {
+  const { manager } = setup();
+  const { snapshot } = createPublicRoom(manager, "金曜の反省会");
+
+  const result = manager.setRoomMeta(snapshot.code, "testUser", {
+    description: "ゆるく飲みます",
+    tags: ["casual_chat", "light_drinking"],
+  });
+  assert(result.ok);
+
+  const [summary] = manager.listPublicRooms();
+  assertEquals(summary.description, "ゆるく飲みます");
+  assertEquals(summary.tags, ["casual_chat", "light_drinking"]);
+});
+
+Deno.test("setRoomMeta: 空文字・空配列で説明文とタグをクリアできる", () => {
+  const { manager } = setup();
+  const { snapshot } = createPublicRoom(manager, "金曜の反省会");
+  manager.setRoomMeta(snapshot.code, "testUser", {
+    description: "ゆるく飲みます",
+    tags: ["casual_chat"],
+  });
+
+  const cleared = manager.setRoomMeta(snapshot.code, "testUser", { description: "", tags: [] });
+  assert(cleared.ok);
+
+  const [summary] = manager.listPublicRooms();
+  assertEquals(summary.description, undefined);
+  assertEquals(summary.tags, undefined);
+});
+
+Deno.test("setRoomMeta: 存在しないコードは404相当を返す", () => {
+  const { manager } = setup();
+  const result = manager.setRoomMeta("000000", "testUser", { description: "", tags: [] });
+  assert(!result.ok);
+  assertEquals(result.status, 404);
+});
+
+Deno.test("setRoomMeta: オーナー以外は403相当を返す", () => {
+  const { manager } = setup();
+  const { snapshot } = createPublicRoom(manager, "金曜の反省会");
+  const result = manager.setRoomMeta(snapshot.code, "otherUser", {
+    description: "乗っ取り",
+    tags: [],
+  });
+  assert(!result.ok);
+  assertEquals(result.status, 403);
 });

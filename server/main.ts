@@ -17,12 +17,14 @@ import { serveDir } from "@std/http/file-server";
 import { fromFileUrl } from "@std/path";
 import { getCookies } from "@std/http/cookie";
 import { AuthApi, SESSION_COOKIE_NAME, verifySession } from "./auth.ts";
-import { type ClientLink, RoomManager } from "./rooms.ts";
+import { type ClientLink, RoomManager, validateRoomDescription } from "./rooms.ts";
+import { isValidRoomTagId, ROOM_TAGS, type RoomTagId } from "./room_tags.ts";
 import { createSenryuDetector } from "./senryu.ts";
 import { charLength, hasControlChar } from "./validation.ts";
 import {
   type C2S,
   ROOM_CAPACITY,
+  ROOM_TAGS_MAX,
   type S2C,
   type SandboxGameInfo,
   WS_RATE_MAX,
@@ -484,6 +486,14 @@ function jsonResponse(body: string): Response {
   });
 }
 
+/** JSON のエラー応答を返す */
+function jsonError(status: number, message: string): Response {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // サンドボックスゲームのマニフェスト（docs/design/game-sandbox.md §6.2）
 // ---------------------------------------------------------------------------
@@ -693,6 +703,56 @@ export function startServer(
         return new Response("method not allowed", { status: 405, headers: { allow: "GET" } });
       }
       return jsonResponse(JSON.stringify({ rooms: manager.listPublicRooms() }));
+    }
+    // プリセット部屋タグ一覧（ログイン不要）
+    if (url.pathname === "/api/room-tags") {
+      if (req.method !== "GET") {
+        return new Response("method not allowed", { status: 405, headers: { allow: "GET" } });
+      }
+      return jsonResponse(JSON.stringify({ tags: ROOM_TAGS }));
+    }
+    // 卓の説明文・タグの更新（オーナー本人のみ）
+    const roomMetaMatch = /^\/api\/rooms\/([0-9]{6})$/.exec(url.pathname);
+    if (roomMetaMatch !== null) {
+      if (req.method !== "PATCH") {
+        return new Response("method not allowed", { status: 405, headers: { allow: "PATCH" } });
+      }
+      if (!isAllowedOrigin(req)) return new Response("forbidden origin", { status: 403 });
+      if (kv === undefined) return new Response("auth not configured", { status: 501 });
+      const token = getCookies(req.headers)[SESSION_COOKIE_NAME];
+      const userId = await verifySession(kv, token);
+      if (userId === null) return jsonError(401, "ログインしていません");
+
+      let body: unknown;
+      try {
+        body = await req.json();
+      } catch {
+        return jsonError(400, "リクエストの形式が正しくありません");
+      }
+      const { description, tags } = (body ?? {}) as { description?: unknown; tags?: unknown };
+      const descriptionResult = validateRoomDescription(description);
+      if (!descriptionResult.ok) {
+        return jsonError(400, descriptionResult.message);
+      }
+      if (!Array.isArray(tags) || !tags.every(isValidRoomTagId)) {
+        return jsonError(400, "タグはプリセットの中から選んでください");
+      }
+      const uniqueTags = [...new Set(tags as RoomTagId[])];
+      if (uniqueTags.length > ROOM_TAGS_MAX) {
+        return jsonError(400, `タグは${ROOM_TAGS_MAX}個以内で選んでください`);
+      }
+
+      const result = manager.setRoomMeta(roomMetaMatch[1], userId, {
+        description: descriptionResult.value,
+        tags: uniqueTags,
+      });
+      if (!result.ok) {
+        return jsonError(
+          result.status,
+          result.status === 404 ? "ルームが見つかりません" : "この卓のオーナーのみ変更できます",
+        );
+      }
+      return jsonResponse(JSON.stringify({ description: result.description, tags: result.tags }));
     }
     // サンドボックスゲーム一覧（docs/design/game-sandbox.md §6.2）。認証不要。
     // マニフェストが無い・壊れている場合も 500 にはせず空配列で応答する
