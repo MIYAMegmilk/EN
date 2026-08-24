@@ -62,7 +62,16 @@ async function applyPendingRoomMeta(code, meta) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(meta),
     });
-    if (!res.ok) showError("説明文・タグの保存に失敗しました");
+    if (!res.ok) {
+      let message = "説明文・タグの保存に失敗しました";
+      try {
+        const body = await res.json();
+        if (typeof body?.error === "string") message = body.error;
+      } catch {
+        // JSONで返らなかった場合は既定の文言のまま
+      }
+      showError(message);
+    }
   } catch {
     showError("説明文・タグの保存に失敗しました");
   }
@@ -267,6 +276,7 @@ function receive(msg) {
       renderAll();
       break;
     case "error":
+      pendingRoomMeta = null;
       showError(`${msg.code}: ${msg.message}`);
       break;
     default:
@@ -615,6 +625,7 @@ function bind() {
     send(msg);
   });
   $("join").addEventListener("click", () => {
+    pendingRoomMeta = null;
     send({ t: "join", roomCode: $("code").value, nickname: $("nickname").value });
   });
   $("select-game").addEventListener("click", () => {
