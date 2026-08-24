@@ -421,6 +421,6 @@ export function startServer(
 if (import.meta.main) {
   const port = Number(Deno.env.get("PORT") ?? "8000");
   const kv = await Deno.openKv();
-  const handle = startServer(Number.isInteger(port) && port > 0 ? port : 8000, "0.0.0.0", kv);
+  const handle = startServer(Number.isInteger(port) && port > 0 ? port : 8000, "127.0.0.1", kv);
   console.log(`宴 -EN- server listening on http://localhost:${handle.port}/`);
 }
