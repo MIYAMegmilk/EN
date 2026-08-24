@@ -457,10 +457,13 @@ type KuromojiTokenizer = {
 /**
  * kuromoji（ローカル辞書）を使うプロバイダ。漢字混じり文を判定できる。
  *
- * 実測（Deno 2.9 / Windows）: 初期化 約390ms、常駐 約+385MB、辞書 17MB。
- * サーバープロセスを共有するため、本番投入は §6 のメモリ見積りとあわせて
- * チーム合意のうえで行う。読み込めない場合は null を返すので、
- * 呼び出し側は createKanaProvider() にフォールバックすること。
+ * 実測（Deno 2.9 / Windows・5回）: 初期化 約390ms、辞書 17MB、
+ * 常駐 +220〜330MB（RSS 57MB → 277MB か 384MB の2値。GC のタイミングで振れる）。
+ * サーバープロセスを共有するため、この見積りは §6 に書き出してチームに ack を求める。
+ * 既定では使う（createSenryuDetector 参照）。倒すときは
+ * createSenryuDetector({ kuromoji: false })（＝ `EN_SENRYU_KUROMOJI=0`）。
+ * 読み込めない場合は null を返すので、呼び出し側は createKanaProvider() に
+ * フォールバックすること。
  *
  * npm 依存は deno.json に固定せず動的 import で解決する（未合意の共有設定を
  * 変更しないため）。合意後に deno.json の imports へ移す。
@@ -532,7 +535,14 @@ function isAllKana(text: string): boolean {
  * 水の音」が検出できない）。音声認識の出力は漢字かな混じりで返ってくるので、
  * 文字起こし（docs/design/bot-voice.md）では kuromoji がないと実質発火しない。
  *
- * そこで「使うまで読まない、読めたら差し替える」ことにした:
+ * 辞書はプロセス常駐で +220〜330MB になる（createKuromojiProvider の実測）。
+ * 4GB プラン（詳細仕様書 §6）に対して約 10% で、ルーム数には比例しない一度きりの
+ * 定数なので**既定では使う**。かなのみに倒すと せり が漢字混じりを拾えず、
+ * bot-voice.md の文字起こしが実質発火しなくなるほうが痛い。
+ * メモリが問題になったときは `kuromoji: false` で従来のかなのみに戻せる
+ * （server/main.ts は環境変数 `EN_SENRYU_KUROMOJI=0` で倒せるようにしてある）。
+ *
+ * 使う場合は「使うまで読まない、読めたら差し替える」ことにした:
  *   - 最初の判定要求で辞書の読み込みを**開始する**（プロセスで1回だけ）
  *   - 読み終わるまでは かな のみで判定する（待たせない。§3.10 の bot は同期）
  *   - 読み終わったら [kuromoji, kana] で判定する（互いの穴を埋める。detectSenryuAny 参照）
@@ -544,6 +554,12 @@ function isAllKana(text: string): boolean {
  * 検出ロジック本体（detectSenryu / findSenryu 等）は純粋なままである。
  */
 export function createSenryuDetector(options: {
+  /**
+   * kuromoji を使うか。**既定は true**。
+   * false にすると辞書を一切読まないので onReady も呼ばれない。そのかわり
+   * 漢字が1文字でも混ざる句は拾えなくなる（音声認識の出力は実質すべてこれ）。
+   */
+  kuromoji?: boolean;
   /** 読み込み結果を知らせる。ログ出力の方針を呼び出し側に委ねるため */
   onReady?: (provider: YomiProvider | null) => void;
   /** 許容幅。既定は せり の tolerance */
@@ -553,7 +569,8 @@ export function createSenryuDetector(options: {
   const tolerance = options.tolerance ?? SENRYU_TOLERANCE;
   // 読み込みが終わるまでは かな のみ。終わったら差し替える
   let providers: readonly YomiProvider[] = [kana];
-  let started = false;
+  // 使わないときは started を立てた状態から始める。以降の分岐は増えない
+  let started = options.kuromoji === false;
   return (text) => {
     if (!started) {
       started = true;

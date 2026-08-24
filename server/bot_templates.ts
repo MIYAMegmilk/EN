@@ -9,6 +9,7 @@
  * bot の表示名はここだけを直せば変えられる。せり・ぐっちーは仮称。
  */
 
+import type { HobbyTagId } from "./hobby_tags.ts";
 import type { BotId } from "./types.ts";
 
 // ---------------------------------------------------------------------------
@@ -136,14 +137,18 @@ export type TopicCard = {
   id: string;
   /** 投げかける文 */
   text: string;
-  /** 対応する趣味タグID（§3.11）。空なら汎用 */
-  tags: readonly string[];
+  /**
+   * 対応する趣味タグID（§3.11）。空なら汎用。
+   * 正本は hobby_tags.ts。string で受けると綴りのずれに気づけないため
+   * HobbyTagId で縛る（実際 "sake" / "oshikatsu" と書き間違えていた）。
+   */
+  tags: readonly HobbyTagId[];
 };
 
 /** 話題カード一覧 */
 export const TOPIC_CARDS: readonly TopicCard[] = [
   { id: "laugh", text: "最近いちばん笑ったことって何ですか？", tags: [] },
-  { id: "drink", text: "いま何を飲んでます？", tags: ["sake"] },
+  { id: "drink", text: "いま何を飲んでます？", tags: ["alcohol"] },
   { id: "weekend", text: "次の休みの予定、決まってる人います？", tags: [] },
   { id: "buy", text: "最近買ってよかったもの、ありますか？", tags: [] },
   { id: "game", text: "最近遊んで良かったゲームは？", tags: ["game"] },
@@ -155,7 +160,7 @@ export const TOPIC_CARDS: readonly TopicCard[] = [
   { id: "pet", text: "ペット飼ってる人います？", tags: ["pet"] },
   { id: "manga", text: "最近読んで面白かった漫画ありますか？", tags: ["manga"] },
   { id: "programming", text: "何かつくってる人います？", tags: ["programming"] },
-  { id: "oshi", text: "推しの話、聞きたい人います？", tags: ["oshikatsu"] },
+  { id: "oshi", text: "推しの話、聞きたい人います？", tags: ["oshi"] },
   { id: "sport", text: "体動かしてますか？最近運動した人", tags: ["sports"] },
   { id: "work", text: "今日はどんな一日でした？", tags: [] },
 ];

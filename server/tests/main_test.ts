@@ -16,6 +16,7 @@ import {
   MessageRateLimiter,
   parseSandboxManifest,
   startServer,
+  useKuromojiSenryu,
 } from "../main.ts";
 import type { ClientLink } from "../rooms.ts";
 import {
@@ -39,6 +40,9 @@ class MockLink implements ClientLink {
 
 /** 読み取る環境変数 */
 const TURN_KEYS = ["TURN_URL", "TURN_USER", "TURN_PASS"] as const;
+
+/** kuromoji を有効にする環境変数。名前が変わると .env.example と §6 が食い違う */
+const KUROMOJI_ENV_KEY = "EN_SENRYU_KUROMOJI";
 
 /** 応答に載る ICE サーバー1件 */
 type IceServer = { urls: string; username?: string; credential?: string };
@@ -272,6 +276,95 @@ Deno.test("asC2S: 未知の t や t 以外の形は弾く", () => {
   assertEquals(asC2S(null), null);
   assertEquals(asC2S([{ t: "chat", text: "こんばんは" }]), null);
   assertEquals(asC2S("chat"), null);
+});
+
+// ---------------------------------------------------------------------------
+// kuromoji のゲート（§3.10 / §6）
+// ---------------------------------------------------------------------------
+
+/**
+ * 環境変数だけを差し替えて useKuromojiSenryu() を読む。
+ * fetchIce と同じく、作業ディレクトリを空の一時ディレクトリへ移して
+ * 開発者の `.env` に影響されないようにする。
+ */
+async function readKuromojiGate(value: string | undefined): Promise<boolean> {
+  const saved = Deno.env.get(KUROMOJI_ENV_KEY);
+  const cwd = Deno.cwd();
+  const temp = await Deno.makeTempDir();
+  Deno.chdir(temp);
+  if (value === undefined) Deno.env.delete(KUROMOJI_ENV_KEY);
+  else Deno.env.set(KUROMOJI_ENV_KEY, value);
+  try {
+    return useKuromojiSenryu();
+  } finally {
+    Deno.chdir(cwd);
+    if (saved === undefined) Deno.env.delete(KUROMOJI_ENV_KEY);
+    else Deno.env.set(KUROMOJI_ENV_KEY, saved);
+    await Deno.remove(temp, { recursive: true });
+  }
+}
+
+Deno.test("useKuromojiSenryu: 未設定なら true（既定 ON。§6 に見積りを明記）", async () => {
+  assertEquals(await readKuromojiGate(undefined), true);
+  // .env に空で置かれている状態も既定のまま
+  assertEquals(await readKuromojiGate(""), true);
+});
+
+Deno.test("useKuromojiSenryu: 0 / false / off / no で倒せる（逃げ道）", async () => {
+  assertEquals(await readKuromojiGate("0"), false);
+  assertEquals(await readKuromojiGate("false"), false);
+  assertEquals(await readKuromojiGate("FALSE"), false);
+  assertEquals(await readKuromojiGate("off"), false);
+  assertEquals(await readKuromojiGate("no"), false);
+  assertEquals(await readKuromojiGate(" 0 "), false);
+});
+
+Deno.test("useKuromojiSenryu: 意図の読めない値では倒さない（誤記で機能が死なない）", async () => {
+  assertEquals(await readKuromojiGate("1"), true);
+  assertEquals(await readKuromojiGate("true"), true);
+  assertEquals(await readKuromojiGate("disable"), true);
+  assertEquals(await readKuromojiGate("offf"), true);
+});
+
+/** 受け取った S2C を溜める接続。bot の発話を確かめるのに使う */
+class RecordingLink implements ClientLink {
+  readonly id = crypto.randomUUID();
+  readonly received: S2C[] = [];
+  constructor(readonly userId: string | null = "testUser") {}
+  send(msg: S2C): void {
+    this.received.push(msg);
+  }
+  close(): void {}
+}
+
+/** せりが出した川柳の発話だけを取り出す */
+function senryuChats(link: RecordingLink): number {
+  return link.received.filter((m) => m.t === "chat" && m.message.botKind === "senryu").length;
+}
+
+Deno.test("startServer: EN_SENRYU_KUROMOJI=0 なら せり は かなのみで判定する", async () => {
+  const saved = Deno.env.get(KUROMOJI_ENV_KEY);
+  Deno.env.set(KUROMOJI_ENV_KEY, "0");
+  const cwd = Deno.cwd();
+  const temp = await Deno.makeTempDir();
+  Deno.chdir(temp);
+  const handle = startServer(0);
+  const link = new RecordingLink("senryuOwner");
+  try {
+    handle.manager.handle(link, { t: "createRoom", nickname: "ホスト", visibility: "private" });
+    // 倒してあるので漢字混じりは拾えない。辞書を読み込まないことがこの分岐の目的
+    handle.manager.handle(link, { t: "chat", text: "古池や蛙飛び込む水の音" });
+    assertEquals(senryuChats(link), 0, "倒してあるのに漢字混じりを拾っている");
+    // かなの句は拾う。判定そのものは startServer に配線されている
+    handle.manager.handle(link, { t: "chat", text: "ふるいけやかわずとびこむみずのおと" });
+    assertEquals(senryuChats(link), 1, "せりが startServer に配線されていない");
+  } finally {
+    await handle.shutdown();
+    Deno.chdir(cwd);
+    if (saved === undefined) Deno.env.delete(KUROMOJI_ENV_KEY);
+    else Deno.env.set(KUROMOJI_ENV_KEY, saved);
+    await Deno.remove(temp, { recursive: true });
+  }
 });
 
 // ---------------------------------------------------------------------------
