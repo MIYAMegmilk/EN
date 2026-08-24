@@ -133,6 +133,56 @@ export type PendingEntry = {
   used: boolean;
 };
 
+// ---------------------------------------------------------------------------
+// §3.10 場回し bot
+// ---------------------------------------------------------------------------
+
+/** bot の識別子（§3.10）。ルームには役割の違う3体がいる */
+export type BotId = "shunpi" | "seri" | "gucchi";
+
+/** bot ごとの ON/OFF（§3.10） */
+export type BotSwitches = Record<BotId, boolean>;
+
+/**
+ * bot 発話の種類（§3.10）。クライアントは表示の出し分けに使う。
+ * 文面そのものはサーバー内のデータファイルが持つ（ユーザー投稿は受け付けない）。
+ */
+export type BotKind =
+  | "naming"
+  | "senryu"
+  | "greeting"
+  | "topic"
+  | "gameSuggest"
+  | "endPoll"
+  | "closing"
+  | "pollContinue"
+  | "reaction"
+  | "finalReaction";
+
+/** bot 発話に添えるテロップ演出用のデータ（§3.10） */
+export type BotCard =
+  | {
+    c: "senryu";
+    /** 上句・中句・下句 */
+    lines: [string, string, string];
+    /** 各句の実モーラ数 */
+    morae: [number, number, number];
+    /** ちょうど 5-7-5 だったか */
+    exact: boolean;
+    /** 詠んだ人のあだ名 */
+    author: string;
+  }
+  | { c: "gameSuggest"; gameId: string; gameTitle: string }
+  | { c: "endPoll"; pollId: string; deadline: number };
+
+/** 集計中の終了アンケート（§3.10）。スナップショットで再接続時に復元する */
+export type BotPollPublic = {
+  /** 投票を紐づけるID */
+  pollId: string;
+  /** 締切（epoch ms） */
+  deadline: number;
+};
+
 /** チャット1件（§3.9）。bot 発言は playerId が null で bot: true */
 export type ChatMessage = {
   /** 発言の一意ID */
@@ -147,6 +197,12 @@ export type ChatMessage = {
   at: number;
   /** bot の発言か（§3.10） */
   bot: boolean;
+  /** どの bot の発言か（§3.10）。bot が false の発言には入らない */
+  botId?: BotId;
+  /** 発話の種類（§3.10）。表示の出し分けに使う */
+  botKind?: BotKind;
+  /** テロップ演出用の付加情報（§3.10） */
+  card?: BotCard;
 };
 
 /** ルーム。プロセスメモリ上のみで保持し KV には置かない（§5） */
@@ -580,6 +636,10 @@ export type RoomSnapshot = {
   view: PhaseView;
   /** チャット履歴。直近 CHAT_HISTORY_MAX 件のみ・古い順（§3.9） */
   chat: ChatMessage[];
+  /** bot ごとの ON/OFF（§3.10） */
+  bots: BotSwitches;
+  /** 集計中の終了アンケート（§3.10）。無ければ入らない */
+  botPoll?: BotPollPublic;
   /** 保留中のノック。ホストにのみ入る（§3.2 原則3） */
   pendingKnocks?: KnockPublic[];
   /** 受信者自身のセッショントークン。再接続時に join.session として送り返す（§3.2） */
@@ -616,7 +676,11 @@ export type C2S =
   | {
     t: "join";
     roomCode: string;
-    nickname: string;
+    /**
+     * あだ名。省略するとサーバーがしゅんぴの二つ名を付ける（§3.0 / §3.10）。
+     * 空文字は「入力し忘れ」と区別できないので従来どおりエラーにする
+     */
+    nickname?: string;
     session?: string;
     entryToken?: string;
   }
@@ -631,6 +695,10 @@ export type C2S =
   | { t: "submitVote"; targetPlayerId: string }
   | { t: "importGame"; shareCode: string }
   | { t: "chat"; text: string }
+  /** bot の ON/OFF（ホストのみ、§3.10）。botId 省略で3体まとめて切り替える */
+  | { t: "setBot"; botId?: BotId; enabled: boolean }
+  /** 終了アンケートへの投票（§3.10） */
+  | { t: "endPollVote"; pollId: string; agree: boolean }
   | { t: "rtcSignal"; to: string; payload: unknown }
   | { t: "leave" };
 
@@ -653,6 +721,10 @@ export type S2C =
   | { t: "finalResult"; scores: ScoreEntry[] }
   | { t: "hostChanged"; playerId: string }
   | { t: "chat"; message: ChatMessage }
+  /** bot の ON/OFF が変わった（§3.10） */
+  | { t: "botState"; bots: BotSwitches }
+  /** 終了アンケートが締まった（§3.10）。agreed が true ならお開きの合意が取れた */
+  | { t: "botPollClosed"; pollId: string; agreed: boolean }
   | { t: "rtcSignal"; from: string; payload: unknown }
   | { t: "error"; code: ErrorCode; message: string };
 

@@ -108,6 +108,11 @@ function all<T extends S2C["t"]>(link: MockLink, t: T): Extract<S2C, { t: T }>[]
   return link.received.filter((m) => m.t === t) as Extract<S2C, { t: T }>[];
 }
 
+/** bot の発言（§3.10）を除いた chat。人の発言だけを数えたいときに使う */
+function humanChats(link: MockLink): Extract<S2C, { t: "chat" }>[] {
+  return all(link, "chat").filter((m) => !m.message.bot);
+}
+
 /** テスト用の環境を作る */
 function setup() {
   const clock = new FakeClock();
@@ -721,15 +726,15 @@ Deno.test("チャット: 10秒に5件を超えると RATE_LIMITED、窓が過ぎ
   for (let i = 1; i <= CHAT_RATE_MAX; i++) {
     manager.handle(host.link, { t: "chat", text: `発言${i}` });
   }
-  assertEquals(all(host.link, "chat").length, CHAT_RATE_MAX);
+  assertEquals(humanChats(host.link).length, CHAT_RATE_MAX);
   // 6件目は拒否され、誰にもブロードキャストされない
   manager.handle(host.link, { t: "chat", text: "超過分" });
   assertEquals(last(host.link, "error")?.code, "RATE_LIMITED");
-  assertEquals(all(host.link, "chat").length, CHAT_RATE_MAX);
-  assertEquals(all(guest.link, "chat").length, CHAT_RATE_MAX);
+  assertEquals(humanChats(host.link).length, CHAT_RATE_MAX);
+  assertEquals(humanChats(guest.link).length, CHAT_RATE_MAX);
   // レート制限は参加者ごと。他の参加者は制限されない
   manager.handle(guest.link, { t: "chat", text: "ゲストは送れる" });
-  assertEquals(all(host.link, "chat").length, CHAT_RATE_MAX + 1);
+  assertEquals(humanChats(host.link).length, CHAT_RATE_MAX + 1);
   // 窓が過ぎればまた送れる
   clock.advance(CHAT_RATE_WINDOW_MS);
   manager.handle(host.link, { t: "chat", text: "窓明けの発言" });
@@ -786,7 +791,10 @@ Deno.test("チャット: 再接続時のスナップショットに履歴が入�
   });
   const restored = last(back, "roomState");
   assertExists(restored);
-  assertEquals(restored.snapshot.chat.map((m) => m.text), ["切断前の発言", "切断中の発言"]);
+  assertEquals(
+    restored.snapshot.chat.filter((m) => !m.bot).map((m) => m.text),
+    ["切断前の発言", "切断中の発言"],
+  );
   manager.dispose();
 });
 
