@@ -46,6 +46,7 @@ import {
   ROOM_NAME_MAX,
   type RoomSnapshot,
   type S2C,
+  SANDBOX_PAYLOAD_MAX_BYTES,
   type ScoreEntry,
   type ScoringMode,
   VC_CAPACITY,
@@ -164,6 +165,15 @@ export type RoomManagerOptions = {
    * 起動時に作ったものを main.ts からここへ渡す。
    */
   senryu?: (text: string) => SenryuMatch | null;
+  /**
+   * サンドボックスゲームとして開始を許可する gameId のホワイトリスト
+   * （docs/design/game-sandbox.md §4.2 / §6.2）。public/games/manifest.json をサーバー
+   * 起動時に main.ts が読み込み、EN_SANDBOX_DEV 環境変数によるフィルタ後の値をここへ渡す。
+   * rooms.ts はファイル I/O を持たない（§3.2 規約2: await を書かない）ため、
+   * ホワイトリストの正本は main.ts 側にある。省略時は空集合
+   * （サンドボックスゲームを一切開始できない）
+   */
+  sandboxGameIds?: ReadonlySet<string>;
 };
 
 /** かなプロバイダだけで川柳を判定する既定の実装。辞書を持たない環境でも動く */
@@ -295,6 +305,7 @@ export class RoomManager {
   private readonly clearTimer: (handle: TimerHandle) => void;
   private readonly rng: () => number;
   private readonly senryu: (text: string) => SenryuMatch | null;
+  private readonly sandboxGameIds: ReadonlySet<string>;
 
   constructor(options: RoomManagerOptions = {}) {
     this.now = options.now ?? (() => Date.now());
@@ -304,6 +315,7 @@ export class RoomManager {
       ((handle) => clearTimeout(handle as unknown as number));
     this.rng = options.rng ?? Math.random;
     this.senryu = options.senryu ?? createDefaultSenryuDetector();
+    this.sandboxGameIds = options.sandboxGameIds ?? new Set();
   }
 
   /** 稼働中のルーム数（テスト・監視用） */
@@ -481,6 +493,7 @@ export class RoomManager {
       selectedGameId: null,
       game: null,
       chatHistory: [],
+      sandbox: null,
       createdAt: now,
       lastActiveAt: now,
       ...(roomName === undefined ? {} : { roomName }),
@@ -699,6 +712,16 @@ export class RoomManager {
         // 中継条件を満たさない場合は黙って破棄する（§3.6 / §3.8）
         this.relayRtcSignal(entry, player, msg);
         return;
+      case "sandboxStart":
+        this.handleSandboxStart(entry, state, msg, now);
+        return;
+      case "sandboxEnd":
+        this.handleSandboxEnd(entry, state);
+        return;
+      case "sandboxSignal":
+        // 中継条件を満たさない場合は黙って破棄する（docs/design/game-sandbox.md §4.4）
+        this.relaySandboxSignal(entry, player, msg);
+        return;
       case "chat":
         this.handleChat(entry, state, player, msg.text, now);
         return;
@@ -766,6 +789,11 @@ export class RoomManager {
   private handleSelectGame(entry: RoomEntry, state: LinkState, gameId: unknown): void {
     if (!this.requireHost(entry, state)) return;
     const room = entry.room;
+    // 既存エンジンとサンドボックスは相互排他（docs/design/game-sandbox.md §5.2）
+    if (room.sandbox !== null) {
+      sendError(state.link, "PHASE_MISMATCH", "サンドボックスゲームの稼働中は変更できません");
+      return;
+    }
     if (room.game !== null && room.game.phase !== "lobby") {
       sendError(state.link, "PHASE_MISMATCH", "ゲームの進行中は変更できません");
       return;
@@ -782,6 +810,11 @@ export class RoomManager {
   private handleStartGame(entry: RoomEntry, state: LinkState, now: number): void {
     if (!this.requireHost(entry, state)) return;
     const room = entry.room;
+    // 既存エンジンとサンドボックスは相互排他（docs/design/game-sandbox.md §5.2）
+    if (room.sandbox !== null) {
+      sendError(state.link, "PHASE_MISMATCH", "サンドボックスゲームの稼働中は開始できません");
+      return;
+    }
     if (room.game !== null && room.game.phase !== "lobby") {
       sendError(state.link, "PHASE_MISMATCH", "すでにゲームが進行中です");
       return;
@@ -808,6 +841,80 @@ export class RoomManager {
     room.game = result.state;
     this.applyEffects(entry, result.effects);
     this.syncPhaseTimer(entry);
+  }
+
+  // -------------------------------------------------------------------------
+  // サンドボックスゲーム（docs/design/game-sandbox.md §4 / §5）
+  // -------------------------------------------------------------------------
+
+  /**
+   * サンドボックスゲームの開始（ホストのみ、§5.1）。
+   * 既存エンジンのゲームが進行中なら PHASE_MISMATCH（§5.2）。
+   * 既にサンドボックスゲームが稼働中なら、同じ gameId の再送であっても状態を変えず
+   * DUPLICATE を返す（§5.2 の「冪等に無視」＝再開始や再ブロードキャストをしないという意味で
+   * 冪等であり、エラー自体は都度返す。§8.1 の「二重 sandboxStart は DUPLICATE」に対応）。
+   * gameId は sandboxGameIds のホワイトリスト（main.ts がマニフェストから起動時に構築）に
+   * 無ければ INVALID_INPUT（未知の gameId・dev ゲームの本番指定を含む、§6.2）。
+   */
+  private handleSandboxStart(
+    entry: RoomEntry,
+    state: LinkState,
+    msg: Extract<C2S, { t: "sandboxStart" }>,
+    now: number,
+  ): void {
+    if (!this.requireHost(entry, state)) return;
+    const room = entry.room;
+    if (room.game !== null && room.game.phase !== "lobby") {
+      sendError(
+        state.link,
+        "PHASE_MISMATCH",
+        "既存ゲームの進行中はサンドボックスゲームを開始できません",
+      );
+      return;
+    }
+    if (room.sandbox !== null) {
+      sendError(state.link, "DUPLICATE", "サンドボックスゲームはすでに開始されています");
+      return;
+    }
+    if (typeof msg.gameId !== "string" || !this.sandboxGameIds.has(msg.gameId)) {
+      sendError(state.link, "INVALID_INPUT", "選択できるサンドボックスゲームではありません");
+      return;
+    }
+    room.sandbox = { gameId: msg.gameId, startedBy: state.playerId, startedAt: now };
+    this.broadcast(entry, { t: "sandboxState", game: room.sandbox });
+  }
+
+  /**
+   * サンドボックスゲームの終了（ホストのみ、§5.1）。
+   * 稼働していないときは何もしない（冪等。仕様書に明記が無いため報告に記載する判断）。
+   */
+  private handleSandboxEnd(entry: RoomEntry, state: LinkState): void {
+    if (!this.requireHost(entry, state)) return;
+    const room = entry.room;
+    if (room.sandbox === null) return;
+    room.sandbox = null;
+    this.broadcast(entry, { t: "sandboxState", game: null });
+  }
+
+  /**
+   * サンドボックスゲーム内メッセージを同室の送信者以外へ中継する（§4.4）。
+   * サーバーは payload を解釈しない。中継先に to は無く、常に全員配信（§4.4 の理由）。
+   * 中継条件（稼働中・サイズ以内）を満たさない場合は rtcSignal と同じく黙って破棄する。
+   * レート制限（ソフト30/秒・ハード150/秒、§4.3）は main.ts の WebSocket 層で行う
+   * （rtcSignal と同じ構造。ここに来た時点でレートは通過済み）。
+   */
+  private relaySandboxSignal(
+    entry: RoomEntry,
+    sender: Player,
+    msg: Extract<C2S, { t: "sandboxSignal" }>,
+  ): void {
+    if (entry.room.sandbox === null) return;
+    if (sandboxPayloadExceedsLimit(msg.payload)) return;
+    this.broadcastExcept(entry, sender.id, {
+      t: "sandboxSignal",
+      from: sender.id,
+      payload: msg.payload,
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -1327,6 +1434,7 @@ export class RoomManager {
       bots: { ...entry.bot.enabled },
       session: viewer.sessionToken,
       serverTime: this.now(),
+      sandbox: room.sandbox,
     };
     if (room.roomName !== undefined) snapshot.roomName = room.roomName;
     // 集計中のアンケートは再接続でも復元する。締切だけ渡し、投票済みかは持たせない
@@ -1367,6 +1475,22 @@ function findBySession(room: Room, session: string): Player | null {
     if (player.sessionToken === session) return player;
   }
   return null;
+}
+
+/**
+ * サンドボックス signal の payload が直列化サイズ上限を超えるか（docs/design/game-sandbox.md §4.4）。
+ * 直列化できない値（undefined・関数・symbol 等。JSON 経由で届くメッセージでは通常発生しないが、
+ * 型は unknown のため防御的に扱う）は上限超過と同じ扱いで破棄する。
+ */
+export function sandboxPayloadExceedsLimit(payload: unknown): boolean {
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(payload);
+  } catch {
+    return true;
+  }
+  if (typeof json !== "string") return true;
+  return new TextEncoder().encode(json).length > SANDBOX_PAYLOAD_MAX_BYTES;
 }
 
 /** 参加者本人の操作によるイベントか（エラーを返すべき相手がいるか） */

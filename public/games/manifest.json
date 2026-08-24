@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "games": [
+    {
+      "id": "reflex",
+      "title": "反射神経バトル",
+      "description": "緑になったら押す。全5ラウンドで反応速度を競う",
+      "file": "reflex.js",
+      "minPlayers": 2,
+      "maxPlayers": 10,
+      "author": "ちいかわ",
+      "dev": false
+    }
+  ]
+}

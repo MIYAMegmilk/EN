@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>宴 -EN- サンドボックス runner</title>
+<!--
+  サンドボックス側の CSP（docs/design/game-sandbox.md §2.3 の確定値）。
+
+  - default-src 'none'     : 既定ですべての読み込みを禁止する。書き忘れたディレクティブを
+                              素通りさせないための土台。
+  - script-src 'self' 'unsafe-eval'
+                            : runner.js の読み込みと、ゲームコードを動かすための
+                              new Function（= unsafe-eval）だけを許可する。
+                              このページの唯一の役目がユーザーコードの実行なので、
+                              ここだけ 'unsafe-eval' を許す（§10-5 は new Function を維持する判断）。
+  - script-src-elem 'self' : <script src> 経由の読み込みを自オリジンのみに絞る（script-src の
+                              フォールバック先を明示し、書き忘れの余地を減らす）。
+  - style-src 'unsafe-inline'
+                            : このページのインライン <style> のみ。外部 CSS は読めない。
+  - img-src data: blob:    : canvas が生成した描画結果（data: / blob:）のみ。外部画像は読めない。
+  - connect-src 'none'     : fetch / XHR / WebSocket / EventSource / sendBeacon を全面禁止する。
+                              ゲームコードが外へ持ち出す経路・外から追加コードを取り込む経路の
+                              両方を塞ぐ。通信は親への postMessage 経由のみに限定される。
+  - worker-src 'none'      : ★省略してはいけない。書かないと CSP のフォールバックで
+                              script-src（= 'self'）が使われ、new Worker("/なにか.js") が
+                              通ってしまう。Worker は自分のレスポンスヘッダーで CSP を持つため、
+                              この文書の connect-src 'none' を引き継がず外に出られる
+                              （プロトタイプで実測した穴。§2.4）。
+  - child-src / frame-src 'none'
+                            : 入れ子 iframe による同種のフォールバック経路を塞ぐ。
+  - object-src 'none'      : プラグイン埋め込みを塞ぐ。
+  - base-uri 'none'        : <base> 差し替えによる相対URLの乗っ取りを塞ぐ。
+  - form-action 'none'     : フォーム送信による外部遷移を塞ぐ（connect-src では塞げない経路）。
+
+  多層防御の一枚として meta にも書くが、正本はサーバーのレスポンスヘッダー側
+  （/sandbox/ 配下専用の CSP。別担当がサーバー側で実装する）。
+  frame-ancestors は HTTP ヘッダー専用でメタタグでは無効な仕様（§7.4）なので、
+  ここには書かない（書いても効かず、「効いているつもり」の誤解を生むため）。
+-->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' 'unsafe-eval'; script-src-elem 'self'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; worker-src 'none'; child-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #101319;
+    color: #e6e9ef;
+    font-family: system-ui, sans-serif;
+    overflow: hidden;
+  }
+  /*
+   * canvas の実解像度（幅・高さ属性）は EN.size と一致させる（480x320）。
+   * 表示サイズは親側の .sandbox-frame-slot が aspect-ratio で 480:320 に固定した
+   * 枠を用意するので、ここでは枠いっぱいに広げるだけでよい（歪まない）。
+   */
+  #stage {
+    display: block;
+    width: 100%;
+    height: 100%;
+    background: #171b24;
+    touch-action: none;
+  }
+  #status {
+    font-size: 12px;
+    padding: 4px 6px;
+    color: #8b93a7;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+</style>
+</head>
+<body>
+  <!-- ゲームコードに渡す唯一の描画面 -->
+  <canvas id="stage" width="480" height="320"></canvas>
+  <div id="status">読み込み中…</div>
+  <script src="runner.js"></script>
+</body>
+</html>
