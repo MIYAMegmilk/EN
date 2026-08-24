@@ -33,6 +33,8 @@ const state = {
   view: null,
   phase: "lobby",
   deadline: null,
+  // 自分から退室した直後の切断かどうか（true の間は onclose のエラー表示を抑制する）
+  leaving: false,
 };
 
 /** ルームごとのセッショントークン（再接続用）。タブ単位で保持する */
@@ -105,6 +107,8 @@ function connect() {
   state.ws = ws;
   ws.onopen = () => {
     showError("");
+    // ここまで来たら接続済みなので、直前の退室フラグが残っていても持ち越さない
+    state.leaving = false;
     const saved = store.load();
     const nickname = $("nickname").value.trim();
     if (saved !== null && nickname.length > 0) {
@@ -112,7 +116,15 @@ function connect() {
       send({ t: "join", roomCode: saved.code, nickname, session: saved.session });
     }
   };
-  ws.onclose = () => showError("接続が切れました。再読み込みしてください");
+  ws.onclose = () => {
+    if (state.leaving) {
+      state.leaving = false;
+      // 退室によるサーバー側切断なので、一覧に戻れるようソケットを張り直す
+      connect();
+      return;
+    }
+    showError("接続が切れました。再読み込みしてください");
+  };
   ws.onmessage = (event) => {
     let msg;
     try {
@@ -501,6 +513,7 @@ function bind() {
   $("start").addEventListener("click", () => send({ t: "startGame" }));
   $("skip").addEventListener("click", () => send({ t: "skipPhase" }));
   $("leave").addEventListener("click", () => {
+    state.leaving = true;
     VC.leave();
     send({ t: "leave" });
     store.drop();
