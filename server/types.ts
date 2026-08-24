@@ -45,6 +45,12 @@ export const CHAT_RATE_MAX = 5;
 export const WS_RATE_WINDOW_MS = 1_000;
 /** WS メッセージのレート制限: 判定窓内に受理できる最大件数。超過で切断（§3.8） */
 export const WS_RATE_MAX = 20;
+/**
+ * WS メッセージのレート制限: rtcSignal（VC シグナリング）の判定窓内最大件数（§3.6 / §3.8）。
+ * フルメッシュ5本 × candidate 約10件 + offer/answer で最悪50件程度のバーストを想定し、
+ * その2倍の余裕を取った値。判定窓は WS_RATE_WINDOW_MS を一般枠と共用する。
+ */
+export const WS_SIGNAL_RATE_MAX = 100;
 
 // ---------------------------------------------------------------------------
 // §5 データモデル

@@ -3,7 +3,7 @@
  * 実サーバーを空きポートで起動し、WebSocket クライアント3人で
  * 雑学クイズを最終結果まで完走させる（§9 のボット結合テストの最小版）。
  * テキストチャット（§3.9）の配信・スナップショット・レート制限、
- * および WS メッセージのレート制限（§3.8）も検証する。
+ * および WS メッセージのレート制限（§3.8。rtcSignal の別枠を含む）も検証する。
  */
 
 import { assert, assertEquals, assertExists } from "@std/assert";
@@ -13,10 +13,12 @@ import { CORRECT_BASE_POINT, CORRECT_SPEED_BONUS } from "../engine.ts";
 import {
   type C2S,
   CHAT_RATE_MAX,
+  type ErrorCode,
   type Phase,
   type S2C,
   WS_RATE_MAX,
   WS_RATE_WINDOW_MS,
+  WS_SIGNAL_RATE_MAX,
 } from "../types.ts";
 
 /** 1メッセージを待つ上限（ミリ秒） */
@@ -31,6 +33,19 @@ const PACE_INTERVAL_MS = 60;
 /** 指定ミリ秒待つ */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * 条件が満たされるまでポーリングで待つ。
+ * TestClient.waitFor はエラー受信で reject するため、エラー応答が正常系であるテスト
+ * （未実装の rtcSignal を連投する等）ではこちらを使う。
+ */
+async function waitUntil(condition: () => boolean, label: string): Promise<void> {
+  const deadline = Date.now() + WAIT_TIMEOUT_MS;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(`${label} を待機中にタイムアウトしました`);
+    await delay(10);
+  }
 }
 
 /** テスト用の WebSocket クライアント */
@@ -96,6 +111,11 @@ class TestClient {
   /** これまでに受信したメッセージ（検査用のコピー） */
   received(): S2C[] {
     return [...this.messages];
+  }
+
+  /** これまでに受信した指定コードの error の件数 */
+  countError(code: ErrorCode): number {
+    return this.messages.filter((m) => m.t === "error" && m.code === code).length;
   }
 
   /** 条件に合うメッセージが届くまで待つ。既に届いている分から順に走査する */
@@ -312,7 +332,7 @@ Deno.test("結合: チャットが全員に届き、途中入室者は履歴を�
 
 Deno.test("ユニット: WS レート制限は窓内 WS_RATE_MAX 件まで受理する（§3.8）", () => {
   const now = 1_000_000;
-  const limiter = new MessageRateLimiter(() => now);
+  const limiter = new MessageRateLimiter(WS_RATE_MAX, () => now);
   for (let i = 1; i <= WS_RATE_MAX; i++) {
     assertEquals(limiter.accept(), true, `${i}件目は受理される`);
   }
@@ -331,14 +351,14 @@ Deno.test("ユニット: WS レート制限の窓の境界は経過 WS_RATE_WIND
 
   // 最古（t=0）から WS_RATE_WINDOW_MS - 1 の時点ではまだ全件が窓内 → 21件目は違反
   let nowA = 0;
-  const inside = new MessageRateLimiter(() => nowA);
+  const inside = new MessageRateLimiter(WS_RATE_MAX, () => nowA);
   fill(inside, (at) => nowA = at);
   nowA = WS_RATE_WINDOW_MS - 1;
   assertEquals(inside.accept(), false);
 
   // 最古から WS_RATE_WINDOW_MS 経過するとその1件が窓から外れる → 受理される
   let nowB = 0;
-  const outside = new MessageRateLimiter(() => nowB);
+  const outside = new MessageRateLimiter(WS_RATE_MAX, () => nowB);
   fill(outside, (at) => nowB = at);
   nowB = WS_RATE_WINDOW_MS;
   assertEquals(outside.accept(), true);
@@ -346,7 +366,7 @@ Deno.test("ユニット: WS レート制限の窓の境界は経過 WS_RATE_WIND
 
 Deno.test("ユニット: WS レート制限は窓が過ぎるとリセットされる（§3.8）", () => {
   let now = 0;
-  const limiter = new MessageRateLimiter(() => now);
+  const limiter = new MessageRateLimiter(WS_RATE_MAX, () => now);
   for (let i = 0; i < WS_RATE_MAX; i++) assertEquals(limiter.accept(), true);
   assertEquals(limiter.accept(), false);
 
@@ -394,6 +414,106 @@ Deno.test("結合: 通常の利用ではレート制限で切断されない（�
   assertEquals(host.closeCode, null, "切断されていない");
 
   await host.leaveAndClose();
+  assertEquals(server.manager.roomCount, 0);
+  await server.shutdown();
+});
+
+Deno.test("ユニット: WS レート制限の上限はコンストラクタで受け取った値になる（§3.8）", () => {
+  const now = 1_000_000;
+
+  // rtcSignal 枠は WS_SIGNAL_RATE_MAX 件ちょうどまでセーフ、その次が違反
+  const signal = new MessageRateLimiter(WS_SIGNAL_RATE_MAX, () => now);
+  for (let i = 1; i <= WS_SIGNAL_RATE_MAX; i++) {
+    assertEquals(signal.accept(), true, `signal 枠の${i}件目は受理される`);
+  }
+  assertEquals(signal.accept(), false, `signal 枠の${WS_SIGNAL_RATE_MAX + 1}件目は違反`);
+
+  // 上限は枠ごとに独立している（同じ窓・同じ時刻でも一般枠は WS_RATE_MAX で切れる）
+  const general = new MessageRateLimiter(WS_RATE_MAX, () => now);
+  for (let i = 1; i <= WS_RATE_MAX; i++) {
+    assertEquals(general.accept(), true, `一般枠の${i}件目は受理される`);
+  }
+  assertEquals(general.accept(), false, `一般枠の${WS_RATE_MAX + 1}件目は違反`);
+});
+
+/** ルームを1つ作り、ホストとして参加済みのクライアントを返す */
+async function connectInRoom(port: number): Promise<TestClient> {
+  const client = await TestClient.connect(port);
+  client.send({ t: "createRoom", nickname: "ホスト", visibility: "private" });
+  await client.waitFor((m) => m.t === "roomState", "roomState(host)");
+  return client;
+}
+
+/**
+ * rtcSignal のバースト件数。フルメッシュ5本 × trickle ICE を模し、
+ * 一般枠 WS_RATE_MAX の2倍を送る（別枠でなければ確実に切断される件数）。
+ */
+const SIGNAL_BURST = WS_RATE_MAX * 2;
+
+/** rtcSignal を n 件連投し、未実装応答（INVALID_INPUT）が返り切るまで待つ */
+async function burstSignals(client: TestClient, count: number): Promise<void> {
+  const before = client.countError("INVALID_INPUT");
+  for (let i = 0; i < count; i++) {
+    client.send({ t: "rtcSignal", to: `peer${i}`, payload: { kind: "ice" } });
+  }
+  // main では rtcSignal 自体が未実装のため INVALID_INPUT が返る。
+  // ここでの検証点は「応答が返り切るまで接続が維持されること」
+  await waitUntil(
+    () => client.countError("INVALID_INPUT") >= before + count,
+    `rtcSignal ${count}件への応答`,
+  );
+}
+
+Deno.test("結合: rtcSignal は別枠なので 20件/秒 を超えても切断されない（§3.6 / §3.8）", async () => {
+  const server = startServer(0);
+  const client = await connectInRoom(server.port);
+
+  await burstSignals(client, SIGNAL_BURST);
+
+  assertEquals(client.closeCode, null, "切断されていない");
+  assertEquals(client.countError("RATE_LIMITED"), 0, "RATE_LIMITED は届かない");
+
+  await client.leaveAndClose();
+  assertEquals(server.manager.roomCount, 0);
+  await server.shutdown();
+});
+
+Deno.test("結合: rtcSignal も signal 枠の上限を超えると切断される（§3.8）", async () => {
+  const server = startServer(0);
+  const client = await connectInRoom(server.port);
+
+  // WS_SIGNAL_RATE_MAX 件ちょうどはセーフ、その次の1件で違反になる
+  for (let i = 0; i <= WS_SIGNAL_RATE_MAX; i++) {
+    client.send({ t: "rtcSignal", to: "peer", payload: { kind: "ice" } });
+  }
+
+  await Promise.race([client.closed, delay(WAIT_TIMEOUT_MS)]);
+  assertEquals(client.closeCode, 1008, "policy violation の 1008 で切断される");
+
+  const received = client.received();
+  const last = received[received.length - 1];
+  assertExists(last);
+  assert(last.t === "error" && last.code === "RATE_LIMITED", "切断前に RATE_LIMITED が届く");
+
+  await server.shutdown();
+});
+
+Deno.test("結合: rtcSignal の連投は一般枠を消費しない（§3.8）", async () => {
+  const server = startServer(0);
+  const client = await connectInRoom(server.port);
+
+  await burstSignals(client, SIGNAL_BURST);
+
+  // 一般枠が消費されていなければ、バースト直後の通常メッセージも普通に処理される
+  client.send({ t: "chat", text: "バースト後の発言" });
+  await waitUntil(
+    () => client.received().some((m) => m.t === "chat" && m.message.text === "バースト後の発言"),
+    "バースト後のチャット",
+  );
+  assertEquals(client.closeCode, null, "切断されていない");
+  assertEquals(client.countError("RATE_LIMITED"), 0, "RATE_LIMITED は届かない");
+
+  await client.leaveAndClose();
   assertEquals(server.manager.roomCount, 0);
   await server.shutdown();
 });
