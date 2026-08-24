@@ -49,6 +49,7 @@ import {
   type ScoreEntry,
   type ScoringMode,
   VC_CAPACITY,
+  type VoiceLine,
 } from "./types.ts";
 import {
   buildPhaseView,
@@ -94,6 +95,15 @@ export const NON_VOTE_JUDGE_SEC = 5;
 
 /** ルームコード採番のリトライ上限 */
 const ROOM_CODE_ATTEMPTS = 50;
+
+/**
+ * 文字起こし1行の上限は CHAT_TEXT_MAX と同じ（§3.9 / docs/design/bot-voice.md）。
+ * 検証はチャットと同じ validateChatText を共用するため、専用の定数は持たない。
+ */
+/** 文字起こしのレート制限: 判定窓（ミリ秒）。喋り続けても止まらない程度に緩くとる */
+export const VOICE_RATE_WINDOW_MS = 10_000;
+/** 文字起こしのレート制限: 判定窓内に受理できる最大件数 */
+export const VOICE_RATE_MAX = 12;
 
 /**
  * bot に定期イベント（tick）を送る間隔（ミリ秒）。
@@ -183,6 +193,8 @@ type RoomEntry = {
   graceTimers: Map<string, TimerHandle>;
   /** チャットのレート制限用。playerId → 判定窓内の発言時刻（古い順、§3.9） */
   chatTimes: Map<string, number[]>;
+  /** 文字起こしのレート制限用。playerId → 判定窓内の受信時刻（古い順、docs/design/bot-voice.md） */
+  voiceTimes: Map<string, number[]>;
   /** bot 3体の状態（§3.10） */
   bot: BotState;
   /** bot への定期 tick タイマー */
@@ -481,6 +493,7 @@ export class RoomManager {
       phaseTimer: null,
       graceTimers: new Map(),
       chatTimes: new Map(),
+      voiceTimes: new Map(),
       bot: createBotState(now),
       botTimer: null,
       botPollTimer: null,
@@ -689,6 +702,10 @@ export class RoomManager {
       case "chat":
         this.handleChat(entry, state, player, msg.text, now);
         return;
+      case "voice":
+        // 中継条件（VC 枠内のみ）を満たさない場合は黙って破棄する（docs/design/bot-voice.md）
+        this.handleVoice(entry, state, player, msg.text, now);
+        return;
       case "setBot":
         this.handleSetBot(entry, state, msg);
         return;
@@ -849,6 +866,66 @@ export class RoomManager {
       nickname: player.nickname,
       text: message.text,
       source: "chat",
+    });
+  }
+
+  /**
+   * 通話の文字起こしを処理する（docs/design/bot-voice.md）。
+   * chatHistory には積まない。喋り言葉は量が多く、積むと §3.9 の直近100件が
+   * 文字起こしで埋まってチャットの履歴が押し出されるため。
+   *
+   * 受理は VC 枠に入っている参加者からのみ（isVcEligible）。voice は「喋った」という
+   * 属性そのものの主張であり、VC 枠外の人はそもそも通話に参加できないので受理すると
+   * 偽装になる。偽の voice は配信後に applyBotEvent を通じて bot を駆動できてしまう
+   * （せりの川柳検出を任意のタイミングで誤爆させる／ぐっちーの沈黙タイマーをリセットして
+   * 話題振りを封じる／喋っていない人の発言を捏造する）。§3.8 が rtcSignal に定める
+   * 「双方が VC 枠に入っているときのみ中継する」という前例（relayRtcSignal）に揃える。
+   * 枠外なら黙って破棄する（エラーは返さない。rtcSignal と同じ扱い）。
+   *
+   * 限界: isVcEligible は「VC 枠を持っているか（先着6人か）」であって「実際に VC に
+   * 参加しているか」ではない。サーバーは VC の参加状態を持たない（§3.6 で payload は
+   * サーバーが解釈しない設計）ため、枠内にいて VC 未参加の人による偽装は防げない。
+   * 厳密化には §3.6 の設計変更（サーバーが VC 参加状態を追跡する）が必要な別課題とする。
+   */
+  private handleVoice(
+    entry: RoomEntry,
+    state: LinkState,
+    player: Player,
+    text: unknown,
+    now: number,
+  ): void {
+    if (!this.isVcEligible(entry, player.id)) return;
+    const validated = validateChatText(text); // 200文字・制御文字の基準は共通
+    if (!validated.ok) {
+      sendError(state.link, validated.code, validated.message);
+      return;
+    }
+    // レート制限。窓から外れた時刻は捨ててメモリを増やさない（chatTimes と同じ扱い）
+    const times = (entry.voiceTimes.get(player.id) ?? [])
+      .filter((at) => now - at < VOICE_RATE_WINDOW_MS);
+    if (times.length >= VOICE_RATE_MAX) {
+      entry.voiceTimes.set(player.id, times);
+      // 超過は黙って捨てる。喋っている最中にエラーを出しても本人には止めようがなく、
+      // rtcSignal（§3.8）と同じ「破棄するだけ」の扱いにする
+      return;
+    }
+    times.push(now);
+    entry.voiceTimes.set(player.id, times);
+    const line: VoiceLine = {
+      id: crypto.randomUUID(),
+      playerId: player.id,
+      nickname: player.nickname,
+      text: validated.value,
+      at: now,
+    };
+    this.broadcast(entry, { t: "voice", line });
+    // 配信してから bot に渡す。せりの返しが元の発言より先に出ないようにする
+    this.applyBotEvent(entry, {
+      t: "message",
+      playerId: player.id,
+      nickname: player.nickname,
+      text: line.text,
+      source: "voice",
     });
   }
 
@@ -1130,6 +1207,7 @@ export class RoomManager {
     this.cancelGraceTimer(entry, playerId);
     // レート制限の記録も参加者と一緒に破棄する
     entry.chatTimes.delete(playerId);
+    entry.voiceTimes.delete(playerId);
     const link = entry.links.get(playerId);
     entry.links.delete(playerId);
     if (link !== undefined) {
@@ -1158,6 +1236,7 @@ export class RoomManager {
     for (const link of entry.links.values()) this.links.delete(link.id);
     entry.links.clear();
     entry.chatTimes.clear();
+    entry.voiceTimes.clear();
     this.rooms.delete(entry.room.code);
   }
 
