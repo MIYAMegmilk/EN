@@ -33,8 +33,11 @@ export const MAX_MESSAGE_BYTES = 64 * 1024;
 /** 静的配信のルート */
 const PUBLIC_DIR = fromFileUrl(new URL("../public/", import.meta.url));
 
-/** 受理する C2S の t 一覧。未知の t は INVALID_INPUT で弾く */
-const C2S_TYPES: ReadonlySet<string> = new Set([
+/**
+ * 受理する C2S の t 一覧。未知の t は INVALID_INPUT で弾く。
+ * types.ts の C2S 型と過不足があってはならない（server/tests/main_test.ts で機械的に照合する）。
+ */
+export const C2S_TYPES: ReadonlySet<string> = new Set([
   "createRoom",
   "join",
   "knock",
@@ -48,6 +51,8 @@ const C2S_TYPES: ReadonlySet<string> = new Set([
   "submitVote",
   "importGame",
   "chat",
+  "setBot",
+  "endPollVote",
   "rtcSignal",
   "leave",
 ]);
