@@ -327,11 +327,12 @@ runner はゲームコードに **グローバル `EN` だけ**を渡す。
 EN = {
   // --- 情報（読み取り専用） ---
   youId,          // string             自分の playerId
+  youNickname,    // string             自分のニックネーム（getter。onStart 発火前は空文字）
   isHost,         // boolean            自分がホストか（getter。ホスト交代で変わる）
   size,           // { width, height }  canvas の論理サイズ（480 x 320）
 
   // --- コールバック登録（各1本のみ。2回目の登録は上書き） ---
-  onStart(fn),    // fn({ youId, isHost, peers, joinedLate })  開始時に1回
+  onStart(fn),    // fn({ youId, youNickname, isHost, peers, joinedLate })  開始時に1回
   onPeer(fn),     // fn({ kind: "join"|"leave", id, nickname })
   onMessage(fn),  // fn(fromPlayerId, msg)   他の参加者からの EN.send
   onInput(fn),    // fn({ type, x, y, key })
@@ -346,16 +347,23 @@ EN = {
 };
 ```
 
-**`onStart` の引数**（プロトタイプから `joinedLate` を追加）:
+**`onStart` の引数**（プロトタイプから `joinedLate` を追加。さらに `youNickname` を追加）:
 
 ```js
 {
   youId: "…",                      // 自分の playerId
+  youNickname: "…",                 // 自分のニックネーム
   isHost: true,                    // 開始時点でホストか
   peers: [ { id, nickname }, … ],  // 自分を含まない同室の参加者
   joinedLate: false                // true = 既に始まっているゲームに後から入った（§5.3）
 }
 ```
+
+`youNickname` を追加した理由: `peers` は自分を含まないため、ゲーム側には「自分の表示名」を知る手段が無かった。
+実際に `mogura.js` で自分の名前を `playerId` 先頭6文字で代用したところ、相手の画面には「自分」ではなく
+その断片が出る（もしくは決め打ちの `"自分"` を使うと相手の画面にも「自分: 11点」と表示される）という
+不具合が起きたため、runner が親から受け取ったニックネームをそのまま渡すようにした。
+親からの値が欠けている／文字列でない場合、runner は `youId` 先頭6文字にフォールバックする。
 
 **`onInput` のイベント種別**（プロトタイプに2種を追加）:
 

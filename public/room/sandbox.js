@@ -399,9 +399,12 @@
     const code = state.pendingCode;
     state.pendingCode = null;
     toFrame({ t: "load", code });
+    // state.players は自分を含む（正規化コメント参照）ので、自分の要素から nickname を引ける
+    const you = state.players.find((p) => p.id === state.youId);
     toFrame({
       t: "start",
       youId: state.youId,
+      youNickname: you !== undefined ? you.nickname : "",
       isHost: state.isHost,
       peers: state.players.filter((p) => p.id !== state.youId),
       joinedLate: state.pendingJoinedLate,

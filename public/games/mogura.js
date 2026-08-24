@@ -320,9 +320,9 @@ function roundRect(ctx, x, y, w, h, r) {
 
 EN.onStart(function (info) {
   g.me = info.youId;
-  // EN は自分自身のニックネームを渡してくれない（peers は自分以外の一覧）ので、
-  // reflex.js の nameOf() と同じ流儀で id の先頭6文字を表示名の代わりに使う
-  g.myNickname = String(info.youId).slice(0, 6);
+  // EN が自分のニックネームを渡してくれるので、これを使う（渡らなかった場合の
+  // フォールバックは runner.js 側（playerId 先頭6文字）で既に処理済み）
+  g.myNickname = info.youNickname;
   EN.setStatus("MOGURA 得点（このゲーム内のみ）: 0");
   g.message = "画面をタップして開始";
   EN.log("MOGURA 開始準備完了 / host=" + info.isHost + " / joinedLate=" + info.joinedLate);

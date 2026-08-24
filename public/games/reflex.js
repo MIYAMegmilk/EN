@@ -408,7 +408,9 @@ EN.onStart(function (info) {
   for (var i = 0; i < info.peers.length; i += 1) {
     addPlayer(info.peers[i].id, info.peers[i].nickname);
   }
-  addPlayer(info.youId, nameOf(info.youId));
+  // EN が自分のニックネームを渡してくれるので、これを使う（渡らなかった場合の
+  // フォールバックは runner.js 側（playerId 先頭6文字）で既に処理済み）
+  addPlayer(info.youId, info.youNickname);
   EN.setStatus("REFLEX 得点（このゲーム内のみ）: 0");
   g.message = info.joinedLate
     ? "進行中のゲームに途中参加しました"

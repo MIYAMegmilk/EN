@@ -11,6 +11,8 @@
  *   - EN.onEnd / EN.now を追加（§3.1）。
  *   - onInput に pointermove（60Hz間引き）/ keyup を追加（§3.2）。
  *   - onStart に joinedLate を追加（§5.3）。
+ *   - onStart / EN.youNickname に自分のニックネームを追加（§3.2。peers が自分を含まないため、
+ *     ゲームが自分の表示名を知る手段が無かった問題への対応）。
  *
  * 役割はただ一つ、「ユーザーが書いたゲームコードをこの隔離された文書の中で実行すること」。
  * このページは親（アプリ本体）と同一オリジンで配信されるが、
@@ -77,6 +79,7 @@
     loaded: false, // ゲームコードを評価済みか
     started: false, // onStart を呼んだか
     youId: null,
+    youNickname: "", // 自分のニックネーム。start が来るまでは空文字（onStart 発火時には必ず埋まっている）
     isHost: false,
     peers: [],
     joinedLate: false,
@@ -136,13 +139,14 @@
   // ---------------------------------------------------------------------------
 
   var EN = {
-    /** ゲーム開始時に1回だけ呼ばれる。fn({ youId, isHost, peers, joinedLate }) */
+    /** ゲーム開始時に1回だけ呼ばれる。fn({ youId, youNickname, isHost, peers, joinedLate }) */
     onStart: function (fn) {
       hooks.start = fn;
       // 既に start 情報が来ていた場合（load より先に start が届いたとき）は即座に発火する
       if (state.started && state.youId !== null) {
         safeCall("onStart", fn, [{
           youId: state.youId,
+          youNickname: state.youNickname,
           isHost: state.isHost,
           peers: state.peers.slice(),
           joinedLate: state.joinedLate,
@@ -240,6 +244,13 @@
   Object.defineProperty(EN, "youId", {
     get: function () {
       return state.youId;
+    },
+    enumerable: true,
+  });
+  // youId と同じ流儀でプロパティとしても読めるようにする（onStart の引数と二重に持たせる）
+  Object.defineProperty(EN, "youNickname", {
+    get: function () {
+      return state.youNickname;
     },
     enumerable: true,
   });
@@ -381,6 +392,10 @@
       case "start":
         if (typeof data.youId !== "string") return;
         state.youId = data.youId;
+        // 親から来なかった／型が違う場合は既存ゲームと同じ「playerId 先頭6文字」にフォールバックする
+        state.youNickname = typeof data.youNickname === "string" && data.youNickname.length > 0
+          ? data.youNickname
+          : state.youId.slice(0, 6);
         state.isHost = data.isHost === true;
         state.peers = normalizePeers(data.peers);
         state.joinedLate = data.joinedLate === true;
@@ -393,6 +408,7 @@
             (state.joinedLate ? "（途中参加）" : ""));
           safeCall("onStart", hooks.start, [{
             youId: state.youId,
+            youNickname: state.youNickname,
             isHost: state.isHost,
             peers: state.peers.slice(),
             joinedLate: state.joinedLate,
