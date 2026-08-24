@@ -79,6 +79,15 @@
         max-width: 100%;
         background: #000;
       }
+      /* 品質劣化時の映像自動停止（§3.6）。エラーではないので赤字にしない */
+      #vc-quality:empty {
+        display: none;
+      }
+      /* 回復済みで再開を勧められる状態のときだけ目立たせる */
+      #vc-resume.vc-resume-ready {
+        font-weight: bold;
+        border: 2px solid #0b6b3a;
+      }
       /* チャット（§3.9） */
       #chat-log {
         max-height: 12rem;
@@ -169,6 +178,13 @@
         <button id="vc-leave" type="button">VC退出</button>
       </div>
       <p class="muted" id="vc-status">未参加</p>
+      <!-- 品質劣化時の映像自動停止（§3.6）。通知文言と再開操作 -->
+      <p class="muted" id="vc-quality" role="status"></p>
+      <div class="row">
+        <button id="vc-resume" type="button" class="hidden">カメラを再開</button>
+        <!-- 判定モードの表示。iOS Safari 実機ではコンソールを見られないため画面に出す -->
+        <span class="muted" id="vc-quality-mode"></span>
+      </div>
       <div id="vc-media"></div>
     </section>
 

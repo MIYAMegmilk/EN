@@ -367,6 +367,13 @@ function renderScores(title, scores) {
   }
 }
 
+/** 品質判定モード（§3.6）の表示名。iOS Safari 実機で画面から確認できるようにする */
+const VC_QUALITY_MODE_LABELS = {
+  primary: "主指標",
+  fallback: "代替指標",
+  unknown: "判定不可",
+};
+
 /** VC の操作ボタンと状態表示を更新する */
 function renderVc() {
   const vc = VC.getState();
@@ -376,9 +383,36 @@ function renderVc() {
   $("vc-camera").disabled = !vc.active;
   $("vc-mute").textContent = vc.muted ? "ミュート解除" : "ミュート";
   $("vc-camera").textContent = vc.camera ? "カメラOFF" : "カメラON";
-  const peers = vc.peers.map((p) => `${p.nickname}: ${p.connectionState}`).join(" / ");
+  const peers = vc.peers
+    .map((p) => `${p.nickname}: ${p.connectionState}${p.degraded === true ? "（品質低下）" : ""}`)
+    .join(" / ");
   const head = vc.active ? "参加中" : vc.eligible ? "未参加" : "未参加（VC枠外）";
   $("vc-status").textContent = peers.length > 0 ? `${head} — ${peers}` : head;
+  renderVcQuality(vc);
+}
+
+/**
+ * 品質劣化時の映像自動停止（§3.6）まわりの表示を更新する。
+ * quality はコア側（vc.js）の品質監視が有効なときだけ入る。
+ */
+function renderVcQuality(vc) {
+  const quality = vc.quality;
+  const resume = $("vc-resume");
+  const mode = $("vc-quality-mode");
+  if (quality === undefined || quality === null || !vc.active) {
+    // VC 未参加なら前回の通知文言も消す（退室で状態はリセットされる）
+    if (!vc.active) $("vc-quality").textContent = "";
+    resume.classList.add("hidden");
+    resume.classList.remove("vc-resume-ready");
+    mode.textContent = "";
+    return;
+  }
+  // 自動停止中のみ再開操作を出す。映像は自動では戻さない（§3.6 の明示操作規定）
+  resume.classList.toggle("hidden", quality.autoStopped !== true);
+  // 回復済みで再開を勧められるときだけ強調する
+  resume.classList.toggle("vc-resume-ready", quality.canResume === true);
+  const label = VC_QUALITY_MODE_LABELS[quality.mode];
+  mode.textContent = `判定: ${label === undefined ? "判定不可" : label}`;
 }
 
 /**
@@ -405,6 +439,9 @@ function bindVc(iceServers) {
     container: $("vc-media"),
     onStatus: (event) => {
       if (event.kind === "error") showError(event.message);
+      // 品質劣化の通知（§3.6）は異常ではなく正常な保護動作なので、
+      // エラー表示（赤字・他のエラーで上書きされる）ではなく専用の枠に出す
+      if (event.kind === "quality") $("vc-quality").textContent = event.message;
       log("VC", event.message);
       renderVc();
     },
@@ -423,6 +460,16 @@ function bindVc(iceServers) {
   });
   $("vc-camera").addEventListener("click", () => {
     VC.toggleCamera().then(renderVc);
+  });
+  $("vc-resume").addEventListener("click", () => {
+    // 自動停止した映像は本人の明示操作でのみ戻す（§3.6）
+    if (typeof VC.resumeCamera !== "function") {
+      log("VC", "resumeCamera が未実装のため再開できません");
+      return;
+    }
+    // 停止・回復の文言は再開の時点で役目を終える（VC 側は kind:"quality" を出さない）
+    $("vc-quality").textContent = "";
+    Promise.resolve(VC.resumeCamera()).then(renderVc, () => renderVc());
   });
 }
 

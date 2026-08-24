@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VC 品質劣化判定テスト（§3.6）</title>
+    <style>
+      /* テストページの最小限の見た目。外部ライブラリは使わない */
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 0 auto;
+        padding: 1rem;
+        max-width: 52rem;
+        line-height: 1.6;
+      }
+      h1 {
+        font-size: 1.2rem;
+      }
+      h2 {
+        font-size: 1rem;
+        margin: 1.2rem 0 0.4rem;
+      }
+      .muted {
+        color: #666;
+        font-size: 0.85rem;
+      }
+      #summary {
+        font-weight: bold;
+        border: 1px solid #ccc;
+        border-radius: 6px;
+        padding: 0.6rem 0.8rem;
+      }
+      #summary.fail {
+        border-color: #b00020;
+        color: #b00020;
+      }
+      #summary.pending {
+        border-color: #a06000;
+        color: #a06000;
+      }
+      #banner {
+        border: 2px solid #a06000;
+        border-radius: 6px;
+        padding: 0.6rem 0.8rem;
+        color: #a06000;
+      }
+      #banner:empty {
+        display: none;
+      }
+      #results {
+        list-style: none;
+        padding-left: 0;
+      }
+      #results > li {
+        border-bottom: 1px solid #eee;
+        padding: 0.3rem 0;
+        font-size: 0.9rem;
+        overflow-wrap: anywhere;
+      }
+      .case-name {
+        font-weight: bold;
+      }
+      .ok {
+        color: #0b6b3a;
+      }
+      .ng {
+        color: #b00020;
+        font-weight: bold;
+      }
+      .ng-row {
+        background: #fff0f2;
+      }
+      .pend {
+        color: #a06000;
+      }
+      pre {
+        background: #f6f6f6;
+        padding: 0.5rem;
+        overflow-x: auto;
+        font-size: 0.8rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>VC 品質劣化判定テスト（詳細仕様書 §3.6）</h1>
+    <p class="muted">
+      <code>VC.evaluateQuality</code>（純粋関数）に合成サンプルを食わせて検証する。
+      実回線・実ブラウザの WebRTC は使わない。<code>file://</code> で直接開いて動く。
+      実機・実回線でしか確認できない項目は <code>vc-manual.md</code> 第8節を参照。
+    </p>
+
+    <p id="banner" role="alert"></p>
+    <p id="summary">実行中…</p>
+
+    <h2>結果</h2>
+    <ul id="results"></ul>
+
+    <h2>検証している契約</h2>
+    <pre id="contract"></pre>
+    <p class="muted">
+      閾値の定数（<code>QUALITY_*</code>）は <code>public/room/vc.js</code> 側の
+      <strong>暫定値</strong>である。コア側で値を変えたときは、このページの
+      「閾値」節の定数も合わせて直すこと。
+    </p>
+
+    <!-- コア実装。読み込むだけで副作用はない（global.VC を定義するのみ） -->
+    <script src="../../public/room/vc.js"></script>
+    <script>
+      "use strict";
+
+      // =====================================================================
+      // 最小アサーションヘルパ
+      // =====================================================================
+
+      /** 1件のテストケースの実行結果を貯める入れ物 */
+      const results = [];
+      let currentCase = null;
+
+      /** 未実装を表す例外。不合格ではなく「未実行」として数える */
+      class PendingError extends Error {}
+
+      function assert(cond, message) {
+        currentCase.checks.push(
+          cond === true
+            ? { ok: true, message }
+            : { ok: false, message: `${message}（期待: true / 実際: ${show(cond)}）` },
+        );
+      }
+
+      function assertEquals(actual, expected, message) {
+        const ok = Object.is(actual, expected);
+        currentCase.checks.push({
+          ok,
+          message: ok
+            ? message
+            : `${message}（期待: ${show(expected)} / 実際: ${show(actual)}）`,
+        });
+      }
+
+      /** 値を読める文字列にする（表示は textContent 経由なので HTML 化しない） */
+      function show(value) {
+        if (value === undefined) return "undefined";
+        try {
+          return JSON.stringify(value);
+        } catch {
+          return String(value);
+        }
+      }
+
+      /** テストケースを1件定義して即実行する */
+      function testCase(name, fn) {
+        currentCase = { name, checks: [], pending: false, error: null };
+        results.push(currentCase);
+        try {
+          fn();
+        } catch (e) {
+          if (e instanceof PendingError) currentCase.pending = true;
+          else currentCase.error = String(e && e.stack ? e.stack : e);
+        }
+        currentCase = null;
+      }
+
+      // =====================================================================
+      // 検証対象の契約（public/room/vc.js の evaluateQuality）
+      // =====================================================================
+
+      const CONTRACT_TEXT = [
+        "VC.evaluateQuality(windowMap, peerCount, now, ctx)",
+        "",
+        "  windowMap : Map<playerId, sample[]>   サンプルは古い順（1ピアあたり最大5件）",
+        "  sample    : { at, warmedUp, videoActive, limitationReason, fpsRatio, rtt, outgoingBitrate }",
+        "              limitationReason は主指標。取れない環境では null（この場合フォールバック判定）",
+        "              warmedUp はピア生成10秒 / カメラON30秒の猶予を両方満たしたサンプルだけ true",
+        "  peerCount : VC ピアの総数 N（過半数 ⌈N/2⌉ の分母。windowMap の件数とは独立）",
+        "  now       : 現在時刻（最小保持時間の判定にだけ使う）",
+        "  ctx       : { autoStopped, reason, stoppedAt, autoStopCount }",
+        "",
+        "  戻り値    : { shouldStop, reason, degradedPeerCount, canResume, mode, degradedPeerIds }",
+        "              reason は \"bandwidth\" | \"cpu\" | null のみ（\"audio\" は返らない）",
+        "",
+        "  主判定 limitationReason === \"bandwidth\" は、そのままでは原因として採らない。",
+        "  Chrome は送出開始直後、回線が健全でも \"bandwidth\" を報告し続けるため",
+        "  （実測 9.8〜18.1 秒）、別指標による裏付けを要求する:",
+        "    1. outgoingBitrate < 320000        → 原因 bitrate   （d≥1 で停止）",
+        "    2. 上記に該当せず rtt > 0.8        → 原因 bandwidth （d≥⌈N/2⌉ で停止）",
+        "    3. どちらでもない（両方 null 含む）→ 原因なし       （停止しない）",
+        "  limitationReason === \"cpu\" は裏付けを要さず、そのまま原因 cpu（d≥1 で停止）。",
+      ].join("\n");
+
+      function callEvaluate(windowMap, peerCount, now, ctx) {
+        if (typeof VC === "undefined" || typeof VC.evaluateQuality !== "function") {
+          throw new PendingError("VC.evaluateQuality が未実装");
+        }
+        const result = VC.evaluateQuality(windowMap, peerCount, now, ctx);
+        if (result === null || typeof result !== "object") {
+          throw new Error(`evaluateQuality が object を返さなかった: ${show(result)}`);
+        }
+        return result;
+      }
+
+      // =====================================================================
+      // 閾値（public/room/vc.js の QUALITY_* と同じ値を持つ。暫定値）
+      // =====================================================================
+
+      /** 観測窓のうち何サンプル該当したら「そのピアは劣化」と見なすか */
+      const STOP_HITS = 3;
+      /** 1ピアあたりの観測窓のサンプル数 */
+      const WINDOW_SIZE = 5;
+      /** 自動停止のあと、この時間は回復通知を出さない */
+      const MIN_HOLD_MS = 60000;
+      /** 1回の VC 参加中に自動停止してよい回数の上限 */
+      const MAX_AUTO_STOPS = 2;
+
+      const T0 = 1_700_000_000_000;
+
+      // =====================================================================
+      // 合成サンプルの組み立て
+      // =====================================================================
+
+      /** 既定は「主指標も代替指標も取れていない」サンプル */
+      function sample(overrides) {
+        return Object.assign({
+          at: T0,
+          warmedUp: true,
+          videoActive: true,
+          limitationReason: null,
+          fpsRatio: null,
+          rtt: null,
+          outgoingBitrate: null,
+        }, overrides === undefined ? {} : overrides);
+      }
+
+      /** 送出可能帯域の停止閾値（QUALITY_BITRATE_STOP_BPS） */
+      const BITRATE_STOP_BPS = 320000;
+      /** RTT の停止閾値（QUALITY_RTT_STOP_SEC） */
+      const RTT_STOP_SEC = 0.8;
+
+      /** 主指標が取れる環境（Chrome / Safari 17.4+）のサンプル */
+      const primaryGood = (o) => sample(Object.assign({ limitationReason: "none" }, o));
+      const primaryCpu = (o) => sample(Object.assign({ limitationReason: "cpu" }, o));
+
+      /**
+       * 主指標 "bandwidth"。裏付けの有無で扱いが変わるので4種類を用意する。
+       * 既定の primaryBandwidth は「RTT 超過で裏付けられた bandwidth」＝過半数で停止。
+       */
+      const primaryBandwidth = (o) =>
+        sample(Object.assign(
+          { limitationReason: "bandwidth", rtt: 1.2, outgoingBitrate: 1_500_000 },
+          o,
+        ));
+      /** 送出可能帯域が閾値割れ → 原因 bitrate（1ピアでも停止） */
+      const primaryBandwidthLowBitrate = (o) =>
+        sample(Object.assign(
+          { limitationReason: "bandwidth", rtt: 0.1, outgoingBitrate: 100_000 },
+          o,
+        ));
+      /** 帯域も RTT も健全 → 立ち上がり中の誤報とみなして原因なし */
+      const primaryBandwidthHealthy = (o) =>
+        sample(Object.assign(
+          { limitationReason: "bandwidth", rtt: 0.05, outgoingBitrate: 1_000_000 },
+          o,
+        ));
+      /** 裏付けの指標が両方 null → 原因なし（検知漏れに倒す） */
+      const primaryBandwidthNoEvidence = (o) =>
+        sample(Object.assign(
+          { limitationReason: "bandwidth", rtt: null, outgoingBitrate: null },
+          o,
+        ));
+      /** outgoingBitrate だけ取れず RTT が超過 → 原因 bandwidth（過半数で停止） */
+      const primaryBandwidthRttOnly = (o) =>
+        sample(Object.assign(
+          { limitationReason: "bandwidth", rtt: 1.2, outgoingBitrate: null },
+          o,
+        ));
+
+      /** 主指標が取れない環境（Safari 17.3 以下）のサンプル */
+      // FPS が要求の 20% しか出ず、RTT も 1.2 秒 → 原因は rtt
+      const fallbackRtt = (o) =>
+        sample(Object.assign({ fpsRatio: 0.2, rtt: 1.2, outgoingBitrate: 1_500_000 }, o));
+      // FPS が出ず、送出可能帯域が 100kbps しかない → 原因は bitrate
+      const fallbackBitrate = (o) =>
+        sample(Object.assign({ fpsRatio: 0.2, rtt: 0.1, outgoingBitrate: 100_000 }, o));
+      const fallbackGood = (o) =>
+        sample(Object.assign({ fpsRatio: 0.95, rtt: 0.05, outgoingBitrate: 1_500_000 }, o));
+
+      /** 同じサンプルを n 件並べた観測窓 */
+      function windowOf(n, make, overrides) {
+        const samples = [];
+        for (let i = 0; i < n; i++) samples.push(make(overrides));
+        return samples;
+      }
+
+      /**
+       * total 人のうち先頭 bad 人を劣化させた windowMap を作る。
+       * 各ピアの観測窓は満杯（WINDOW_SIZE 件）にする。
+       */
+      function peerWindows(total, bad, makeBad, makeGood) {
+        const badMake = makeBad === undefined ? primaryBandwidth : makeBad;
+        const goodMake = makeGood === undefined ? primaryGood : makeGood;
+        const map = new Map();
+        for (let i = 0; i < total; i++) {
+          map.set(`p${i}`, windowOf(WINDOW_SIZE, i < bad ? badMake : goodMake));
+        }
+        return map;
+      }
+
+      /** 既定の ctx（まだ一度も自動停止していない状態） */
+      function ctxOf(overrides) {
+        return Object.assign({
+          autoStopped: false,
+          reason: null,
+          stoppedAt: null,
+          autoStopCount: 0,
+        }, overrides === undefined ? {} : overrides);
+      }
+
+      /** 評価を1回行う。peerCount 既定は windowMap の件数 */
+      function evaluate(windowMap, options) {
+        const opts = options === undefined ? {} : options;
+        const peerCount = opts.peerCount === undefined ? windowMap.size : opts.peerCount;
+        const now = opts.now === undefined ? T0 : opts.now;
+        return callEvaluate(windowMap, peerCount, now, ctxOf(opts.ctx));
+      }
+
+      // =====================================================================
+      // テストケース
+      // =====================================================================
+
+      // 1. 単調劣化 → 停止する
+      testCase("1. 単調劣化 → 映像を自動停止する", () => {
+        // 観測窓が 1件 → 2件 → … と積み上がる過程を再現する（N=4 全員が劣化）
+        const stoppedAt = [];
+        for (let n = 1; n <= WINDOW_SIZE; n++) {
+          const map = new Map();
+          for (let i = 0; i < 4; i++) map.set(`p${i}`, windowOf(n, primaryBandwidth));
+          stoppedAt.push(evaluate(map).shouldStop);
+        }
+        assertEquals(stoppedAt[0], false, "劣化サンプル1件では停止しない");
+        assertEquals(stoppedAt[1], false, "劣化サンプル2件では停止しない");
+        assertEquals(stoppedAt[STOP_HITS - 1], true, `劣化サンプル ${STOP_HITS} 件で停止する`);
+
+        const r = evaluate(peerWindows(4, 4));
+        assertEquals(r.shouldStop, true, "窓が満杯の連続劣化で停止する");
+        assertEquals(r.reason, "bandwidth", "停止理由は bandwidth");
+        assertEquals(r.degradedPeerCount, 4, "劣化ピア数は 4");
+        assertEquals(r.degradedPeerIds.length, 4, "劣化ピアIDが4件返る");
+      });
+
+      // 2. 単調回復 → canResume が立つ。停止指示は出ない（自動復帰しない）
+      testCase("2. 単調回復 → canResume が立つ。自動復帰はしない", () => {
+        // 自動停止中は映像を送っていないので videoActive:false のサンプルが並ぶ
+        const recovered = new Map();
+        for (let i = 0; i < 4; i++) {
+          recovered.set(
+            `p${i}`,
+            windowOf(WINDOW_SIZE, fallbackGood, { videoActive: false, rtt: 0.05 }),
+          );
+        }
+        const stoppedCtx = {
+          autoStopped: true,
+          reason: "bandwidth",
+          stoppedAt: T0 - MIN_HOLD_MS,
+          autoStopCount: 1,
+        };
+        const r = evaluate(recovered, { ctx: stoppedCtx });
+        assertEquals(r.canResume, true, "回復が続けば canResume が true になる");
+        assertEquals(r.shouldStop, false, "回復中に停止指示は出ない");
+        assertEquals(r.degradedPeerCount, 0, "劣化ピア数は 0");
+        // 「映像を戻せ」という指示は返さない。戻すのは本人の明示操作だけ（§3.6）
+        assertEquals(r.shouldResume, undefined, "自動で映像を戻す指示は返さない");
+
+        // 1ピアでも回復しきっていなければ再開を勧めない
+        const partial = new Map(recovered);
+        partial.set("p0", windowOf(WINDOW_SIZE, fallbackGood, { videoActive: false, rtt: 1.0 }));
+        assertEquals(
+          evaluate(partial, { ctx: stoppedCtx }).canResume,
+          false,
+          "1ピアでも RTT が戻っていなければ canResume は false",
+        );
+
+        // cpu 由来の停止は回線統計から回復を判断できないので保持時間だけで判断する
+        const stillBad = peerWindows(4, 4, primaryCpu);
+        assertEquals(
+          evaluate(stillBad, { ctx: Object.assign({}, stoppedCtx, { reason: "cpu" }) }).canResume,
+          true,
+          "cpu 由来の停止は最小保持時間の経過だけで canResume が立つ",
+        );
+      });
+
+      // 3. 閾値付近での往復 → ON/OFF を繰り返さない（ヒステリシス）
+      testCase("3. 閾値付近での往復 → ON/OFF を繰り返さない（ヒステリシス）", () => {
+        // 良好と劣化が交互に来て、観測窓の該当数が閾値に届かないケース
+        const flapping = new Map();
+        for (let i = 0; i < 4; i++) {
+          flapping.set(`p${i}`, [
+            primaryBandwidth(),
+            primaryGood(),
+            primaryBandwidth(),
+            primaryGood(),
+            primaryGood(),
+          ]);
+        }
+        const r = evaluate(flapping);
+        assertEquals(
+          r.shouldStop,
+          false,
+          `観測窓5件中2件の劣化（閾値 ${STOP_HITS} 未満）では停止しない`,
+        );
+        assertEquals(r.degradedPeerCount, 0, "劣化ピアとして数えない");
+
+        // 停止中はもう一度停止指示を出さない（二重停止しない）
+        const stoppedCtx = { autoStopped: true, reason: "bandwidth", stoppedAt: T0, autoStopCount: 1 };
+        assertEquals(
+          evaluate(peerWindows(4, 4), { ctx: stoppedCtx }).shouldStop,
+          false,
+          "既に自動停止中なら重ねて停止しない",
+        );
+
+        // 完全に回復していても、最小保持時間を過ぎるまで再開を勧めない
+        const recovered = new Map();
+        for (let i = 0; i < 4; i++) {
+          recovered.set(`p${i}`, windowOf(WINDOW_SIZE, fallbackGood, { videoActive: false }));
+        }
+        assertEquals(
+          evaluate(recovered, { ctx: stoppedCtx, now: T0 + MIN_HOLD_MS - 1000 }).canResume,
+          false,
+          `停止から ${MIN_HOLD_MS}ms 未満では canResume を立てない`,
+        );
+        assertEquals(
+          evaluate(recovered, { ctx: stoppedCtx, now: T0 + MIN_HOLD_MS }).canResume,
+          true,
+          "最小保持時間を過ぎたら canResume が立つ",
+        );
+      });
+
+      // 4. ウォームアップ中は停止しない
+      testCase("4. ウォームアップ中（ピア生成10秒以内 / カメラON30秒以内）は停止しない", () => {
+        // warmedUp は「ピア生成から10秒」と「カメラONから30秒」の両方を満たしたときだけ true。
+        // 猶予中のサンプルは判定の材料にしない
+        const warming = new Map();
+        for (let i = 0; i < 4; i++) {
+          warming.set(`p${i}`, windowOf(WINDOW_SIZE, primaryBandwidth, { warmedUp: false }));
+        }
+        const r = evaluate(warming);
+        assertEquals(r.shouldStop, false, "ウォームアップ中のサンプルだけなら停止しない");
+        assertEquals(r.degradedPeerCount, 0, "劣化ピアとして数えない");
+        assertEquals(r.mode, "primary", "判定モードはウォームアップ中でも分かる（表示のため）");
+
+        // 猶予明けのサンプルが閾値ぶん溜まれば停止する（4-a が万年 false ではないこと）
+        const mixed = new Map();
+        for (let i = 0; i < 4; i++) {
+          mixed.set(`p${i}`, [
+            primaryBandwidth({ warmedUp: false }),
+            primaryBandwidth({ warmedUp: false }),
+            primaryBandwidth(),
+            primaryBandwidth(),
+            primaryBandwidth(),
+          ]);
+        }
+        assertEquals(
+          evaluate(mixed).shouldStop,
+          true,
+          `猶予明けのサンプルが ${STOP_HITS} 件溜まれば停止する`,
+        );
+      });
+
+      // 5. ピア数の増減に ⌈N/2⌉ が追従する
+      testCase("5. ピア数 N の増減に閾値 ⌈N/2⌉ が追従する", () => {
+        // N=1: ⌈1/2⌉=1
+        const n1 = evaluate(peerWindows(1, 1));
+        assertEquals(n1.degradedPeerCount, 1, "N=1 で劣化ピア数 1");
+        assertEquals(n1.shouldStop, true, "N=1 は1本の劣化（⌈1/2⌉=1）で停止");
+
+        // N=5: ⌈5/2⌉=3
+        const n5below = evaluate(peerWindows(5, 2));
+        assertEquals(n5below.degradedPeerCount, 2, "N=5 / 劣化2 で劣化ピア数 2");
+        assertEquals(n5below.shouldStop, false, "N=5 は2本では停止しない（閾値3）");
+
+        const n5at = evaluate(peerWindows(5, 3));
+        assertEquals(n5at.degradedPeerCount, 3, "N=5 / 劣化3 で劣化ピア数 3");
+        assertEquals(n5at.shouldStop, true, "N=5 は3本（⌈5/2⌉）で停止");
+
+        // N=2: ⌈2/2⌉=1
+        const n2 = evaluate(peerWindows(2, 1));
+        assertEquals(n2.degradedPeerCount, 1, "N=2 / 劣化1 で劣化ピア数 1");
+        assertEquals(n2.shouldStop, true, "N=2 は1本（⌈2/2⌉）で停止");
+
+        // 閾値の分母は windowMap の件数ではなく引数の peerCount
+        assertEquals(
+          evaluate(peerWindows(2, 2), { peerCount: 5 }).shouldStop,
+          false,
+          "観測窓が2ピアぶんでも N=5 なら2本では停止しない",
+        );
+
+        // ピアが居なければ判定しない
+        const empty = evaluate(new Map(), { peerCount: 0 });
+        assertEquals(empty.shouldStop, false, "ピアが居なければ停止しない");
+        assertEquals(empty.mode, "unknown", "サンプルが無ければ mode は unknown");
+      });
+
+      // 6. cpu と bandwidth の切り分け
+      testCase("6. cpu は d=1 で停止、bandwidth は d=1 では停止しない", () => {
+        // N=4（閾値 ⌈4/2⌉=2）で1本だけ劣化させて切り分ける。
+        // primaryBandwidth は RTT 超過で裏付けられた bandwidth（ケース10 参照）
+        const cpu = evaluate(peerWindows(4, 1, primaryCpu));
+        assertEquals(cpu.shouldStop, true, "cpu は1本でも停止する（自分側の問題のため）");
+        assertEquals(cpu.reason, "cpu", "理由は cpu");
+        assertEquals(cpu.degradedPeerCount, 1, "劣化ピア数は 1");
+
+        const bw = evaluate(peerWindows(4, 1, primaryBandwidth));
+        assertEquals(bw.shouldStop, false, "bandwidth は1本（閾値2未満）では停止しない");
+        assertEquals(bw.degradedPeerCount, 1, "劣化ピア数は1として数える（表示はする）");
+
+        // 過半数に届けば bandwidth でも停止する
+        assertEquals(
+          evaluate(peerWindows(4, 2, primaryBandwidth)).shouldStop,
+          true,
+          "bandwidth は過半数（2/4）で停止する",
+        );
+
+        // cpu と bandwidth が混在したら cpu を優先して報告する
+        const mixed = new Map(peerWindows(4, 2, primaryBandwidth));
+        mixed.set("p3", windowOf(WINDOW_SIZE, primaryCpu));
+        assertEquals(evaluate(mixed).reason, "cpu", "cpu と bandwidth の混在では cpu を報告する");
+      });
+
+      // 7. 自動停止回数の上限
+      testCase("7. 自動停止回数の上限（3回目は停止しない）", () => {
+        const under = evaluate(peerWindows(4, 4), {
+          ctx: { autoStopCount: MAX_AUTO_STOPS - 1 },
+        });
+        assertEquals(under.shouldStop, true, `自動停止 ${MAX_AUTO_STOPS - 1} 回目までは停止する`);
+
+        const over = evaluate(peerWindows(4, 4), { ctx: { autoStopCount: MAX_AUTO_STOPS } });
+        assertEquals(
+          over.shouldStop,
+          false,
+          `自動停止が上限 ${MAX_AUTO_STOPS} 回に達したら以後は停止しない`,
+        );
+        assertEquals(over.reason, null, "停止しないので理由も返さない");
+        assertEquals(over.degradedPeerCount, 4, "上限後も劣化ピア数は数える（表示は続ける）");
+      });
+
+      // 8. 主指標が取れない環境ではフォールバック判定に切り替わる
+      testCase("8. 主指標が null → 代替指標（FPS・RTT・送出帯域）で判定する", () => {
+        assertEquals(evaluate(peerWindows(4, 4)).mode, "primary", "主指標が取れれば mode は primary");
+
+        // RTT 由来: 過半数のピアで見えたときだけ止める
+        const rttAll = evaluate(peerWindows(4, 4, fallbackRtt, fallbackGood));
+        assertEquals(rttAll.mode, "fallback", "主指標が無ければ mode は fallback");
+        assertEquals(rttAll.shouldStop, true, "代替指標だけでも劣化を検出して停止する");
+        assertEquals(rttAll.reason, "bandwidth", "RTT 由来の停止理由も bandwidth として報告する");
+        assertEquals(rttAll.degradedPeerCount, 4, "劣化ピア数は 4");
+
+        assertEquals(
+          evaluate(peerWindows(4, 1, fallbackRtt, fallbackGood)).shouldStop,
+          false,
+          "RTT 由来は1本（閾値2未満）では停止しない",
+        );
+
+        // 送出可能帯域の不足は自分側の送信の問題なので1本でも止める
+        const bitrate = evaluate(peerWindows(4, 1, fallbackBitrate, fallbackGood));
+        assertEquals(bitrate.shouldStop, true, "送出帯域の不足は1本でも停止する");
+        assertEquals(bitrate.reason, "bandwidth", "理由は bandwidth");
+
+        const ok = evaluate(peerWindows(4, 0, fallbackRtt, fallbackGood));
+        assertEquals(ok.mode, "fallback", "良好でも主指標が無ければ mode は fallback");
+        assertEquals(ok.shouldStop, false, "代替指標が良好なら停止しない");
+      });
+
+      // 9. どちらの指標も取れない場合
+      testCase("9. 主指標も代替指標も取れない → 判定不能。停止しない", () => {
+        const unknown = new Map();
+        unknown.set("p0", windowOf(WINDOW_SIZE, sample));
+        unknown.set("p1", windowOf(WINDOW_SIZE, sample));
+        const r = evaluate(unknown);
+        assertEquals(r.mode, "unknown", "mode は unknown");
+        assertEquals(r.shouldStop, false, "判定できないときは停止しない（音声は保つ）");
+        assertEquals(r.degradedPeerCount, 0, "劣化ピア数は 0");
+      });
+
+      // 10. 主判定 "bandwidth" には裏付けを要求する（誤検知の抑止）
+      testCase("10. 主判定 bandwidth は裏付け（低帯域 or 高RTT）が無ければ停止しない", () => {
+        // 10-a. Chrome の立ち上がり誤報の再現。
+        // "bandwidth" と報告されていても outgoingBitrate が健全なら音声は無事なので止めない
+        const healthy = evaluate(peerWindows(4, 4, primaryBandwidthHealthy, primaryGood));
+        assertEquals(
+          healthy.shouldStop,
+          false,
+          `bandwidth 報告でも outgoingBitrate が健全（1Mbps ≥ ${BITRATE_STOP_BPS}）なら停止しない`,
+        );
+        assertEquals(healthy.degradedPeerCount, 0, "劣化ピアとしても数えない");
+        assertEquals(healthy.reason, null, "停止しないので理由も返さない");
+        assertEquals(healthy.mode, "primary", "limitationReason は文字列なので mode は primary");
+
+        // 10-b. 送出可能帯域が閾値割れ → 原因 bitrate 扱い。自分の上り全体の問題なので d≥1
+        const low = evaluate(peerWindows(4, 1, primaryBandwidthLowBitrate, primaryGood));
+        assertEquals(
+          low.shouldStop,
+          true,
+          `outgoingBitrate < ${BITRATE_STOP_BPS} なら1ピアでも停止する`,
+        );
+        assertEquals(low.reason, "bandwidth", "報告する理由は bandwidth");
+        assertEquals(low.degradedPeerCount, 1, "劣化ピア数は 1");
+
+        // 10-c. 帯域が取れず RTT だけ超過 → 原因 bandwidth 扱い。経路側なので過半数
+        const rttOnly1 = evaluate(peerWindows(4, 1, primaryBandwidthRttOnly, primaryGood));
+        assertEquals(
+          rttOnly1.shouldStop,
+          false,
+          `outgoingBitrate が null で rtt > ${RTT_STOP_SEC} でも1ピア（閾値2未満）では停止しない`,
+        );
+        assertEquals(rttOnly1.degradedPeerCount, 1, "劣化ピアとしては数える（表示はする）");
+
+        const rttOnly2 = evaluate(peerWindows(4, 2, primaryBandwidthRttOnly, primaryGood));
+        assertEquals(rttOnly2.shouldStop, true, "過半数（2/4）に達すれば停止する");
+        assertEquals(rttOnly2.reason, "bandwidth", "理由は bandwidth");
+
+        // 10-d. 裏付けの指標が両方 null → 原因なし（誤検知より検知漏れに倒す・R6）
+        const noEvidence = evaluate(peerWindows(4, 4, primaryBandwidthNoEvidence, primaryGood));
+        assertEquals(
+          noEvidence.shouldStop,
+          false,
+          "rtt も outgoingBitrate も null なら全ピア bandwidth 報告でも停止しない",
+        );
+        assertEquals(noEvidence.degradedPeerCount, 0, "劣化ピアとして数えない");
+
+        // 10-e. 回帰: cpu は裏付け不要のまま。1ピアでも停止する
+        const cpu = evaluate(peerWindows(4, 1, primaryCpu, primaryGood));
+        assertEquals(cpu.shouldStop, true, "cpu は裏付けを要さず1ピアでも停止する（回帰）");
+        assertEquals(cpu.reason, "cpu", "理由は cpu");
+
+        // 10-f. cpu の裏付け不要は「回線が健全でも止める」ことを意味する
+        const cpuHealthyLink = evaluate(
+          peerWindows(4, 1, (o) =>
+            primaryCpu(Object.assign({ rtt: 0.05, outgoingBitrate: 1_500_000 }, o)), primaryGood),
+        );
+        assertEquals(
+          cpuHealthyLink.shouldStop,
+          true,
+          "cpu は回線指標が健全でも停止する（端末側の事実の報告のため）",
+        );
+      });
+
+      // =====================================================================
+      // 描画（方針どおり textContent のみを使う。innerHTML は使わない）
+      // =====================================================================
+
+      function el(tag, text, className) {
+        const node = document.createElement(tag);
+        if (text !== undefined) node.textContent = text;
+        if (className !== undefined) node.className = className;
+        return node;
+      }
+
+      function render() {
+        const list = document.getElementById("results");
+        let passed = 0;
+        let failed = 0;
+        let pending = 0;
+
+        for (const testResult of results) {
+          const caseFailed = testResult.error !== null ||
+            testResult.checks.some((check) => check.ok === false);
+          const item = el("li");
+          item.appendChild(el("span", testResult.name, "case-name"));
+
+          if (testResult.pending) {
+            pending += 1;
+            item.appendChild(el("span", " … 未実行（コア未実装）", "pend"));
+          } else if (caseFailed) {
+            item.appendChild(el("span", " … 不合格", "ng"));
+            item.classList.add("ng-row");
+          } else {
+            item.appendChild(el("span", " … 合格", "ok"));
+          }
+
+          const checks = el("ul");
+          for (const check of testResult.checks) {
+            if (check.ok) passed += 1;
+            else failed += 1;
+            const row = el("li");
+            row.appendChild(el("span", check.ok ? "OK " : "NG ", check.ok ? "ok" : "ng"));
+            row.appendChild(el("span", check.message));
+            if (!check.ok) row.classList.add("ng-row");
+            checks.appendChild(row);
+          }
+          if (testResult.error !== null) {
+            failed += 1;
+            const row = el("li", undefined, "ng-row");
+            row.appendChild(el("span", "NG ", "ng"));
+            row.appendChild(el("span", `例外: ${testResult.error}`));
+            checks.appendChild(row);
+          }
+          item.appendChild(checks);
+          list.appendChild(item);
+        }
+
+        const summary = document.getElementById("summary");
+        summary.textContent =
+          `ケース ${results.length} 件 / アサーション 合格 ${passed} 件・不合格 ${failed} 件` +
+          (pending > 0 ? ` / 未実行ケース ${pending} 件` : "");
+        if (failed > 0) summary.className = "fail";
+        else if (pending > 0) summary.className = "pending";
+
+        if (pending > 0) {
+          document.getElementById("banner").textContent =
+            "VC.evaluateQuality が読み込めなかったため、判定ロジックのテストを実行できていない。" +
+            "public/room/vc.js の読み込みパスと公開 API を確認すること。";
+        }
+        document.getElementById("contract").textContent = CONTRACT_TEXT;
+      }
+
+      render();
+    </script>
+  </body>
+</html>
