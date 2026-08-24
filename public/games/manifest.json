@@ -10,6 +10,16 @@
       "maxPlayers": 10,
       "author": "ちいかわ",
       "dev": false
+    },
+    {
+      "id": "mogura",
+      "title": "もぐらたたき",
+      "description": "3×3のマスに出るもぐらをタップ。30秒で得点を競う",
+      "file": "mogura.js",
+      "minPlayers": 1,
+      "maxPlayers": 10,
+      "author": "ちいかわ",
+      "dev": false
     }
   ]
 }
