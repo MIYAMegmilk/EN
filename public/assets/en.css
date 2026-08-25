@@ -597,6 +597,130 @@ select {
   color: var(--dim);
 }
 
+/*
+ * ── VC 卓のボットタイル（見た目のみ。app.js が描く）──
+ * ボットは音声を発しない・聞かない・VC 枠を消費しない（§3.10）。ここは
+ * 「みんなのカメラが並ぶ場所に参加してる風に見せる」ための表示専用の飾りで、
+ * WebRTC には一切関与しない。
+ *
+ * index.html のインライン <style> が .vc-peer / .vc-peer-label に
+ * background・justify-content 等を定義しており、リンクの読み込み順（en.css →
+ * インライン style）の都合で単純な単一クラスでは負けてしまうため、
+ * 上書きしたい箇所は .vc-peer.vc-peer-bot のように複合セレクタで詳細度を上げてある。
+ */
+.vc-peer.vc-peer-bot {
+  justify-content: center;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 10px;
+  border-style: dashed;
+  background: linear-gradient(180deg, #1c140a, #140e08);
+}
+
+/* 人のタイルにある「CAMERA」の下敷き文字は不要（顔アイコンに置き換える） */
+.vc-peer.vc-peer-bot::before {
+  content: none;
+}
+
+/* 実在の参加者と混同させないための印 */
+.vc-bot-mark {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  padding: 2px 8px;
+  border: 1px solid var(--gold-3);
+  border-radius: var(--r-pill);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  color: var(--gold-2);
+  background: rgba(0, 0, 0, 0.4);
+}
+
+/* 顔アイコン。画像は使わず、CSS の疑似要素だけで目・口を出す */
+.vc-bot-face {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: 2px solid var(--gold-3);
+  background: radial-gradient(circle at 35% 30%, var(--panel-3), var(--wood));
+}
+
+.vc-bot-face::before {
+  content: "";
+  position: absolute;
+  top: 40%;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--gold-2);
+  box-shadow: -13px 0 0 var(--gold-2), 13px 0 0 var(--gold-2);
+  transform: translateX(-50%);
+}
+
+.vc-bot-face::after {
+  content: "";
+  position: absolute;
+  bottom: 30%;
+  left: 50%;
+  width: 20px;
+  height: 10px;
+  border: 2px solid var(--gold-2);
+  border-top: none;
+  border-radius: 0 0 20px 20px;
+  transform: translateX(-50%);
+}
+
+/* しゅんぴ / せり / ぐっちーで縁の色味を変え、どの役割か見分けやすくする */
+.vc-bot-face[data-bot-id="shunpi"] {
+  border-color: var(--gold);
+}
+
+.vc-bot-face[data-bot-id="seri"] {
+  border-color: var(--gold-2);
+}
+
+.vc-bot-face[data-bot-id="gucchi"] {
+  border-color: var(--gold-3);
+}
+
+.vc-peer-label.vc-bot-label {
+  position: static;
+  padding: 0;
+  background: none;
+  text-align: center;
+}
+
+.vc-bot-role {
+  margin: 0;
+  font-size: 10.5px;
+  color: var(--dim);
+  text-align: center;
+}
+
+/* ボットの発言に合わせて短時間だけ光らせる演出（任意）。§CLAUDE.md: reduced motion に配慮 */
+.vc-bot-speaking .vc-bot-face {
+  animation: vc-bot-pulse 1.6s ease-out;
+}
+
+@keyframes vc-bot-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(230, 166, 63, 0.55);
+  }
+  100% {
+    box-shadow: 0 0 0 14px rgba(230, 166, 63, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vc-bot-speaking .vc-bot-face {
+    animation: none;
+    box-shadow: 0 0 0 3px rgba(230, 166, 63, 0.7);
+  }
+}
+
 /* ── サンドボックスゲーム。docs/design/game-sandbox.md ── */
 .sandbox-head h2 {
   font-family: var(--serif);
