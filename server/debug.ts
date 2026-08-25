@@ -185,18 +185,28 @@ export function hasValidDebugToken(req: Request, token: string | null): boolean 
 }
 
 // ---------------------------------------------------------------------------
-// HTTP API: GET /api/debug/events, GET /api/debug/summary
+// HTTP API: GET /api/debug/events, GET /api/debug/summary,
+//           POST /api/debug/reset-limits
 // ---------------------------------------------------------------------------
 
 export const DEBUG_EVENTS_PATH = "/api/debug/events";
 export const DEBUG_SUMMARY_PATH = "/api/debug/summary";
+/**
+ * 開発中にログイン・登録のレート制限（server/auth.ts の #loginLimiter /
+ * #registerLimiter）で詰まったとき、待たずに解除するための口。
+ * 「消す」操作なので必ず POST（GET だと誤って踏んだリンクやプリフェッチで消えてしまう）。
+ */
+export const DEBUG_RESET_LIMITS_PATH = "/api/debug/reset-limits";
+
+/** POST /api/debug/reset-limits が返す、実際に消えた枠（IP）の件数 */
+export type ResetLimitsResult = { login: number; register: number };
 
 function jsonNoStore(body: unknown, init?: ResponseInit): Response {
   return new Response(JSON.stringify(body), {
     ...init,
     headers: {
       "content-type": "application/json",
-      // summary/events はその場の内部状態を返すため、キャッシュさせない
+      // summary/events/reset-limits はその場の内部状態を返す・変更するため、キャッシュさせない
       "cache-control": "no-store",
       ...init?.headers,
     },
@@ -209,28 +219,60 @@ function notFound(): Response {
 }
 
 /**
+ * Origin ヘッダがこのサーバーと同一かどうか（§3.8 CSRF対策）。
+ * main.ts の isAllowedOrigin と同じロジック（ヘッダ無しのクライアントは許可する）。
+ * debug.ts と main.ts の相互importを避けるため、ここでは独立実装にした
+ * （timingSafeEqual と同じ理由。main.ts 側を変更したら忘れずにこちらも合わせること）。
+ */
+function isAllowedOrigin(req: Request): boolean {
+  const origin = req.headers.get("origin");
+  if (origin === null) return true;
+  const host = req.headers.get("host") ?? new URL(req.url).host;
+  try {
+    return new URL(origin).host === host;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * /api/debug/* のハンドラ。
  * token が null（EN_DEBUG_TOKEN 未設定）なら常に404。
  * token が設定されていても x-debug-token が一致しなければ404（401にしない。
  * 401だと「パスは存在するが権限がない」ことが漏れるため）。
  *
- * summary の中身は呼び出し側（main.ts）が buildSummary で組み立てる。
- * RoomManager など他モジュールへの依存を debug.ts に持ち込まないための設計。
+ * summary の中身・reset-limits の実行は呼び出し側（main.ts）が buildSummary /
+ * resetLimits で組み立てる・実行する。RoomManager や AuthApi など他モジュールへの
+ * 依存を debug.ts に持ち込まないための設計（auth.ts が debug.ts を import しているため、
+ * 逆方向の import は循環依存になる）。
  */
 export class DebugApi {
   constructor(
     private readonly token: string | null,
     private readonly recorder: DebugRecorder,
     private readonly buildSummary: () => Record<string, unknown>,
+    /**
+     * ログイン・登録のレート制限をリセットする関数。ip を指定すればそのIPの枠だけ、
+     * 省略すれば全IPの枠を消す。呼び出し元（main.ts）で AuthApi が無い（kv 未設定）
+     * ときは null を渡す。
+     */
+    private readonly resetLimits: ((ip?: string) => ResetLimitsResult) | null = null,
   ) {}
 
   /** このパスを担当するなら Response を返す。担当外なら null */
-  handle(req: Request, url: URL): Response | null {
-    if (url.pathname !== DEBUG_EVENTS_PATH && url.pathname !== DEBUG_SUMMARY_PATH) {
+  async handle(req: Request, url: URL): Promise<Response | null> {
+    if (
+      url.pathname !== DEBUG_EVENTS_PATH &&
+      url.pathname !== DEBUG_SUMMARY_PATH &&
+      url.pathname !== DEBUG_RESET_LIMITS_PATH
+    ) {
       return null;
     }
     if (!hasValidDebugToken(req, this.token)) {
       return notFound();
+    }
+    if (url.pathname === DEBUG_RESET_LIMITS_PATH) {
+      return await this.#handleResetLimits(req);
     }
     if (req.method !== "GET") {
       return new Response("method not allowed", { status: 405, headers: { allow: "GET" } });
@@ -245,6 +287,70 @@ export class DebugApi {
       return jsonNoStore({ events });
     }
     return jsonNoStore(this.buildSummary());
+  }
+
+  /**
+   * POST /api/debug/reset-limits の実処理。
+   * トークン検証は呼び出し元の handle() で済んでいる前提（ここでは行わない）。
+   *
+   * - GET 等は 405（405 にした理由は他の /api/debug/* エンドポイントや main.ts の
+   *   /api/ice・/api/rooms 等と同じ「method not allowed」の流儀に合わせるため。
+   *   404 は「トークン不一致・未設定でパスの存在自体を隠す」用途に限定している）
+   * - Origin 不一致は 403（§3.8 CSRF対策。main.ts の /api/ 入口と同じ扱い）
+   * - 実行したことは必ず DebugRecorder に記録する（誰かが勝手に消したのか
+   *   分からなくならないため。detail に対象と消した件数を入れる）
+   */
+  async #handleResetLimits(req: Request): Promise<Response> {
+    if (req.method !== "POST") {
+      return new Response("method not allowed", { status: 405, headers: { allow: "POST" } });
+    }
+    if (!isAllowedOrigin(req)) {
+      this.recorder.record(
+        "origin.rejected",
+        "デバッグ操作を拒否: Origin がこのサーバーと一致しません",
+        { path: DEBUG_RESET_LIMITS_PATH, origin: req.headers.get("origin") ?? "" },
+      );
+      return new Response("forbidden origin", { status: 403 });
+    }
+    if (this.resetLimits === null) {
+      return jsonNoStore({ error: "auth not configured" }, { status: 501 });
+    }
+
+    let ip: string | undefined;
+    const rawBody = await req.text();
+    if (rawBody.length > 0) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(rawBody);
+      } catch {
+        return jsonNoStore({ error: "リクエストの形式が正しくありません" }, { status: 400 });
+      }
+      const value = (parsed ?? {}) as { ip?: unknown };
+      if (value.ip !== undefined) {
+        if (typeof value.ip !== "string" || value.ip.length === 0) {
+          return jsonNoStore({ error: "ip は空でない文字列で指定してください" }, {
+            status: 400,
+          });
+        }
+        ip = value.ip;
+      }
+    }
+
+    const cleared = this.resetLimits(ip);
+    const scope: "ip" | "all" = ip !== undefined ? "ip" : "all";
+    this.recorder.record(
+      "debug.resetLimits",
+      scope === "ip"
+        ? `デバッグ操作: IP ${ip} のレート制限をリセットしました（login:${cleared.login}件, register:${cleared.register}件）`
+        : `デバッグ操作: 全IPのレート制限をリセットしました（login:${cleared.login}件, register:${cleared.register}件）`,
+      {
+        scope,
+        ip: ip ?? "",
+        clearedLogin: cleared.login,
+        clearedRegister: cleared.register,
+      },
+    );
+    return jsonNoStore({ cleared, scope });
   }
 
   /**

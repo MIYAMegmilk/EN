@@ -381,3 +381,291 @@ Deno.test("kindクエリの前方一致フィルタがAPI越しにも効く", as
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// POST /api/debug/reset-limits
+// （§ 中間レビュー指摘「ログイン試行回数の消去？」対応。開発中にレート制限で詰まった
+//   とき、待たずに解除できるようにする）
+// ---------------------------------------------------------------------------
+
+Deno.test("reset-limits: EN_DEBUG_TOKEN未設定なら404", async () => {
+  await withDebugToken(undefined, async () => {
+    const kv = await Deno.openKv(":memory:");
+    const server = startServer(0, "127.0.0.1", kv);
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/debug/reset-limits`, {
+        method: "POST",
+      });
+      assertEquals(res.status, 404);
+    } finally {
+      await server.shutdown();
+      kv.close();
+    }
+  });
+});
+
+Deno.test("reset-limits: x-debug-tokenが不一致でも404", async () => {
+  await withDebugToken("the-correct-token", async () => {
+    const kv = await Deno.openKv(":memory:");
+    const server = startServer(0, "127.0.0.1", kv);
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/debug/reset-limits`, {
+        method: "POST",
+        headers: { [DEBUG_TOKEN_HEADER]: "the-wrong-token" },
+      });
+      assertEquals(res.status, 404);
+    } finally {
+      await server.shutdown();
+      kv.close();
+    }
+  });
+});
+
+Deno.test(
+  "reset-limits: トークンが正しくてもGETでは実行されない（405・Allow: POST。誤って踏んだ" +
+    "リンクやプリフェッチで消えないようにするため必ずPOST限定にしている）",
+  async () => {
+    await withDebugToken("the-correct-token", async () => {
+      const kv = await Deno.openKv(":memory:");
+      const server = startServer(0, "127.0.0.1", kv);
+      try {
+        const res = await fetch(`http://127.0.0.1:${server.port}/api/debug/reset-limits`, {
+          method: "GET",
+          headers: { [DEBUG_TOKEN_HEADER]: "the-correct-token" },
+        });
+        assertEquals(res.status, 405);
+        assertEquals(res.headers.get("allow"), "POST");
+      } finally {
+        await server.shutdown();
+        kv.close();
+      }
+    });
+  },
+);
+
+Deno.test("reset-limits: Originがこのサーバーと異なると403（§3.8 CSRF対策）", async () => {
+  await withDebugToken("the-correct-token", async () => {
+    const kv = await Deno.openKv(":memory:");
+    const server = startServer(0, "127.0.0.1", kv);
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/debug/reset-limits`, {
+        method: "POST",
+        headers: {
+          [DEBUG_TOKEN_HEADER]: "the-correct-token",
+          "content-type": "application/json",
+          origin: "http://evil.example",
+        },
+        body: JSON.stringify({}),
+      });
+      assertEquals(res.status, 403);
+    } finally {
+      await server.shutdown();
+      kv.close();
+    }
+  });
+});
+
+Deno.test(
+  "reset-limits: ログインを5回失敗させて429になったあと、リセットすると再びログインできる（本題）",
+  async () => {
+    await withDebugToken("the-correct-token", async () => {
+      const kv = await Deno.openKv(":memory:");
+      const server = startServer(0, "127.0.0.1", kv);
+      try {
+        const base = `http://127.0.0.1:${server.port}`;
+        const userId = randomUserId();
+        await fetch(`${base}/api/auth/register`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ userId, password: "correcthorse" }),
+        });
+
+        // ログインのレート制限（5回/分）を実際に使い切る
+        for (let i = 0; i < 5; i++) {
+          const res = await fetch(`${base}/api/auth/login`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ userId, password: "wrongpassword" }),
+          });
+          assertEquals(res.status, 401);
+        }
+        const limited = await fetch(`${base}/api/auth/login`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ userId, password: "correcthorse" }),
+        });
+        assertEquals(limited.status, 429, "枠を使い切って429になっていること（前提）");
+
+        // リセットを実行する（全IP対象、本文省略）
+        const resetRes = await fetch(`${base}/api/debug/reset-limits`, {
+          method: "POST",
+          headers: { [DEBUG_TOKEN_HEADER]: "the-correct-token" },
+        });
+        assertEquals(resetRes.status, 200);
+        const resetBody = await resetRes.json();
+        assertEquals(resetBody.scope, "all");
+        assert(resetBody.cleared.login >= 1, "少なくとも今使った枠が消えていること");
+
+        // 再びログインできる（正しいパスワードで200）
+        const afterReset = await fetch(`${base}/api/auth/login`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ userId, password: "correcthorse" }),
+        });
+        assertEquals(afterReset.status, 200, "リセット後は再びログインできること");
+      } finally {
+        await server.shutdown();
+        kv.close();
+      }
+    });
+  },
+);
+
+Deno.test(
+  "reset-limits: 登録の上限（3件/時）まで使ったあと、リセットで登録が復活する",
+  async () => {
+    await withDebugToken("the-correct-token", async () => {
+      const kv = await Deno.openKv(":memory:");
+      const server = startServer(0, "127.0.0.1", kv);
+      try {
+        const base = `http://127.0.0.1:${server.port}`;
+
+        for (let i = 0; i < 3; i++) {
+          const res = await fetch(`${base}/api/auth/register`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ userId: randomUserId(), password: "correcthorse" }),
+          });
+          assertEquals(res.status, 200);
+        }
+        const limited = await fetch(`${base}/api/auth/register`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ userId: randomUserId(), password: "correcthorse" }),
+        });
+        assertEquals(limited.status, 429, "枠を使い切って429になっていること（前提）");
+
+        const resetRes = await fetch(`${base}/api/debug/reset-limits`, {
+          method: "POST",
+          headers: { [DEBUG_TOKEN_HEADER]: "the-correct-token" },
+        });
+        assertEquals(resetRes.status, 200);
+        const resetBody = await resetRes.json();
+        assert(resetBody.cleared.register >= 1);
+
+        const afterReset = await fetch(`${base}/api/auth/register`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ userId: randomUserId(), password: "correcthorse" }),
+        });
+        assertEquals(afterReset.status, 200, "リセット後は再び登録できること");
+      } finally {
+        await server.shutdown();
+        kv.close();
+      }
+    });
+  },
+);
+
+Deno.test(
+  "reset-limits: IPを指定したときは、指定していないIPの枠は消えない",
+  async () => {
+    await withDebugToken("the-correct-token", async () => {
+      const kv = await Deno.openKv(":memory:");
+      const server = startServer(0, "127.0.0.1", kv);
+      try {
+        const base = `http://127.0.0.1:${server.port}`;
+        const targetIp = "203.0.113.10";
+        const otherIp = "203.0.113.20";
+
+        // 両方のIPでログインのレート制限を使い切る（5回/分）
+        for (const ip of [targetIp, otherIp]) {
+          for (let i = 0; i < 5; i++) {
+            const res = await fetch(`${base}/api/auth/login`, {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                "x-forwarded-for": ip,
+              },
+              body: JSON.stringify({ userId: "nosuchuser", password: "wrongpassword" }),
+            });
+            assertEquals(res.status, 401);
+          }
+          const limited = await fetch(`${base}/api/auth/login`, {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-forwarded-for": ip },
+            body: JSON.stringify({ userId: "nosuchuser", password: "wrongpassword" }),
+          });
+          assertEquals(limited.status, 429, `${ip} の枠が使い切られていること（前提）`);
+        }
+
+        // targetIp の枠だけリセットする
+        const resetRes = await fetch(`${base}/api/debug/reset-limits`, {
+          method: "POST",
+          headers: {
+            [DEBUG_TOKEN_HEADER]: "the-correct-token",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ ip: targetIp }),
+        });
+        assertEquals(resetRes.status, 200);
+        const resetBody = await resetRes.json();
+        assertEquals(resetBody.scope, "ip");
+        assertEquals(resetBody.cleared.login, 1);
+
+        // targetIp は復活している
+        const targetAfter = await fetch(`${base}/api/auth/login`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-forwarded-for": targetIp },
+          body: JSON.stringify({ userId: "nosuchuser", password: "wrongpassword" }),
+        });
+        assertEquals(targetAfter.status, 401, "targetIp はリセットされ、429ではないこと");
+
+        // otherIp は消えたままなので依然として429
+        const otherAfter = await fetch(`${base}/api/auth/login`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-forwarded-for": otherIp },
+          body: JSON.stringify({ userId: "nosuchuser", password: "wrongpassword" }),
+        });
+        assertEquals(otherAfter.status, 429, "otherIp の枠は消えていないこと");
+      } finally {
+        await server.shutdown();
+        kv.close();
+      }
+    });
+  },
+);
+
+Deno.test("reset-limits: 実行するとdebug.resetLimitsとして記録される", async () => {
+  await withDebugToken("the-correct-token", async () => {
+    const kv = await Deno.openKv(":memory:");
+    const server = startServer(0, "127.0.0.1", kv);
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      const resetRes = await fetch(`${base}/api/debug/reset-limits`, {
+        method: "POST",
+        headers: {
+          [DEBUG_TOKEN_HEADER]: "the-correct-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ ip: "198.51.100.1" }),
+      });
+      assertEquals(resetRes.status, 200);
+
+      const eventsRes = await fetch(`${base}/api/debug/events?kind=debug.resetLimits`, {
+        headers: { [DEBUG_TOKEN_HEADER]: "the-correct-token" },
+      });
+      // deno-lint-ignore no-explicit-any
+      const { events } = await eventsRes.json() as { events: any[] };
+      assertEquals(events.length, 1);
+      assertEquals(events[0].kind, "debug.resetLimits");
+      assertEquals(events[0].detail.scope, "ip");
+      assertEquals(events[0].detail.ip, "198.51.100.1");
+      assertEquals(typeof events[0].detail.clearedLogin, "number");
+      assertEquals(typeof events[0].detail.clearedRegister, "number");
+    } finally {
+      await server.shutdown();
+      kv.close();
+    }
+  });
+});

@@ -12,7 +12,12 @@
  *     → { events: [{ seq, at, kind, message, detail }] }
  *   GET /api/debug/summary               ヘッダ x-debug-token
  *     → { uptimeMs, serverTime, roomCount, rooms: [{ code, playerCount, phase, sandbox }] }
+ *   POST /api/debug/reset-limits         ヘッダ x-debug-token
+ *     本文（省略可）: { ip?: string }（省略・空欄なら全IP対象）
+ *     → { cleared: { login, register }, scope: "ip" | "all" }
  *   トークン未設定・不一致は 404（デバッグ機能の存在を隠すための仕様。401ではない）。
+ *   reset-limits は開発中にログイン・登録のレート制限で詰まったとき、待たずに解除する
+ *   ための操作。誤爆防止のため実行前に confirm() を挟む（このJS側のガード）。
  */
 
 "use strict";
@@ -38,6 +43,12 @@
     dashboard: $("dashboard"),
     summaryBody: $("summary-body"),
     roomsTable: $("rooms-table"),
+
+    resetLimitsForm: $("reset-limits-form"),
+    resetLimitsIp: $("reset-limits-ip"),
+    resetLimitsSubmit: $("reset-limits-submit"),
+    resetLimitsResult: $("reset-limits-result"),
+    resetLimitsError: $("reset-limits-error"),
 
     filterLogin: $("filter-login"),
     refreshNow: $("refresh-now"),
@@ -168,6 +179,37 @@
     params.set("limit", String(EVENTS_LIMIT));
     if (kindFilter) params.set("kind", kindFilter);
     return callDebugApi(`/api/debug/events?${params.toString()}`, token);
+  }
+
+  /** POST 系のデバッグ API を呼ぶ。ネットワークエラーも例外を投げずに返す */
+  async function postDebugApi(path, token, body) {
+    let res;
+    try {
+      res = await fetch(path, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "x-debug-token": token,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body ?? {}),
+      });
+    } catch {
+      return { ok: false, status: 0, body: null, networkError: true };
+    }
+    let resBody = null;
+    try {
+      resBody = await res.json();
+    } catch {
+      resBody = null;
+    }
+    return { ok: res.ok, status: res.status, body: resBody, networkError: false };
+  }
+
+  /** ip を省略（undefined）すると全IP対象、指定するとそのIPだけを対象にする */
+  function resetLimits(token, ip) {
+    const body = ip ? { ip } : {};
+    return postDebugApi("/api/debug/reset-limits", token, body);
   }
 
   // ── 描画: サーバーの状況 ─────────────────────────────────
@@ -441,6 +483,45 @@
 
   els.filterLogin.addEventListener("click", () => {
     applyKindFilter("login.");
+  });
+
+  els.resetLimitsForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!state.token) return;
+
+    const ip = els.resetLimitsIp.value.trim();
+    const confirmMessage = ip
+      ? `IP ${ip} のログイン・登録のレート制限を解除します。よろしいですか？`
+      : "すべてのIPのログイン・登録のレート制限を解除します。よろしいですか？";
+    if (!confirm(confirmMessage)) return;
+
+    els.resetLimitsError.textContent = "";
+    els.resetLimitsResult.textContent = "";
+    els.resetLimitsSubmit.disabled = true;
+    try {
+      const res = await resetLimits(state.token, ip || undefined);
+      if (res.status === 404) {
+        sessionStorage.removeItem(STORAGE_KEY);
+        state.token = null;
+        showGate("無効か、トークンが違います");
+        return;
+      }
+      if (!res.ok || res.body === null) {
+        els.resetLimitsError.textContent =
+          "解除に失敗しました。しばらくして再度お試しください。";
+        return;
+      }
+      const cleared = res.body.cleared || {};
+      const scopeLabel = res.body.scope === "ip" ? `IP ${ip}` : "全IP";
+      els.resetLimitsResult.textContent =
+        `${scopeLabel} を解除しました（ログイン: ${cleared.login ?? 0}件, 登録: ${
+          cleared.register ?? 0
+        }件）`;
+      // 出来事の一覧を再読み込みする（この操作自体も debug.resetLimits として記録される）
+      await refreshAll();
+    } finally {
+      els.resetLimitsSubmit.disabled = false;
+    }
   });
 
   // ── 初期化 ─────────────────────────────────────────
