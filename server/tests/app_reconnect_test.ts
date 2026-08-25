@@ -176,6 +176,12 @@ async function load(): Promise<Harness> {
         peers: [],
         quality: null,
       }),
+      // 入店した時点で VC にも参加する（autoJoinVc）。戻り値を then で待つので
+      // Promise を返させる。ここでは繋がらなかった体（false）でよい
+      join: () => {
+        calls.push("VC.join");
+        return Promise.resolve(false);
+      },
       // 実物は畳んだら active が false になる（vc_teardown_test.ts で検証済み）
       teardown: () => {
         calls.push("VC.teardown");
@@ -184,8 +190,10 @@ async function load(): Promise<Harness> {
     }),
     stubModule("Voice", calls, { getState: () => ({ enabled: false }), isSupported: () => false }),
     stubModule("Chat", calls),
-    stubModule("Bot", calls, { getState: () => ({ bots: {} }) }),
-    stubModule("Sandbox", calls),
+    // renderVcBotTiles が isHost と bots を読む。トグルの可否に使う
+    stubModule("Bot", calls, { getState: () => ({ bots: {}, isHost: false }) }),
+    // 品書きは公式ゲームと余興を1つに並べる。余興の一覧はここから引く
+    stubModule("Sandbox", calls, { getGames: () => [] }),
   ) as App;
 
   // start() は fetch を await してから connect() する。その解決を待つ
