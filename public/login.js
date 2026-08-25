@@ -8,6 +8,8 @@
 
 "use strict";
 
+import { playNorenIntro } from "./noren-scene.js";
+
 function $(id) {
   return document.getElementById(id);
 }
@@ -36,11 +38,39 @@ function setControlsDisabled(disabled) {
   }
 }
 
-function playEnterAnimation() {
+async function playEnterAnimation() {
   setControlsDisabled(true);
   document.body.classList.add("entering");
-  return new Promise((resolve) => setTimeout(resolve, ENTER_ANIMATION_MS));
+
+  const stage = $("noren-stage");
+  let played3d = false;
+  try {
+    played3d = await playNorenIntro(stage);
+  } catch (err) {
+    // deno-lint-ignore no-console
+    console.error("noren 3d intro failed, falling back to CSS animation", err);
+  }
+
+  if (!played3d) {
+    // WebGL非対応 or 読み込み失敗時は、既存のCSSキーフレーム演出に任せる
+    await new Promise((resolve) => setTimeout(resolve, ENTER_ANIMATION_MS));
+  }
+
+  // 暗転してから遷移する(3D/CSSどちらの場合も同じ見せ方に揃える)
+  document.body.classList.add("cover");
+  await new Promise((resolve) => setTimeout(resolve, 350));
 }
+
+function showPanel(panelId) {
+  $("login-panel").hidden = panelId !== "login-panel";
+  $("register-panel").hidden = panelId !== "register-panel";
+  $("login-error").textContent = "";
+  $("register-error").textContent = "";
+  $("status").textContent = "";
+}
+
+$("show-register").addEventListener("click", () => showPanel("register-panel"));
+$("show-login").addEventListener("click", () => showPanel("login-panel"));
 
 function showLoginError(message) {
   $("login-error").textContent = message;
