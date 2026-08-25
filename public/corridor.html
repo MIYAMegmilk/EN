@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>宴 -EN- 廊下</title>
+    <link rel="stylesheet" href="./assets/en.css" />
+    <style>
+      /*
+       * 廊下ビューの確認用ページ。卓が何百あっても同じ区画を使い回して歩ける、
+       * という見せ方だけを切り出してある。index.html には手を入れていない。
+       */
+      body {
+        min-height: 100vh;
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .corridor-bar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        padding: 10px 16px;
+        background: linear-gradient(180deg, var(--panel-3), var(--panel));
+        border-bottom: 1px solid var(--line);
+      }
+
+      .corridor-bar h1 {
+        margin: 0;
+        font-size: 16px;
+        color: var(--gold);
+      }
+
+      .corridor-stage {
+        position: relative;
+        flex: 1;
+        min-height: 0;
+        background: var(--ink);
+      }
+
+      /* 画面中央の印。ここに来た扉が「いま見ている卓」になる */
+      .corridor-aim {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 18px;
+        height: 18px;
+        margin: -9px 0 0 -9px;
+        border: 1px solid rgba(230, 166, 63, 0.55);
+        border-radius: 50%;
+        pointer-events: none;
+      }
+
+      /*
+       * いま見ている卓を文字でも出す。3D の canvas は読み上げられないので、
+       * 一覧カードと同じ情報がここに必ず出るようにしておく。
+       */
+      .corridor-focus {
+        position: absolute;
+        left: 16px;
+        bottom: 16px;
+        max-width: min(340px, calc(100% - 32px));
+        padding: 12px 14px;
+        background: rgba(22, 16, 10, 0.88);
+        border: 1px solid var(--line);
+        border-radius: var(--r-lg);
+      }
+
+      .corridor-focus h2 {
+        margin: 0 0 4px;
+        font-size: 17px;
+      }
+
+      .corridor-focus p {
+        margin: 0;
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .corridor-hint {
+        margin-left: auto;
+        font-size: 12px;
+        color: var(--dim);
+      }
+
+      .corridor-error {
+        padding: 24px;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="corridor-bar">
+      <h1>今夜、灯りのついている卓</h1>
+      <button id="left" class="btn" type="button">左を向く</button>
+      <button id="back" class="btn" type="button">下がる</button>
+      <button id="fwd" class="btn" type="button">進む</button>
+      <button id="right" class="btn" type="button">右を向く</button>
+      <button id="enter" class="btn btn-gold" type="button" disabled>この卓に入る</button>
+      <span id="count" class="corridor-hint"></span>
+    </div>
+
+    <div id="stage" class="corridor-stage">
+      <div class="corridor-aim" aria-hidden="true"></div>
+      <div class="corridor-focus">
+        <h2 id="focus-name">—</h2>
+        <p id="focus-meta" aria-live="polite">通りかかった扉の札がここに出ます</p>
+      </div>
+    </div>
+
+    <p id="error" class="corridor-error hidden"></p>
+
+    <script type="module" src="./corridor.js"></script>
+  </body>
+</html>
