@@ -24,7 +24,13 @@ import {
   DebugApi,
   DebugRecorder,
 } from "./debug.ts";
-import { type ClientLink, RoomManager, validateRoomDescription } from "./rooms.ts";
+import {
+  type ClientLink,
+  RoomManager,
+  SHUTDOWN_CLOSE_CODE,
+  SHUTDOWN_CLOSE_REASON,
+  validateRoomDescription,
+} from "./rooms.ts";
 import { isValidRoomTagId, ROOM_TAGS, type RoomTagId } from "./room_tags.ts";
 import { createSenryuDetector } from "./senryu.ts";
 import { charLength, hasControlChar } from "./validation.ts";
@@ -163,9 +169,15 @@ class SocketLink implements ClientLink {
     this.socket.send(JSON.stringify(msg));
   }
 
-  close(): void {
+  /**
+   * 接続を閉じる。既定は 1000（正常終了・退室やキック）。
+   * サーバー停止時だけ rooms.ts の dispose() が 1001（going away）を渡してくる
+   */
+  close(code = 1000, reason = "closed by server"): void {
+    // 閉じ済み・閉じかけのソケットに close() を呼ぶと例外になり得るので触らない
     if (this.socket.readyState === WebSocket.CLOSED) return;
-    this.socket.close(1000, "closed by server");
+    if (this.socket.readyState === WebSocket.CLOSING) return;
+    this.socket.close(code, reason);
   }
 }
 
@@ -245,12 +257,19 @@ export function clientIp(req: Request, remoteAddrHostname: string): string {
   return first !== undefined && first.length > 0 ? first : remoteAddrHostname;
 }
 
-/** WebSocket へアップグレードして RoomManager につなぐ */
+/**
+ * WebSocket へアップグレードして RoomManager につなぐ。
+ * live には生きている接続を登録する。RoomManager が把握しているのはルームに入った接続
+ * だけで、ロビーで待っている接続（app.js はページを開いた直後に繋ぎに来るので、
+ * 実際にはこちらの方が多い）は含まれない。停止時にどのコードで閉じるかを Deno.serve の
+ * shutdown() 任せにせず、自分たちで 1001 を明示するためにここで持つ
+ */
 async function handleWebSocket(
   req: Request,
   manager: RoomManager,
   kv: Deno.Kv | null,
   debug: DebugRecorder,
+  live: Set<ClientLink>,
 ): Promise<Response> {
   if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
     return new Response("expected websocket upgrade", { status: 400 });
@@ -267,6 +286,7 @@ async function handleWebSocket(
   const userId = kv !== null ? await verifySession(kv, token) : null;
   const { socket, response } = Deno.upgradeWebSocket(req);
   const link = new SocketLink(socket, userId);
+  live.add(link);
   // レート制限は「1接続あたり」の規定（§3.8）だが、用途で枠を分ける。VC のシグナリング
   // （§3.6）はフルメッシュの trickle ICE が短時間に集中するため、一般枠（20件/秒）では
   // 正当な利用者を切断してしまう。rtcSignal だけは別枠（100件/秒）で数える。
@@ -413,8 +433,14 @@ async function handleWebSocket(
     }
     manager.handle(link, msg);
   };
-  socket.onclose = () => manager.disconnect(link);
-  socket.onerror = () => manager.disconnect(link);
+  socket.onclose = () => {
+    live.delete(link);
+    manager.disconnect(link);
+  };
+  socket.onerror = () => {
+    live.delete(link);
+    manager.disconnect(link);
+  };
   return response;
 }
 
@@ -782,6 +808,8 @@ export function startServer(
   const debugEnabled = debugToken !== "";
   const debug = new DebugRecorder(debugEnabled);
   const startedAt = Date.now();
+  // 生きている WebSocket 接続。停止時に 1001 で閉じるために持つ（handleWebSocket 参照）
+  const liveLinks = new Set<ClientLink>();
   const auth = kv !== undefined ? new AuthApi(kv, debug) : null;
   const debugApi = new DebugApi(
     debugEnabled ? debugToken : null,
@@ -791,7 +819,9 @@ export function startServer(
   );
   const server = Deno.serve({ port, hostname, onListen: () => {} }, async (req, info) => {
     const url = new URL(req.url);
-    if (url.pathname === "/ws") return await handleWebSocket(req, manager, kv ?? null, debug);
+    if (url.pathname === "/ws") {
+      return await handleWebSocket(req, manager, kv ?? null, debug, liveLinks);
+    }
     if (url.pathname === "/api/ice") {
       if (req.method !== "GET") {
         return new Response("method not allowed", { status: 405, headers: { allow: "GET" } });
@@ -916,11 +946,112 @@ export function startServer(
     port: (server.addr as Deno.NetAddr).port,
     manager,
     shutdown: async () => {
+      // ルームに入っている接続はここで 1001 で閉じられる（rooms.ts の dispose 参照）
       manager.dispose();
+      // ロビーで待っているだけの接続は RoomManager が知らないので、ここで閉じる。
+      // server.shutdown() も接続を閉じるが、そのクローズコードは Deno の実装依存なので、
+      // クライアントの再接続判断（app.js）が頼る 1001 は自分たちで送る
+      for (const link of liveLinks) {
+        try {
+          link.close(SHUTDOWN_CLOSE_CODE, SHUTDOWN_CLOSE_REASON);
+        } catch {
+          // 1本の失敗で残りの切断を止めない
+        }
+      }
+      liveLinks.clear();
       auth?.dispose();
       await server.shutdown();
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// 終了処理（SIGTERM / SIGINT）
+// ---------------------------------------------------------------------------
+
+/**
+ * 後始末が終わるのを待つ上限。これを過ぎたら諦めて終了する。
+ * 「終了しないサービス」は systemd に SIGKILL される分だけ強制終了より悪いので、
+ * 必ず自力で終わる保険を置く
+ */
+export const SHUTDOWN_TIMEOUT_MS = 5_000;
+
+/** createShutdownHandler の差し替え口（テスト用） */
+export type ShutdownHandlerOptions = {
+  /** 後始末の本体。startServer が返す handle.shutdown を渡す */
+  shutdown: () => Promise<void>;
+  /** プロセスを終了する。テストでは呼ばれたことだけ記録する */
+  exit?: (code: number) => void;
+  /** ログ出力 */
+  log?: (message: string) => void;
+  /** 保険のタイムアウト（ms） */
+  timeoutMs?: number;
+};
+
+/**
+ * 終了シグナルを受けたときの処理を作る。
+ *
+ * シグナルの購読そのものは OS 依存で自動テストしづらいため、ハンドラの「中身」だけを
+ * ここに切り出し、返した関数を直接呼んでテストできるようにしている。
+ *
+ * ここで終了コードを 0 にすることが本題。シグナルをハンドルしないと Deno は
+ * SIGTERM の既定動作で死に、systemd には status=143（128+15）＝失敗として記録される
+ */
+export function createShutdownHandler(
+  options: ShutdownHandlerOptions,
+): (signal: string) => Promise<void> {
+  const exit = options.exit ?? ((code: number) => Deno.exit(code));
+  const log = options.log ?? ((message: string) => console.log(message));
+  const timeoutMs = options.timeoutMs ?? SHUTDOWN_TIMEOUT_MS;
+  // 連続してシグナルが来ても後始末は1回だけ走らせる
+  let started = false;
+  return async (signal: string) => {
+    if (started) return;
+    started = true;
+    log(`${signal} を受け取りました。接続を閉じて終了します`);
+    // 後始末がハングしても必ず終わるようにする。
+    // unref しておくのは、正常に終わるときにこのタイマーがプロセスを引き止めないため
+    const guard = setTimeout(() => {
+      log(`後始末が ${timeoutMs}ms で終わらないため強制終了します`);
+      exit(0);
+    }, timeoutMs);
+    Deno.unrefTimer(guard);
+    try {
+      await options.shutdown();
+    } catch (err) {
+      // 後始末で転んでも終了はする。ここで止まると再起動が完了しない
+      log(`後始末でエラーが出ましたが終了します: ${err}`);
+    }
+    clearTimeout(guard);
+    exit(0);
+  };
+}
+
+/**
+ * 終了シグナルを購読し、実際に購読できたものを返す。
+ *
+ * Windows では SIGTERM を購読できず、Deno.addSignalListener("SIGTERM", ...) は例外を
+ * 投げる（Windows がサポートするのは SIGINT と SIGBREAK）。開発機が Windows なので、
+ * ここで例外が漏れると deno task dev が起動しなくなる。OS で購読する集合を分けたうえで、
+ * 将来の Deno / OS の差異でも落ちないよう try/catch でも受け止める
+ */
+export function listenShutdownSignals(
+  handler: (signal: string) => void,
+  addListener: (signal: Deno.Signal, fn: () => void) => void = Deno.addSignalListener,
+  os: string = Deno.build.os,
+): Deno.Signal[] {
+  const wanted: Deno.Signal[] = os === "windows" ? ["SIGINT", "SIGBREAK"] : ["SIGTERM", "SIGINT"];
+  const registered: Deno.Signal[] = [];
+  for (const signal of wanted) {
+    try {
+      addListener(signal, () => handler(signal));
+      registered.push(signal);
+    } catch (err) {
+      // 購読できないシグナルがあっても起動そのものは続ける（購読できた分だけで動く）
+      console.error(`シグナル ${signal} を購読できませんでした: ${err}`);
+    }
+  }
+  return registered;
 }
 
 if (import.meta.main) {
@@ -938,4 +1069,17 @@ if (import.meta.main) {
       ? `senryu: 初回の発言で kuromoji の辞書を読み込みます（常駐 +220〜330MB。${KUROMOJI_ENV}=0 で無効化）`
       : `senryu: かなのみで判定します。漢字混じりの句は拾いません（${KUROMOJI_ENV}）`,
   );
+  // systemd の restart で毎回 status=143（SIGTERM で強制終了）にならないよう、
+  // シグナルを受けて自分で片付けてから終了コード 0 で終わる
+  listenShutdownSignals(createShutdownHandler({
+    shutdown: async () => {
+      await handle.shutdown();
+      // KV はここ（import.meta.main）で開いたので、閉じるのもここの責任
+      try {
+        kv.close();
+      } catch {
+        // 既に閉じていても終了は続ける
+      }
+    },
+  }));
 }
