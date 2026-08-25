@@ -7,17 +7,81 @@
     <link rel="stylesheet" href="./assets/en.css" />
     <style>
       /*
-       * 要素の ID とクラス名は app.js / vc.js / chat.js が参照しているため変えない。
-       * 表示の出し分けは .hidden（en.css）で行う。ID セレクタに display を書くと
-       * .hidden より詳細度が勝ってしまうので、ここでも display は書かない。
+       * 要素の ID とクラス名は app.js / vc.js / chat.js / bot.js / sandbox.js が
+       * 参照しているため変えない。表示の出し分けは .hidden（en.css）で行う。
+       * .hidden は !important 付きなので、ID セレクタに display を書いても勝てる。
+       *
+       * この画面はビューポートに収める。ページ全体はスクロールさせず、
+       * 溢れたものは各パネルの内側（#players / #vc-media / #chat-log …）で流す。
        */
-      main {
-        max-width: 1200px;
-        margin: 0 auto;
-        padding: 22px 22px 60px;
+      /*
+       * 画面全体の下敷き。店内写真（assets/izakaya.jpg）を1枚敷き、
+       * 上から暗幕のグラデーションを重ねて薄くする。
+       * position: fixed の擬似要素にしているのは、background-attachment: fixed が
+       * iOS Safari で拡大・ちらつきを起こすため。z-index: -1 で本文の下に沈める。
+       * url() は index.html からの相対パスで解決される。
+       */
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: -1;
+        pointer-events: none;
+        background-image:
+          linear-gradient(180deg, rgba(16, 11, 7, 0.78), rgba(16, 11, 7, 0.88)),
+          url("./assets/izakaya.jpg");
+        background-size: cover;
+        background-position: center;
+        background-repeat: no-repeat;
+      }
+
+      /*
+       * 下敷きがうっすら透ける程度に薄くする。透かしすぎると提灯の明かりが
+       * 札の裏で光ってしまい、卓名が読みづらくなるので 0.93〜0.96 に留める。
+       */
+      .appbar {
+        flex: none;
+        padding: 9px 18px;
+        gap: 16px;
+        background: rgba(22, 16, 10, 0.82);
+        backdrop-filter: blur(6px);
+      }
+
+      .home-bar {
+        background: linear-gradient(180deg, rgba(43, 32, 22, 0.93), rgba(36, 26, 17, 0.96));
+      }
+
+      /*
+       * 画面の骨組み。上に細い帯（.appbar）、残り全部が main。
+       * 100dvh は iOS のアドレスバー伸縮に追従させるため（100vh だと
+       * 隠れた分だけ下が切れる）。html/body の height: 100% は
+       * dvh を解さない環境向けの控え。
+       */
+      html,
+      body {
+        height: 100%;
+      }
+
+      body {
+        height: 100dvh;
+        overflow: hidden;
         display: flex;
         flex-direction: column;
-        gap: 18px;
+      }
+
+      main {
+        flex: 1;
+        min-height: 0;
+        width: 100%;
+        padding: 12px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      /* エラーは中身が空なら場所を取らない（en.css の .alert:empty） */
+      #error {
+        flex: none;
       }
 
       /* ── ヘッダー ── */
@@ -46,10 +110,22 @@
       }
 
       /* ── 入店前（ホーム＝お座敷一覧） ── */
+      /*
+       * 卓の数は読めないので、ここだけは中で流す（ページは動かさない）。
+       * 帯いっぱいに広げず 1200px で止めて、札が間延びしないようにする。
+       */
       .home {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
         display: flex;
         flex-direction: column;
         gap: 18px;
+        width: 100%;
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 8px 8px 28px;
       }
 
       .home-bar {
@@ -148,18 +224,21 @@
         grid-column: 1 / -1;
         margin: 0;
         padding: 40px 20px;
+        background: rgba(16, 11, 7, 0.62);
         text-align: center;
         font-size: 13px;
-        color: var(--dim);
+        color: var(--muted);
         border: 1px dashed var(--line);
         border-radius: var(--r-lg);
       }
 
+      /* 下敷きの写真がうっすら透けるよう、卓の札だけ .card より薄い地にする */
       .room {
         display: flex;
         flex-direction: column;
         padding: 16px 18px 0;
         overflow: hidden;
+        background: linear-gradient(180deg, rgba(43, 32, 22, 0.93), rgba(36, 26, 17, 0.96));
       }
 
       .room-head {
@@ -252,12 +331,18 @@
         white-space: nowrap;
       }
 
-      /* ── 入店後 ── */
+      /* ══ 入店後 ══════════════════════════════════════════════════
+       * 3列に組む。左＝卓の情報と進行の操作、中央＝テロップ・座興・卓上、
+       * 右＝やりとり。全体の高さはビューポートに固定し、溢れた分は
+       * 各パネルの内側（#players / #vc-media / #chat-log …）だけで流す。
+       * ページ自体は決してスクロールさせない。
+       */
       .stage {
+        flex: 1;
+        min-height: 0;
         display: grid;
-        grid-template-columns: minmax(0, 1fr) 344px;
-        gap: 18px;
-        align-items: start;
+        grid-template-columns: 236px minmax(0, 1fr) 324px;
+        gap: 12px;
       }
 
       /* 卓に着いていない間は帯ごと畳む */
@@ -265,40 +350,63 @@
         display: none;
       }
 
+      .stage-rail,
       .stage-main,
       .stage-side {
         display: flex;
         flex-direction: column;
-        gap: 18px;
+        gap: 12px;
         min-width: 0;
+        min-height: 0;
+        overflow: hidden;
       }
 
+      /* 札（パネル）の共通形 */
       .block {
-        padding: 16px 18px 18px;
+        padding: 12px 14px;
+        min-height: 0;
+      }
+
+      /*
+       * 流れる枠の見た目。既定の太い帯が出ると木目から浮くので細くする。
+       * scrollbar-* は Firefox / Chromium が解する（Safari は既定のまま）。
+       */
+      .home,
+      .stage,
+      #players,
+      #bot,
+      .stage-board,
+      #vc-media,
+      #chat-log,
+      #log {
+        scrollbar-width: thin;
+        scrollbar-color: var(--line) transparent;
       }
 
       .block > h2 {
         font-family: var(--serif);
-        font-size: 17px;
+        font-size: 15px;
         font-weight: 400;
-        margin: 0 0 12px;
+        margin: 0 0 10px;
         color: var(--cream);
+        letter-spacing: 0.06em;
       }
 
       .block-head {
         display: flex;
         align-items: center;
         flex-wrap: wrap;
-        gap: 10px;
-        margin-bottom: 14px;
+        gap: 8px;
+        margin-bottom: 10px;
       }
 
       .block-head h2 {
         font-family: var(--serif);
-        font-size: 17px;
+        font-size: 15px;
         font-weight: 400;
         margin: 0;
         color: var(--cream);
+        letter-spacing: 0.06em;
       }
 
       .row {
@@ -335,128 +443,167 @@
         background: var(--panel-3);
       }
 
-      /* 卓上（VC / カメラ）。枠は vc.js が .vc-peer として差し込む */
-      #vc-status {
-        font-size: 11.5px;
-        color: var(--muted);
+      /* ── 左レール：卓の札・呑み手・進行の操作 ──────────────────── */
+      #room {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 9px;
+      }
+
+      #room .block-head {
         margin: 0;
-        flex-basis: 100%;
-        order: 9;
       }
 
-      /* 品質劣化時の映像自動停止（§3.6）。異常ではないのでエラー表示とは別枠にする */
-      #vc-quality:empty {
-        display: none;
+      #room-code {
+        font-family: var(--serif);
+        letter-spacing: 0.22em;
+        color: var(--gold-2);
       }
 
-      #vc-quality {
-        margin: 0 0 12px;
-        padding: 9px 14px;
-        border: 1px solid var(--line);
-        border-radius: var(--r-md);
-        background: rgba(255, 255, 255, 0.02);
-        font-size: 12px;
+      #room-meta {
+        margin: 0;
+        font-size: 11.5px;
+        line-height: 1.6;
         color: var(--muted);
       }
 
-      .vc-quality-row {
-        margin-bottom: 12px;
+      /* 呑み手一覧。人が増えたらこの枠の中だけが流れる */
+      #players {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
       }
 
-      #vc-quality-mode {
-        font-size: 11.5px;
+      #players li {
+        padding: 7px 10px;
+        border: 1px solid var(--line-soft);
+        border-radius: var(--r-md);
+        background: rgba(255, 255, 255, 0.015);
+        font-size: 12.5px;
+        line-height: 1.55;
+        overflow-wrap: anywhere;
       }
 
-      /* 回復済みで再開を勧められる状態のときだけ目立たせる。
-         display は書かない（app.js が .hidden で出し分けるため） */
-      #vc-resume.vc-resume-ready {
-        border-color: var(--green);
-        color: var(--cream);
-        font-weight: 700;
+      /* レールの足元。呑み手が何人いても、この操作だけは必ず見えている */
+      .rail-foot {
+        display: flex;
+        flex-direction: column;
+        gap: 7px;
+        margin: 0 -14px -12px;
+        padding: 10px 14px 12px;
+        border-top: 1px solid var(--line-soft);
+        background: rgba(0, 0, 0, 0.18);
       }
 
-      #vc-media {
+      /* ラベルと選択欄を1行ずつ、操作ボタンを2つ横並びにする */
+      #lobby-controls {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(188px, 1fr));
-        gap: 12px;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+        margin: 0;
       }
 
-      #vc-media:empty::after {
-        content: "まだ誰も声を入れていません";
-        padding: 34px 0;
-        text-align: center;
-        font-size: 12px;
+      #lobby-controls > label {
+        grid-column: 1 / -1;
+        font-size: 11px;
+        letter-spacing: 0.14em;
         color: var(--dim);
       }
 
-      .vc-peer {
-        position: relative;
-        aspect-ratio: 4 / 3;
+      #lobby-controls .input {
+        grid-column: 1 / -1;
+        width: 100%;
+        min-width: 0;
+        flex: none;
+        padding: 7px 10px;
+        font-size: 12.5px;
+      }
+
+      .rail-foot .btn {
+        flex: 1 1 0;
+        padding: 8px 10px;
+        font-size: 12.5px;
+        white-space: nowrap;
+      }
+
+      /* 3列では右端に寄せる意味がない（レールの幅いっぱいに割る） */
+      #leave {
+        margin-left: 0;
+      }
+
+      /* ── 中央：テロップ・座興・卓上 ───────────────────────────── */
+      /* しゅんぴたちのテロップ。中央のいちばん上に細い帯で置く */
+      #bot {
+        flex: 0 0 auto;
+        min-height: 0;
+        max-height: 32%;
+        overflow-y: auto;
+        overscroll-behavior: contain;
         display: flex;
         flex-direction: column;
-        justify-content: flex-end;
-        border: 1px solid var(--line);
-        border-radius: var(--r-md);
-        background: linear-gradient(180deg, #191108, #120c07);
-        overflow: hidden;
+        gap: 8px;
+        padding: 9px 12px;
       }
 
-      /* カメラが切のあいだの下敷き。映像が来ると video が上に重なる */
-      .vc-peer::before {
-        content: "CAMERA";
-        position: absolute;
-        inset: 0;
+      /* 間は #bot の gap で取るので、部品側の余白は打ち消す */
+      #bot .bot-toggles {
+        margin-bottom: 0;
+      }
+
+      #bot .bot-poll {
+        margin-top: 0;
+      }
+
+      #bot .bot-card {
+        padding: 11px 13px;
+      }
+
+      /*
+       * 座興の面。本編・余興・順位表をこの一枠にまとめ、伸びたらここだけを流す。
+       * 座興が出ていない（＝ロビー）あいだは中身のぶんしか場所を取らないので、
+       * 余った高さはそのまま卓上（#vc）が受け取る。
+       */
+      .stage-board {
+        flex: 0 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
         display: flex;
-        align-items: center;
-        justify-content: center;
-        font-family: var(--serif);
-        font-size: 12px;
-        letter-spacing: 0.3em;
-        color: #4a3c2c;
+        flex-direction: column;
+        gap: 12px;
       }
 
-      .vc-self {
-        border-color: var(--gold-3);
-      }
-
-      .vc-video {
-        position: absolute;
-        inset: 0;
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-        background: #000;
-        z-index: 1;
-      }
-
-      .vc-video[hidden] {
-        display: none;
-      }
-
-      .vc-peer-label {
-        position: relative;
-        z-index: 2;
-        margin: 0;
-        padding: 9px 11px;
-        font-family: var(--serif);
-        font-size: 13px;
-        color: var(--cream);
-        background: linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.72));
+      .stage-board > .card {
+        flex: none;
       }
 
       /* フェーズ表示 */
       #phase-title {
         font-family: var(--serif);
-        font-size: 18px;
+        font-size: 16px;
         font-weight: 400;
-        margin: 0 0 4px;
+        margin: 0 0 3px;
         color: var(--cream);
       }
 
+      #phase-deadline:empty {
+        display: none;
+      }
+
       #phase-deadline {
-        margin: 0 0 12px;
+        margin: 0 0 10px;
         font-size: 11.5px;
         color: var(--gold-3);
+        font-variant-numeric: tabular-nums;
       }
 
       #phase-body p {
@@ -477,7 +624,7 @@
         display: flex;
         align-items: center;
         gap: 10px;
-        padding: 10px 14px;
+        padding: 9px 13px;
         border: 1px solid var(--line-soft);
         border-radius: var(--r-md);
         background: rgba(255, 255, 255, 0.015);
@@ -516,9 +663,9 @@
       /* 順位表 */
       #result-title {
         font-family: var(--serif);
-        font-size: 17px;
+        font-size: 16px;
         font-weight: 400;
-        margin: 0 0 12px;
+        margin: 0 0 8px;
         color: var(--cream);
       }
 
@@ -531,68 +678,282 @@
       }
 
       #result-list li {
-        padding: 10px 2px;
+        padding: 9px 2px;
         border-bottom: 1px solid var(--line-soft);
         font-variant-numeric: tabular-nums;
       }
 
-      /* 呑み手一覧 */
-      #room-code {
-        font-family: var(--serif);
-        letter-spacing: 0.22em;
-        color: var(--gold-2);
+      /* 余興（サンドボックス）。en.css の縦積みを、この画面用に詰める */
+      #sandbox .sandbox-head {
+        display: flex;
+        align-items: baseline;
+        flex-wrap: wrap;
+        gap: 4px 10px;
       }
 
-      #room-meta {
-        margin: 0 0 14px;
+      #sandbox .sandbox-head h2 {
+        margin: 0;
+        font-size: 15px;
+      }
+
+      #sandbox .sandbox-note {
+        margin: 0;
+      }
+
+      #sandbox .sandbox-controls {
+        margin: 9px 0 0;
+      }
+
+      #sandbox .sandbox-status:empty {
+        display: none;
+      }
+
+      #sandbox .sandbox-status {
+        margin: 7px 0 0;
+      }
+
+      #sandbox .sandbox-error {
+        margin: 7px 0 0;
+      }
+
+      #sandbox .sandbox-frame-slot {
+        width: 100%;
+        margin-top: 10px;
+      }
+
+      #sandbox .sandbox-log-details {
+        margin-top: 8px;
+      }
+
+      /*
+       * 余興が動いていないあいだは、見出しと選択欄だけの1枚に畳む。
+       * 動いているかは iframe が挿さっているかで判る
+       * （sandbox.js が .sandbox-frame-slot に iframe を出し入れする）。
+       */
+      #sandbox:not(:has(.sandbox-frame-slot > *)) .sandbox-note,
+      #sandbox:not(:has(.sandbox-frame-slot > *)) .sandbox-log-details {
+        display: none;
+      }
+
+      /* 卓上（VC / カメラ）。枠は vc.js が .vc-peer として差し込む */
+      #vc {
+        /*
+         * 基準を 0 にして「余った高さ」だけを受け取る。auto にすると枠の
+         * 高さが基準になり、座興の面まで道連れで縮んで無駄に流れてしまう。
+         * min-height は、座興が場所を取っても枠が一列ぶんは残る高さ。
+         */
+        flex: 1 1 0;
+        min-height: 246px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 10px 12px;
+      }
+
+      .vc-head {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .vc-head h2 {
+        font-family: var(--serif);
+        font-size: 15px;
+        font-weight: 400;
+        margin: 0;
+        color: var(--cream);
+        letter-spacing: 0.06em;
+        white-space: nowrap;
+      }
+
+      #vc-status {
+        margin: 0;
+        min-width: 0;
         font-size: 11.5px;
+        color: var(--muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      #vc-media {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        display: grid;
+        /*
+         * auto-fit は空いた列を畳むので、呑み手の数だけ列ができて幅を等分する。
+         * ひとりのときに枠が卓いっぱいへ膨らまないよう .vc-peer 側で頭を打つ。
+         */
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        justify-items: center;
+        /* 人数が少ないうちは上下の真ん中に。溢れたら safe が start に倒す */
+        align-content: safe center;
+        gap: 10px;
+      }
+
+      /* 誰も入っていないときは枠を敷かず、真ん中に一言だけ置く */
+      #vc-media:empty {
+        grid-template-columns: 1fr;
+      }
+
+      #vc-media:empty::after {
+        content: "まだ誰も声を入れていません";
+        text-align: center;
+        font-size: 12px;
+        color: var(--dim);
+      }
+
+      /*
+       * 幅は列（＝呑み手の数）で、高さは枠の高さで頭を打つ。座興が場所を
+       * 取って卓上が薄くなったときは 4:3 を諦めて横長に潰す（Zoom の
+       * ストリップと同じ。枠ごと切れて見えるより、潰れたほうが読める）。
+       */
+      .vc-peer {
+        position: relative;
+        width: 100%;
+        max-width: 248px;
+        max-height: 100%;
+        aspect-ratio: 4 / 3;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        background: linear-gradient(180deg, #191108, #120c07);
+        overflow: hidden;
+      }
+
+      /* カメラが切のあいだの下敷き。映像が来ると video が上に重なる */
+      .vc-peer::before {
+        content: "CAMERA";
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: var(--serif);
+        font-size: 11px;
+        letter-spacing: 0.3em;
+        color: #4a3c2c;
+      }
+
+      .vc-self {
+        border-color: var(--gold-3);
+      }
+
+      .vc-video {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        background: #000;
+        z-index: 1;
+      }
+
+      .vc-video[hidden] {
+        display: none;
+      }
+
+      .vc-peer-label {
+        position: relative;
+        z-index: 2;
+        margin: 0;
+        padding: 7px 10px;
+        font-family: var(--serif);
+        font-size: 12.5px;
+        color: var(--cream);
+        background: linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.72));
+      }
+
+      /* 品質劣化時の映像自動停止（§3.6）。異常ではないのでエラー表示とは別枠にする */
+      #vc-quality:empty {
+        display: none;
+      }
+
+      #vc-quality {
+        margin: 0;
+        padding: 8px 12px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        background: rgba(255, 255, 255, 0.02);
+        font-size: 12px;
         color: var(--muted);
       }
 
-      #players {
-        list-style: none;
-        margin: 0 0 16px;
-        padding: 0;
+      /*
+       * 手元の操作。卓上の足元に敷いて画面のいちばん下に置く
+       * （Zoom / Meet / Discord と同じ位置。探さずに手が届く）。
+       */
+      .vc-bar {
         display: flex;
-        flex-direction: column;
+        align-items: center;
+        flex-wrap: wrap;
         gap: 6px;
+        margin: 0 -12px -10px;
+        padding: 8px 12px 10px;
+        border-top: 1px solid var(--line-soft);
+        background: rgba(0, 0, 0, 0.18);
       }
 
-      #players li {
-        padding: 8px 12px;
-        border: 1px solid var(--line-soft);
-        border-radius: var(--r-md);
-        background: rgba(255, 255, 255, 0.015);
-        font-size: 13px;
-        overflow-wrap: anywhere;
+      .vc-bar .btn {
+        padding: 7px 12px;
+        font-size: 12.5px;
+        white-space: nowrap;
       }
 
-      #lobby-controls {
-        margin-bottom: 10px;
+      /* 判定モードの表示。iOS Safari 実機ではコンソールを見られないため画面に出す */
+      #vc-quality-mode:empty {
+        display: none;
       }
 
-      #leave {
-        margin-left: auto;
+      #vc-quality-mode {
+        font-size: 11px;
       }
 
-      /* やりとり（チャット） */
+      /* 回復済みで再開を勧められる状態のときだけ目立たせる。
+         display は書かない（app.js が .hidden で出し分けるため） */
+      #vc-resume.vc-resume-ready {
+        border-color: var(--green);
+        color: var(--cream);
+        font-weight: 700;
+      }
+
+      /* ── 右：やりとり ─────────────────────────────────────────── */
       #chat {
+        flex: 1;
+        min-height: 0;
         display: flex;
         flex-direction: column;
-        min-height: 300px;
-        max-height: 460px;
+        padding: 12px 14px;
+      }
+
+      #chat > h2 {
+        margin: 0 0 10px;
       }
 
       #chat-log {
         flex: 1;
         min-height: 0;
         overflow-y: auto;
+        overscroll-behavior: contain;
         list-style: none;
-        margin: 0 0 12px;
+        margin: 0 0 10px;
         padding: 0;
         display: flex;
         flex-direction: column;
-        gap: 12px;
+        gap: 11px;
+      }
+
+      /* 一言も交わされていないうちは、空欄に見えないよう一言置く */
+      #chat-log:empty::after {
+        content: "まだ何も交わされていません";
+        margin: auto;
+        font-size: 12px;
+        color: var(--dim);
       }
 
       #chat-log li {
@@ -628,9 +989,9 @@
       #chat-log li > span:last-child {
         order: 4;
         flex-basis: 100%;
-        font-size: 13.5px;
+        font-size: 13px;
         color: var(--text);
-        line-height: 1.75;
+        line-height: 1.7;
         overflow-wrap: anywhere;
       }
 
@@ -656,21 +1017,22 @@
         flex: none;
       }
 
-      /* 通信ログ（開発用） */
+      /* 通信ログ（開発用）。画面を食わないよう、畳んだ状態は1行ぶんに収める */
       .devlog {
+        flex: none;
         border: 1px solid var(--line-soft);
         border-radius: var(--r-md);
       }
 
       .devlog summary {
-        padding: 9px 14px;
-        font-size: 12px;
+        padding: 5px 12px;
+        font-size: 11.5px;
         color: var(--dim);
         cursor: pointer;
       }
 
       #log {
-        max-height: 13rem;
+        max-height: 22vh;
         overflow-y: auto;
         padding: 8px 14px 12px;
         border-top: 1px solid var(--line-soft);
@@ -681,12 +1043,49 @@
         color: var(--dim);
       }
 
+      /* 3列を保てる下限まではレールと右欄を細らせて粘る */
+      @media (max-width: 1180px) {
+        .stage {
+          grid-template-columns: 202px minmax(0, 1fr) 278px;
+          gap: 10px;
+        }
+      }
+
+      /*
+       * ここから下は3列に足りない。縦積みにして、この帯の中だけを流す
+       * （body は固定のままなので、ページごとスクロールはしない）。
+       */
       @media (max-width: 900px) {
         .stage {
-          grid-template-columns: 1fr;
+          display: flex;
+          flex-direction: column;
+          overflow-y: auto;
+          overscroll-behavior: contain;
         }
+        .stage-rail,
+        .stage-main,
+        .stage-side {
+          flex: none;
+          overflow: visible;
+        }
+        #room,
         #chat {
+          flex: none;
+        }
+        #players {
+          max-height: 30vh;
+        }
+        #bot,
+        .stage-board {
           max-height: none;
+          overflow: visible;
+        }
+        #vc {
+          min-height: 260px;
+        }
+        #chat-log {
+          min-height: 200px;
+          max-height: 46vh;
         }
       }
 
@@ -695,6 +1094,42 @@
           grid-template-columns: 1fr;
         }
       }
+      /*
+       * 下敷きの写真は暗いが、提灯や瓶のあたりだけ明るく抜ける。
+       * その上に直に乗る文字は en.css の muted / dim のままだと沈むので、
+       * この画面に限り明るい色に上げ、黒い影を回して明暗どちらの上でも読めるようにする。
+       * 地の濃い部品（札・帯・入力欄）は元のままでよい。
+       * 同じセレクタが上にもあるため、打ち消されないよう <style> の最後に置く。
+       */
+      .home-head h1 {
+        color: #fbf3e6;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9), 0 0 14px rgba(0, 0, 0, 0.7);
+      }
+
+      #rooms-count {
+        color: #dcc7a5;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9), 0 0 10px rgba(0, 0, 0, 0.7);
+      }
+
+      /* 帯状の部品は地を濃くして、下の明るい部分を遮ってから文字を乗せる */
+      .notice {
+        background: rgba(16, 11, 7, 0.72);
+        color: var(--gold-2);
+      }
+
+      .alert {
+        background: rgba(50, 12, 10, 0.78);
+        color: #f6cdc8;
+      }
+
+      .devlog {
+        background: rgba(16, 11, 7, 0.62);
+      }
+
+      .devlog summary {
+        color: var(--muted);
+      }
+
     </style>
   </head>
   <body>
@@ -791,51 +1226,13 @@
         </p>
       </section>
 
+      <!--
+        入店後の画面。左＝卓の札と進行の操作、中央＝テロップ・座興・卓上、
+        右＝やりとり。要素の ID は app.js / vc.js / chat.js / bot.js /
+        sandbox.js が参照しているので、並べ替えても ID とクラス名は変えない。
+      -->
       <div class="stage">
-        <div class="stage-main">
-          <section id="vc" class="card block hidden">
-            <div class="block-head">
-              <h2>卓上</h2>
-              <span class="spacer"></span>
-              <button id="vc-join" class="btn" type="button">VCに参加</button>
-              <button id="vc-mute" class="btn" type="button">ミュート</button>
-              <button id="vc-camera" class="btn" type="button">カメラON</button>
-              <button id="vc-transcribe" class="btn" type="button">文字起こしON</button>
-              <button id="vc-leave" class="btn" type="button">VC退出</button>
-              <p id="vc-status">未参加</p>
-            </div>
-            <!-- 品質劣化時の映像自動停止（§3.6）。通知文言と再開操作 -->
-            <p id="vc-quality" role="status"></p>
-            <div class="row vc-quality-row">
-              <button id="vc-resume" type="button" class="btn hidden">カメラを再開</button>
-              <!-- 判定モードの表示。iOS Safari 実機ではコンソールを見られないため画面に出す -->
-              <span id="vc-quality-mode" class="dim"></span>
-            </div>
-            <!-- 通話の文字起こし（自分の声のみ・既定OFF）。docs/design/bot-voice.md §5.4 -->
-            <p id="voice-caption" class="dim voice-caption" aria-live="polite"></p>
-            <!-- 受信した文字起こし（同室の他人・自分）。最新1〜2行のみ。チャット欄には混ぜない -->
-            <ul id="voice-lines" class="voice-lines" aria-live="polite"></ul>
-            <div id="vc-media"></div>
-          </section>
-
-          <section id="bot" class="card block hidden"></section>
-
-          <!-- サンドボックスゲーム（docs/design/game-sandbox.md）。DOM は sandbox.js が自前で組み立てる -->
-          <section id="sandbox" class="card block hidden"></section>
-
-          <section id="phase" class="card block hidden">
-            <h2 id="phase-title"></h2>
-            <p id="phase-deadline"></p>
-            <div id="phase-body"></div>
-          </section>
-
-          <section id="result" class="card block hidden">
-            <h2 id="result-title"></h2>
-            <ul id="result-list"></ul>
-          </section>
-        </div>
-
-        <aside class="stage-side">
+        <aside class="stage-rail">
           <section id="room" class="card block hidden">
             <div class="block-head">
               <h2>卓 <span id="room-code"></span></h2>
@@ -844,18 +1241,71 @@
 
             <ul id="players"></ul>
 
-            <div class="row" id="lobby-controls">
-              <label for="game">ゲーム</label>
-              <select class="input" id="game"></select>
-              <button id="select-game" class="btn" type="button">選ぶ</button>
-              <button id="start" class="btn btn-gold" type="button">はじめる</button>
-            </div>
-            <div class="row">
-              <button id="skip" class="btn" type="button">スキップ（ホスト）</button>
-              <button id="leave" class="btn btn-red" type="button">お先に失礼</button>
+            <div class="rail-foot">
+              <div class="row" id="lobby-controls">
+                <label for="game">ゲーム</label>
+                <select class="input" id="game"></select>
+                <button id="select-game" class="btn" type="button">選ぶ</button>
+                <button id="start" class="btn btn-gold" type="button">はじめる</button>
+              </div>
+              <div class="row">
+                <button id="skip" class="btn" type="button">スキップ（ホスト）</button>
+                <button id="leave" class="btn btn-red" type="button">お先に失礼</button>
+              </div>
             </div>
           </section>
+        </aside>
 
+        <div class="stage-main">
+          <section id="bot" class="card block hidden"></section>
+
+          <!--
+            座興の面。本編・余興・順位表はまとめてこの一枠の中で流す。
+            別々に流すと、どれも中途半端な高さになって卓上まで潰れる。
+          -->
+          <div class="stage-board">
+            <section id="phase" class="card block hidden">
+              <h2 id="phase-title"></h2>
+              <p id="phase-deadline"></p>
+              <div id="phase-body"></div>
+            </section>
+
+            <!-- サンドボックスゲーム（docs/design/game-sandbox.md）。DOM は sandbox.js が自前で組み立てる -->
+            <section id="sandbox" class="card block hidden"></section>
+
+            <section id="result" class="card block hidden">
+              <h2 id="result-title"></h2>
+              <ul id="result-list"></ul>
+            </section>
+          </div>
+
+          <section id="vc" class="card block hidden">
+            <div class="vc-head">
+              <h2>卓上</h2>
+              <p id="vc-status">未参加</p>
+            </div>
+            <div id="vc-media"></div>
+            <!-- 通話の文字起こし（自分の声のみ・既定OFF）。docs/design/bot-voice.md §5.4 -->
+            <p id="voice-caption" class="dim voice-caption" aria-live="polite"></p>
+            <!-- 受信した文字起こし（同室の他人・自分）。最新1〜2行のみ。チャット欄には混ぜない -->
+            <ul id="voice-lines" class="voice-lines" aria-live="polite"></ul>
+            <!-- 品質劣化時の映像自動停止（§3.6）。通知文言 -->
+            <p id="vc-quality" role="status"></p>
+            <div class="vc-bar">
+              <button id="vc-join" class="btn" type="button">VCに参加</button>
+              <button id="vc-mute" class="btn" type="button">ミュート</button>
+              <button id="vc-camera" class="btn" type="button">カメラON</button>
+              <button id="vc-transcribe" class="btn" type="button">文字起こしON</button>
+              <span class="spacer"></span>
+              <!-- 判定モードの表示。iOS Safari 実機ではコンソールを見られないため画面に出す -->
+              <span id="vc-quality-mode" class="dim"></span>
+              <button id="vc-resume" type="button" class="btn hidden">カメラを再開</button>
+              <button id="vc-leave" class="btn" type="button">VC退出</button>
+            </div>
+          </section>
+        </div>
+
+        <aside class="stage-side">
           <section id="chat" class="card block hidden">
             <h2>やりとり</h2>
             <ul id="chat-log"></ul>
