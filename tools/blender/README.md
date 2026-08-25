@@ -205,5 +205,5 @@ view.setRooms(rooms, tagLabels);   // ポーリングのたびに呼んでよい
 分かったため、いまのキットに作り替えた。
 
 その頃の `izakaya_corridor.py` / `izakaya_corridor.blend` /
-`izakaya_corridor_module.glb` は **commit していない**（作業機のディスクには残っている）。
+`izakaya_corridor_module.glb` は **commit しておらず、2026-08-26 に作業機からも消した**。
 必要になることは無いはずなので、追いかけなくてよい。
