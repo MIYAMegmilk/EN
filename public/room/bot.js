@@ -32,13 +32,9 @@
 "use strict";
 
 (function (global) {
-  /** bot の表示名と役割（サーバーの bot_templates.ts と対応。表示専用） */
-  const BOTS = [
-    { id: "shunpi", name: "しゅんぴ", role: "あだ名をつける" },
-    { id: "seri", name: "せり", role: "川柳を見つける" },
-    { id: "gucchi", name: "ぐっちー", role: "場を温める" },
-    { id: "nabe", name: "なべ", role: "進行を仕切る" },
-  ];
+  // 表示名と役割はここには持たない。ON/OFF のボタンが卓上の bot 列へ移り、
+  // 名前も役も app.js の BOT_VC_INFO が持つようになったため（二重管理を避ける）。
+  // このモジュールが知っているのは state.bots の4つの ID だけでよい。
 
   /** 川柳の定型のモーラ数。表示のラベル（五七五 / 字余り）を出し分ける */
   const SENRYU_PATTERN = [5, 7, 5];
@@ -67,12 +63,10 @@
     poll: null,
     /** 自分が投じた票。null なら未投票 */
     myVote: null,
-    /** 直近に出たカード（ChatMessage） */
-    card: null,
     /** アンケートの残り時間を描き直すタイマー */
     countdown: null,
     /** 組み立て済みの要素 */
-    el: { toggles: null, stage: null, poll: null },
+    el: { poll: null },
   };
 
   // -------------------------------------------------------------------------
@@ -107,33 +101,21 @@
   // -------------------------------------------------------------------------
 
   /**
-   * トグルを描き直す。
-   * ホスト以外は操作できないが、表示は消さない。「いま誰が動いているか」は
-   * 全員が知っておきたい情報で、隠すと bot が黙った理由が分からなくなるため。
+   * bot の ON / OFF を切り替える。
+   *
+   * ボタンそのものは卓上の bot 列（app.js の createBotVcTile）が持つ。
+   * ここは「誰が押せるか」と「何を送るか」だけを受け持つ。
+   * 楽観更新はしない。反映はサーバーの botState で返ってくる（§3.10）。
    */
-  function renderToggles() {
-    const root = state.el.toggles;
-    if (root === null) return;
-    clear(root);
-    root.appendChild(el("span", "bot", "bot-toggles-label"));
-    for (const bot of BOTS) {
-      const on = state.bots[bot.id] !== false;
-      const button = el("button", `${bot.name}${on ? "" : "（OFF）"}`, "bot-toggle btn");
-      button.type = "button";
-      button.title = bot.role;
-      button.disabled = !state.isHost;
-      button.setAttribute("aria-pressed", on ? "true" : "false");
-      button.classList.toggle("bot-toggle-off", !on);
-      button.addEventListener("click", () => {
-        // 応答は S2C botState で返る。楽観更新はしない（サーバーが正）
-        send({ t: "setBot", botId: bot.id, enabled: !on });
-      });
-      root.appendChild(button);
-    }
+  function toggle(botId) {
+    if (!state.isHost) return false;
+    if (!Object.prototype.hasOwnProperty.call(state.bots, botId)) return false;
+    send({ t: "setBot", botId, enabled: state.bots[botId] === false });
+    return true;
   }
 
   // -------------------------------------------------------------------------
-  // テロップ（川柳・ゲーム提案）
+  // 川柳の形（表示は chat.js の行の中・app.js の renderChatCard が描く）
   // -------------------------------------------------------------------------
 
   /** 字余り・字足らずの呼び名（サーバーの shapeLabel と同じ基準） */
@@ -144,54 +126,6 @@
     if (over) return "字余り";
     if (under) return "字足らず";
     return "五七五";
-  }
-
-  /** せりの川柳テロップ。上句・中句・下句を縦に積む */
-  function renderSenryu(card) {
-    const root = el("div", undefined, "bot-card bot-card-senryu");
-    const lines = el("div", undefined, "bot-senryu-lines");
-    const morae = Array.isArray(card.morae) ? card.morae : [0, 0, 0];
-    for (const [i, line] of (card.lines ?? []).entries()) {
-      const row = el("p", undefined, "bot-senryu-line");
-      row.appendChild(el("span", line, "bot-senryu-text"));
-      row.appendChild(el("span", morae[i], "bot-senryu-mora"));
-      lines.appendChild(row);
-    }
-    root.appendChild(lines);
-    const foot = el("p", undefined, "bot-card-foot");
-    foot.appendChild(el("span", card.exact === true ? "五七五" : shapeLabel(morae), "bot-badge"));
-    // 詠み手のあだ名はユーザー由来。textContent で入れる（§3.8）
-    foot.appendChild(el("span", `${card.author} さんの一句`, "bot-senryu-author"));
-    root.appendChild(foot);
-    return root;
-  }
-
-  /** ぐっちーのゲーム提案カード。押すとそのゲームを選ぶ（ホストのみ） */
-  function renderGameSuggest(card) {
-    const root = el("div", undefined, "bot-card bot-card-game");
-    root.appendChild(el("p", card.gameTitle, "bot-card-title"));
-    const button = el("button", "これで遊ぶ", "btn bot-card-action");
-    button.type = "button";
-    button.disabled = !state.isHost;
-    if (!state.isHost) button.title = "ゲームを選べるのはホストだけです";
-    button.addEventListener("click", () => {
-      send({ t: "selectGame", gameId: card.gameId });
-      button.disabled = true;
-    });
-    root.appendChild(button);
-    return root;
-  }
-
-  /** テロップ面を描き直す */
-  function renderStage() {
-    const root = state.el.stage;
-    if (root === null) return;
-    clear(root);
-    const message = state.card;
-    if (message === null) return;
-    const card = message.card;
-    if (card.c === "senryu") root.appendChild(renderSenryu(card));
-    else if (card.c === "gameSuggest") root.appendChild(renderGameSuggest(card));
   }
 
   // -------------------------------------------------------------------------
@@ -260,20 +194,23 @@
     }, COUNTDOWN_INTERVAL_MS);
   }
 
-  /** アンケートを閉じ、結果をテロップ面に出す */
+  /**
+   * アンケートを閉じ、結果を出す。
+   * テロップ面は廃止した（川柳・提案はチャットの行に出る）ので、
+   * 結果はアンケートの枠をそのまま使って出す。
+   */
   function closePoll(agreed) {
     stopCountdown();
     state.poll = null;
     state.myVote = null;
     renderPoll();
-    const root = state.el.stage;
+    const root = state.el.poll;
     if (root === null) return;
     clear(root);
-    const note = el("div", undefined, "bot-card bot-card-poll-result");
-    note.appendChild(
-      el("p", agreed ? "お開きに決まりました" : "まだ続けることになりました", "bot-card-title"),
+    root.classList.remove("hidden");
+    root.appendChild(
+      el("p", agreed ? "お開きに決まりました" : "まだ続けることになりました", "bot-poll-title"),
     );
-    root.appendChild(note);
   }
 
   // -------------------------------------------------------------------------
@@ -290,10 +227,8 @@
       openPoll({ pollId: card.pollId, deadline: card.deadline });
       return;
     }
-    if (card.c === "senryu" || card.c === "gameSuggest") {
-      state.card = message;
-      renderStage();
-    }
+    // 川柳・ゲーム提案はチャットの行の中に出る（app.js の renderChatCard）。
+    // このモジュールが面倒を見るのはアンケートだけ。
   }
 
   /**
@@ -309,7 +244,6 @@
         if (typeof snapshot.bots === "object" && snapshot.bots !== null) {
           state.bots = { ...state.bots, ...snapshot.bots };
         }
-        renderToggles();
         // 再接続・途中入室でも集計中のアンケートに参加できる（§3.2）
         if (typeof snapshot.botPoll === "object" && snapshot.botPoll !== null) {
           openPoll(snapshot.botPoll);
@@ -318,18 +252,7 @@
           state.poll = null;
           renderPoll();
         }
-        // 履歴に残っている直近のカードを1枚だけ復元する
-        const history = Array.isArray(snapshot.chat) ? snapshot.chat : [];
-        state.card = null;
-        for (let i = history.length - 1; i >= 0; i--) {
-          const message = history[i];
-          const kind = message?.card?.c;
-          if (kind === "senryu" || kind === "gameSuggest") {
-            state.card = message;
-            break;
-          }
-        }
-        renderStage();
+        // カードの復元は要らない。チャット履歴ごと chat.js が描き直す
         return;
       }
       case "chat":
@@ -338,7 +261,6 @@
       case "botState":
         if (typeof msg.bots === "object" && msg.bots !== null) {
           state.bots = { ...state.bots, ...msg.bots };
-          renderToggles();
         }
         return;
       case "botPollClosed":
@@ -348,8 +270,6 @@
         return;
       case "hostChanged":
         state.isHost = msg.playerId === state.selfId;
-        renderToggles();
-        renderStage();
         return;
       case "kicked":
         reset();
@@ -375,14 +295,9 @@
     const root = config.container;
     if (root === null) return;
     clear(root);
-    state.el.toggles = el("div", undefined, "bot-toggles");
-    state.el.stage = el("div", undefined, "bot-stage");
     state.el.poll = el("div", undefined, "bot-poll hidden");
     state.el.poll.setAttribute("role", "status");
-    root.appendChild(state.el.toggles);
-    root.appendChild(state.el.stage);
     root.appendChild(state.el.poll);
-    renderToggles();
   }
 
   /** 自分の playerId を設定する（hostChanged の判定に使う） */
@@ -395,11 +310,8 @@
     stopCountdown();
     state.poll = null;
     state.myVote = null;
-    state.card = null;
     state.isHost = false;
     state.bots = { shunpi: true, seri: true, gucchi: true, nabe: true };
-    renderToggles();
-    renderStage();
     renderPoll();
   }
 
@@ -410,7 +322,6 @@
       isHost: state.isHost,
       poll: state.poll === null ? null : { ...state.poll },
       myVote: state.myVote,
-      card: state.card === null ? null : state.card.card,
     };
   }
 
@@ -420,6 +331,7 @@
     setSelfId,
     reset,
     getState,
+    toggle,
     /** テスト用に公開する純粋関数 */
     shapeLabel,
   };

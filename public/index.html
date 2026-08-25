@@ -516,31 +516,42 @@
         margin-left: 0;
       }
 
-      /* ── 中央：卓上・テロップ・あそび ───────────────────────────── */
-      /* しゅんぴたちのテロップ。卓上とあそびのあいだに細い帯で挟む */
+      /* ── 中央：卓上とあそびの面 ─────────────────────────────────── */
+      /*
+       * しゅんぴたちのアンケート（そろそろお開きにしますか？）。卓上の右下に
+       * 浮かせる。川柳とゲームの提案はチャットの行に出すようになったので、
+       * ここに残るのはこれだけ。黙っているあいだは場所を取らない。
+       * pointer-events は中身側だけで拾い、空の余白では下の枠を押せるままにする。
+       */
       #bot {
-        flex: 0 0 auto;
-        min-height: 0;
-        max-height: 26%;
+        position: absolute;
+        /* bot の列（156px）と隙間ぶんだけ左へ。列に重ねると顔が隠れる */
+        right: 166px;
+        bottom: 0;
+        z-index: 3;
+        width: min(340px, 62%);
+        max-height: 100%;
         overflow-y: auto;
         overscroll-behavior: contain;
         display: flex;
         flex-direction: column;
+        align-items: stretch;
         gap: 8px;
-        padding: 9px 12px;
+        pointer-events: none;
       }
 
-      /* 間は #bot の gap で取るので、部品側の余白は打ち消す */
-      #bot .bot-toggles {
-        margin-bottom: 0;
+      #bot > * {
+        pointer-events: auto;
       }
 
       #bot .bot-poll {
-        margin-top: 0;
-      }
-
-      #bot .bot-card {
+        margin: 0;
         padding: 11px 13px;
+        border-radius: var(--r-md);
+        /* 卓上の映像に重なるので、地は濃いめに敷いて文字を守る */
+        background: rgba(26, 18, 10, 0.94);
+        box-shadow: 0 10px 24px rgba(0, 0, 0, 0.5);
+        backdrop-filter: blur(2px);
       }
 
       /*
@@ -574,70 +585,74 @@
        * あそびが始まったら、余った高さの行き先を卓上からあそびの面へ移す。
        * ロビーの間は卓上が主役でよいが、始まった後まで卓上が場所を抱えて
        * いると、肝心のゲームが枠からこぼれて見えない。
-       * 公式ゲームは入口（#lobby-controls）が畳まれていること、余興は
+       * 公式ゲームは body の data-room-phase（app.js が入れる）、余興は
        * iframe が挿さっていることで見分ける。
        */
-      .stage-main:has(#lobby-controls.hidden) #vc,
+      body:not([data-room-phase="lobby"]) #vc,
       .stage-main:has(.sandbox-frame-slot > *) #vc {
-        flex: 0 0 276px;
+        flex: 0 0 320px;
       }
 
-      .stage-main:has(#lobby-controls.hidden) .stage-board,
+      body:not([data-room-phase="lobby"]) .stage-board,
       .stage-main:has(.sandbox-frame-slot > *) .stage-board {
         flex: 1 1 0;
       }
 
-      /* テロップも同じ理由で細める。始まった後のゲーム提案は用済み */
-      .stage-main:has(#lobby-controls.hidden) #bot,
-      .stage-main:has(.sandbox-frame-slot > *) #bot {
-        max-height: 116px;
-      }
+      /* テロップは卓上に浮いているので、面の高さの取り合いには加わらない */
 
       /*
        * 余興が動いているあいだは、ゲームの入口を引っ込める。
        * 遊んでいる最中に「はじめる」が出ていると、何が始まるのか分からない。
        * 止めれば（iframe が抜ければ）また出る。
        */
-      .stage-board:has(.sandbox-frame-slot > *) #lobby-controls {
+      .stage:has(.sandbox-frame-slot > *) #lobby-controls {
         display: none;
       }
 
       /*
        * ロビーの間は「待機中／ホストが選ぶのを待っています」の札を畳む。
-       * すぐ上のあそびの入口と左の卓の札が同じことを言っており、その90pxを
-       * 卓上に回したほうが顔が大きく見える。始まれば（入口が畳まれれば）出る。
+       * 左レールのあそびの入口と卓の札が同じことを言っており、その90pxを
+       * 卓上に回したほうが顔が大きく見える。始まれば出る。
        */
-      .stage-board:has(#lobby-controls:not(.hidden)) #phase {
+      body[data-room-phase="lobby"] #phase {
         display: none;
       }
 
-      /* ゲームの入口。いま何が選ばれているかと、えらぶ／はじめるを1行に */
+      /*
+       * あそびの入口。左レールに置くので縦積みにする。
+       * 選ばれている1本は幅が読めないので折り返させる（省略記号だと
+       * 「大喜利（3ラ…」で切れて何か分からなくなる）。
+       */
       .gamepick {
         display: flex;
-        align-items: center;
-        gap: 10px;
+        flex-direction: column;
+        gap: 5px;
       }
 
       .gamepick-label {
-        flex: none;
-        font-size: 12px;
+        font-size: 11px;
         letter-spacing: 0.14em;
         color: var(--dim);
       }
 
       .gamepick-current {
-        flex: 1;
-        min-width: 0;
         font-family: var(--serif);
-        font-size: 14.5px;
+        font-size: 13px;
+        line-height: 1.45;
         color: var(--cream);
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        overflow-wrap: anywhere;
       }
 
-      .gamepick .btn {
-        flex: none;
+      .gamepick-actions {
+        display: flex;
+        gap: 6px;
+      }
+
+      .gamepick-actions .btn {
+        flex: 1 1 0;
+        padding: 8px 10px;
+        font-size: 12.5px;
+        white-space: nowrap;
       }
 
       /* ── あそびの品書き（ゲーム一覧の覆い） ─────────────────────── */
@@ -1009,7 +1024,7 @@
          * min-height は、あそびが場所を取っても枠が一列ぶんは残る高さ。
          */
         flex: 1 1 0;
-        min-height: 300px;
+        min-height: 340px;
         display: flex;
         flex-direction: column;
         gap: 8px;
@@ -1044,13 +1059,21 @@
       }
 
       /*
-       * 枠の並び。grid で列を等分すると、ボット4体が呑み手と同じ幅を取って
-       * 卓上の半分を持っていってしまう。flex にして、人は大きく・ボットは
-       * 小さく配る（ボットは「その場にいる」という演出で、顔を見る相手ではない）。
+       * 卓上は左が呑み手の面、右端が bot の列。混ぜて並べると bot が呑み手の
+       * あいだに割り込み、4体で卓上の半分を取ってしまう。
        */
       #vc-media {
+        position: relative;
         flex: 1;
         min-height: 0;
+        display: flex;
+        gap: 10px;
+      }
+
+      /* 呑み手の枠。人数に応じて折り返し、余った幅は枠の大きさに回す */
+      #vc-people {
+        flex: 1;
+        min-width: 0;
         overflow-y: auto;
         overscroll-behavior: contain;
         display: flex;
@@ -1062,21 +1085,53 @@
         gap: 10px;
       }
 
-      #vc-media > .vc-peer {
-        flex: 1 1 200px;
-        max-width: 320px;
+      #vc-people > .vc-peer {
+        flex: 1 1 240px;
+        /* 卓上が広いとき、ひとりでも間延びしすぎない上限 */
+        max-width: 520px;
       }
 
-      /* ボットは人の枠より小さく、数が増えても場所を食わない大きさに留める */
-      #vc-media > .vc-peer-bot {
-        flex: 0 1 124px;
-        max-width: 124px;
-      }
-
-      #vc-media:empty::after {
+      /* 誰も入っていないときは枠を敷かず、真ん中に一言だけ置く */
+      #vc-people:empty::after {
         content: "まだ誰も声を入れていません";
+        margin: auto;
         text-align: center;
         font-size: 12px;
+        color: var(--dim);
+      }
+
+      /*
+       * bot の列。卓上の右端に縦一列でまとめる。
+       * 見出しの「bot」は、実在の呑み手と取り違えないための印を、枠ごとの
+       * 「BOT」札から列ごとの見出しに移したもの（狭い行に札を重ねると名前が
+       * 読めなくなるため）。破線の枠も併せて残してある。
+       */
+      #vc-bots {
+        flex: none;
+        /* 絵・名前・ON/OFF が1行に収まる幅。狭いとボタンだけ次の行へ落ちる */
+        width: 156px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding-left: 10px;
+        border-left: 1px solid var(--line-soft);
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-width: thin;
+        scrollbar-color: var(--line) transparent;
+      }
+
+      /* ホストが全部 OFF にしたら列ごと消す */
+      #vc-bots:empty {
+        display: none;
+      }
+
+      #vc-bots::before {
+        content: "bot";
+        flex: none;
+        padding-bottom: 2px;
+        font-size: 10px;
+        letter-spacing: 0.18em;
         color: var(--dim);
       }
 
@@ -1116,21 +1171,10 @@
       }
 
       /*
-       * 並び順。人が先、ボットが後。
-       * ボットの枠（app.js の renderVcBotTiles）は入店した時点で並び、人の枠は
-       * VC がつながってから vc.js が足すので、DOM の順に任せるとボットが
-       * 先頭に来てしまう。呑み手の顔を先に見せたいので order で追い越す。
+       * 自分の枠は先頭に置く（Zoom と同じで、探さなくても目に入る）。
+       * bot は別の列に分かれたので、ここで面倒を見るのは呑み手だけでよい。
        */
-      #vc-media > .vc-peer {
-        order: 0;
-      }
-
-      #vc-media > .vc-peer-bot {
-        order: 1;
-      }
-
-      /* 自分の枠はいちばん端に置く（Zoom と同じで、探さなくても目に入る） */
-      #vc-media > .vc-self {
+      #vc-people > .vc-self {
         order: -1;
       }
 
@@ -1362,14 +1406,35 @@
         font-variant-numeric: tabular-nums;
       }
 
-      /* 本文（chat.js が class 無しの span で入れる最後の子） */
-      #chat-log li > span:last-child {
+      /* 本文（chat.js が .chat-text で入れる） */
+      #chat-log .chat-text {
         order: 4;
         flex-basis: 100%;
         font-size: 13px;
         color: var(--text);
         line-height: 1.7;
         overflow-wrap: anywhere;
+      }
+
+      /*
+       * bot の発言に付く札（川柳の句・あそびの提案）。
+       * 本文の下に、行いっぱいで続ける（#chat-log li は flex-wrap のため
+       * order と flex-basis で最後の行に落とす）。
+       */
+      .chat-card {
+        order: 5;
+        flex-basis: 100%;
+        margin-top: 2px;
+      }
+
+      .chat-card.bot-card {
+        padding: 9px 11px;
+      }
+
+      .chat-card-action {
+        width: 100%;
+        padding: 7px 12px;
+        font-size: 12.5px;
       }
 
       #chat-log li.chat-bot .chat-nickname {
@@ -1618,11 +1683,20 @@
 
             <ul id="players"></ul>
 
-            <!--
-              ゲームを選んで始める操作はここには置かない。公式ゲームと余興を
-              1つの選択欄にまとめて中央（#lobby-controls）に出している。
-            -->
             <div class="rail-foot">
+              <!--
+                あそびの入口。公式ゲーム（採点あり）と余興サンドボックス
+                （点は付かない）を1枚の品書き（#game-platform）にまとめてあり、
+                「えらぶ」で開く。ロビーの間だけ出す（app.js が .hidden）。
+              -->
+              <div id="lobby-controls" class="gamepick">
+                <span class="gamepick-label">あそび</span>
+                <span id="game-current" class="gamepick-current">まだ選ばれていません</span>
+                <div class="gamepick-actions">
+                  <button id="game-open" class="btn" type="button">品書き</button>
+                  <button id="start" class="btn btn-gold" type="button">はじめる</button>
+                </div>
+              </div>
               <div class="row">
                 <button id="skip" class="btn" type="button">スキップ（ホスト）</button>
                 <button id="leave" class="btn btn-red" type="button">お先に失礼</button>
@@ -1637,7 +1711,21 @@
               <h2>卓上</h2>
               <p id="vc-status">未参加</p>
             </div>
-            <div id="vc-media"></div>
+            <!--
+              卓上は呑み手の面と bot の列に分ける。同じ入れ物に混ぜて並べると
+              bot が呑み手のあいだに割り込むため。枠を挿すのは
+              #vc-people = vc.js、#vc-bots = app.js の renderVcBotTiles。
+            -->
+            <div id="vc-media">
+              <div id="vc-people"></div>
+              <aside id="vc-bots" aria-label="この卓の bot"></aside>
+              <!--
+                しゅんぴたちのテロップ（川柳・ゲーム提案・終了アンケート）。
+                卓上の右下に浮かせる。中身は bot.js が組み立て、空のあいだは
+                .bot-stage:empty / .bot-poll.hidden で場所を取らない。
+              -->
+              <section id="bot" class="hidden"></section>
+            </div>
             <!-- 通話の文字起こし（自分の声のみ・既定OFF）。docs/design/bot-voice.md §5.4 -->
             <p id="voice-caption" class="dim voice-caption" aria-live="polite"></p>
             <!-- 受信した文字起こし（同室の他人・自分）。最新1〜2行のみ。チャット欄には混ぜない -->
@@ -1706,28 +1794,11 @@
             </div>
           </section>
 
-          <section id="bot" class="card block hidden"></section>
-
           <!--
             あそびの面。本編・余興・順位表はまとめてこの一枠の中で流す。
             別々に流すと、どれも中途半端な高さになって卓上まで潰れる。
           -->
           <div class="stage-board">
-            <!--
-              ゲームの入口。公式ゲーム（採点あり）と余興サンドボックス
-              （点は付かない）を1つの選択欄に optgroup で並べ、「はじめる」も
-              1つにする。押した中身で selectGame+startGame / sandboxStart を
-              出し分けるのは app.js。ロビーの間だけ出す（app.js が .hidden）。
-            -->
-            <section id="lobby-controls" class="card block hidden">
-              <div class="gamepick">
-                <span class="gamepick-label">あそび</span>
-                <span id="game-current" class="gamepick-current">まだ選ばれていません</span>
-                <button id="game-open" class="btn" type="button">えらぶ</button>
-                <button id="start" class="btn btn-gold" type="button">はじめる</button>
-              </div>
-            </section>
-
             <section id="phase" class="card block hidden">
               <h2 id="phase-title"></h2>
               <p id="phase-deadline"></p>

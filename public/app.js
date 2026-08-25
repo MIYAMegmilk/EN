@@ -221,6 +221,7 @@ function connect() {
     autoJoinVc(msg);
     // 通話の文字起こし（docs/design/bot-voice.md §5.4）
     Voice.handleServerMessage(msg);
+    autoStartVoice(msg);
     Chat.handleServerMessage(msg);
     // bot の演出面（docs/design/bot.md §4）
     Bot.handleServerMessage(msg);
@@ -273,6 +274,9 @@ function receive(msg) {
         state.snapshot.hostId = msg.playerId;
         state.snapshot.youAreHost = msg.playerId === state.snapshot.youId;
       }
+      // チャットに流れている提案ボタンの可否はホストかどうかで変わる。
+      // chat.js は chat / roomState でしか描き直さないので、ここで促す
+      Chat.refresh();
       renderAll();
       break;
     case "phase":
@@ -356,6 +360,10 @@ function renderAll() {
 
   const inLobby = state.phase === "lobby";
   $("lobby-controls").classList.toggle("hidden", !inLobby);
+  // ロビー中かは CSS からも要る（卓上と座の面で高さの配り方を変える）。
+  // 入口の .hidden を :has() で見ていたが、入口を左レールへ移して列をまたいだ
+  // ので、列に依らない body の属性で持つ
+  document.body.dataset.roomPhase = inLobby ? "lobby" : "playing";
   syncGameChoice(snapshot);
   $("skip").disabled = !snapshot.youAreHost || inLobby;
   $("start").disabled = !snapshot.youAreHost;
@@ -549,6 +557,48 @@ function startChosenGame() {
   const selected = state.snapshot === null ? null : state.snapshot.selectedGameId;
   if (selected !== choice.gameId) send({ t: "selectGame", gameId: choice.gameId });
   send({ t: "startGame" });
+}
+
+/**
+ * bot の発言に付く付加情報（ChatMessage.card）を、その発言の行の中に描く。
+ *
+ * 卓上に浮かべていたテロップの札は廃止した。提案はチャットの流れに押せる形で
+ * 置いたほうが、見逃さず、後からさかのぼっても押せる。
+ * 句や詠み手はユーザー由来なので必ず textContent で入れる（§3.8）。
+ */
+function renderChatCard(message, item) {
+  const card = message.card;
+  if (card.c === "senryu") {
+    const box = el("div", undefined, "chat-card bot-card");
+    const lines = el("div", undefined, "bot-senryu-lines");
+    const morae = Array.isArray(card.morae) ? card.morae : [0, 0, 0];
+    for (const [i, line] of (card.lines ?? []).entries()) {
+      const row = el("p", undefined, "bot-senryu-line");
+      row.appendChild(el("span", line, "bot-senryu-text"));
+      row.appendChild(el("span", morae[i], "bot-senryu-mora"));
+      lines.appendChild(row);
+    }
+    box.appendChild(lines);
+    const foot = el("p", undefined, "bot-card-foot");
+    const shape = card.exact === true ? "五七五" : Bot.shapeLabel(morae);
+    foot.appendChild(el("span", shape, "bot-badge"));
+    foot.appendChild(el("span", `${card.author} さんの一句`, "bot-senryu-author"));
+    box.appendChild(foot);
+    item.appendChild(box);
+    return;
+  }
+  if (card.c === "gameSuggest") {
+    const box = el("div", undefined, "chat-card");
+    // 何で遊ぶことになるのかを押す口自体に出す（本文を読み返さずに済む）
+    const title = typeof card.gameTitle === "string" ? card.gameTitle : "これ";
+    const button = el("button", `${title}で遊ぶ`, "btn chat-card-action");
+    button.type = "button";
+    button.disabled = !canStartGame();
+    if (!canStartGame()) button.title = "あそびを選べるのはホストだけです";
+    button.addEventListener("click", () => pickGame(`official:${card.gameId}`));
+    box.appendChild(button);
+    item.appendChild(box);
+  }
 }
 
 /** 品書きの開け閉め */
@@ -808,7 +858,21 @@ function createBotVcTile(info) {
   role.textContent = info.role;
   root.appendChild(role);
 
-  return { root, glowTimer: null };
+  /*
+   * ON / OFF。卓上の bot の行の右端に置く（呑み手のミュートと同じ位置感覚）。
+   * 押せるのはホストだけ。表示は消さない ―― いま誰が動いているかは全員が
+   * 知っておきたい情報で、隠すと bot が黙った理由が分からなくなる（§3.10）。
+   * 反映はサーバーの botState で返る。楽観更新はしない（bot.js の toggle）。
+   */
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "toggle vc-bot-toggle";
+  // 文字を持たないので、読み上げ用の名前は aria-label で付ける
+  toggle.setAttribute("aria-label", info.name);
+  toggle.addEventListener("click", () => Bot.toggle(info.id));
+  root.appendChild(toggle);
+
+  return { root, toggle, glowTimer: null };
 }
 
 /**
@@ -819,7 +883,7 @@ function createBotVcTile(info) {
  * 「その場にいる」演出のため。ホストの ON/OFF だけに従う）。
  */
 function renderVcBotTiles() {
-  const container = $("vc-media");
+  const container = $("vc-bots");
   if (container === null) return;
   if (state.snapshot === null) {
     for (const tile of botVcTiles.values()) {
@@ -829,19 +893,22 @@ function renderVcBotTiles() {
     botVcTiles.clear();
     return;
   }
-  const bots = Bot.getState().bots;
+  const botState = Bot.getState();
   for (const info of BOT_VC_INFO) {
-    const enabled = bots[info.id] !== false;
-    const existing = botVcTiles.get(info.id);
-    if (enabled && existing === undefined) {
-      const tile = createBotVcTile(info);
+    let tile = botVcTiles.get(info.id);
+    if (tile === undefined) {
+      tile = createBotVcTile(info);
       container.appendChild(tile.root);
       botVcTiles.set(info.id, tile);
-    } else if (!enabled && existing !== undefined) {
-      if (existing.glowTimer !== null) clearTimeout(existing.glowTimer);
-      existing.root.remove();
-      botVcTiles.delete(info.id);
     }
+    // OFF でも枠は消さない。消すと戻す手がかりが画面から無くなる
+    const enabled = botState.bots[info.id] !== false;
+    tile.root.classList.toggle("vc-bot-off", !enabled);
+    tile.toggle.disabled = !botState.isHost;
+    tile.toggle.setAttribute("aria-pressed", enabled ? "true" : "false");
+    tile.toggle.title = botState.isHost
+      ? `${info.name}を${enabled ? "黙らせる" : "呼び戻す"}`
+      : "bot を切り替えられるのはホストだけです";
   }
 }
 
@@ -963,12 +1030,30 @@ function autoJoinVc(msg) {
   VC.join().then(done, done);
 }
 
+/**
+ * 卓に着いたら文字起こしも始める。
+ *
+ * VC の自動参加と揃える。ボタンは残してあるので、要らない人はいつでも切れる。
+ * 非対応ブラウザ（iOS Safari・Firefox 等）では setEnabled が自分で断るが、
+ * 無駄な通知を出さないよう先に isSupported を見る。
+ * roomState は再接続でも飛ぶので、すでに ON なら何もしない。
+ *
+ * 注意: docs/design/bot-voice.md §5.4 は「既定 OFF」と書いてある。
+ * この既定は仕様書の記述と食い違うので、追随のこと。
+ */
+function autoStartVoice(msg) {
+  if (msg.t !== "roomState") return;
+  if (!Voice.isSupported()) return;
+  if (Voice.getState().enabled) return;
+  Voice.setEnabled(true);
+}
+
 /** VC モジュールを組み込む。iceServers が null なら VC 側の既定を使う */
 function bindVc(iceServers) {
   VC.init({
     send,
     iceServers,
-    container: $("vc-media"),
+    container: $("vc-people"),
     onStatus: (event) => {
       if (event.kind === "error") showError(event.message);
       // 品質劣化の通知（§3.6）は異常ではなく正常な保護動作なので、
@@ -1094,6 +1179,7 @@ function bind() {
   });
   Chat.init({
     send,
+    renderCard: renderChatCard,
     listEl: $("chat-log"),
     inputEl: $("chat-text"),
     formEl: $("chat-form"),
