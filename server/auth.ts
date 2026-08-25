@@ -208,12 +208,6 @@ export class AuthApi {
   }
 
   private async register(req: Request, clientIp: string): Promise<Response> {
-    if (!this.#registerLimiter.tryConsume(clientIp, Date.now())) {
-      return errorResponse(
-        429,
-        "登録の試行回数が上限を超えました。しばらくしてから再度お試しください",
-      );
-    }
     let body: unknown;
     try {
       body = await req.json();
@@ -226,6 +220,16 @@ export class AuthApi {
     }
     if (!isValidPassword(password)) {
       return errorResponse(400, "パスワードは8〜64文字で入力してください");
+    }
+
+    // ここから先は「実際にアカウント作成を試みた」ケース（成功・ID重複）のみを数える。
+    // JSON不正・形式不正の入力ミスは枠を消費しない（§3.8 の趣旨は大量アカウント作成の防止であり、
+    // 入力ミスを数えると同一IP内の他ユーザーまで巻き添えで登録できなくなるため）。
+    if (!this.#registerLimiter.tryConsume(clientIp, Date.now())) {
+      return errorResponse(
+        429,
+        "登録の試行回数が上限を超えました。しばらくしてから再度お試しください",
+      );
     }
 
     const salt = randomBase64(SALT_BYTES);
