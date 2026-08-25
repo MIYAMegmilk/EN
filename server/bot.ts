@@ -1,5 +1,5 @@
 /**
- * bot の判断ロジック（しゅんぴ / せり / ぐっちー）
+ * bot の判断ロジック（しゅんぴ / せり / ぐっちー / なべ）
  * 詳細仕様書 §3.10 に対応する。ひろし担当。
  *
  * 責務:
@@ -10,9 +10,18 @@
  * BotContext から注入する。このファイルに await と副作用を書かない。
  *
  * 仕様書との差分（§3.10 の改訂をチームに要請中）:
- *   - 「bot はルームに1体まで」→ 役割の違う3体にする
- *   - 「10分あたり最大5発話」→ ぐっちーにのみ適用。せり（川柳）は無制限
+ *   - 「bot はルームに1体まで」→ 役割の違う4体にする
+ *     （しゅんぴ=命名 / せり=川柳 / ぐっちー=場を温める / なべ=進行を仕切る）
+ *   - 「10分あたり最大5発話」→ 発話枠は bot ごとに独立して数える。
+ *     ぐっちー 10分5発話・なべ 10分2発話。しゅんぴとせりは枠を持たない
+ *     （どちらも人の行動に1対1で応じる発話で、自発的に喋らないため）
  *   - 「チャット・ゲーム操作が3分ない場合に沈黙」→ VC の文字起こしも活動に数える
+ *
+ * ぐっちーとなべを分けた理由（中間レビューの「ぐっちー過労問題」）:
+ *   10種類ある発話のうち6種類が1体に集まっていて、1つの枠を役割どうしで
+ *   食い合っていた。とくに挨拶が話題カード・ゲーム提案・アンケートに枠を奪われ、
+ *   大人数が同時入室すると4人目以降が無視される。役割を割って枠も分けたので、
+ *   ぐっちーが枠を使い切ってもなべは進行でき、その逆も同じ。
  *
  * 通話対応（docs/design/bot-voice.md）:
  *   各参加者のブラウザが自分のマイクを文字起こしして送ってくる発言を
@@ -51,10 +60,18 @@ export { BOT_IDS, type BotId, BOTS } from "./bot_templates.ts";
 // 定数（§3.10）
 // ---------------------------------------------------------------------------
 
-/** ぐっちーの発話頻度を見る窓（ミリ秒） */
-export const GUCCHI_RATE_WINDOW_MS = 10 * 60_000;
-/** 窓のなかで許すぐっちーの発話数 */
+/** 自発的に喋る bot の発話頻度を見る窓（ミリ秒）。窓の長さは全 bot 共通 */
+export const BOT_RATE_WINDOW_MS = 10 * 60_000;
+/** 窓のなかで許すぐっちー（挨拶・話題カード・相槌）の発話数 */
 export const GUCCHI_RATE_MAX = 5;
+/**
+ * 窓のなかで許すなべ（ゲーム提案・終了アンケート・締め）の発話数。
+ *
+ * ぐっちーより小さいのは、bot 全体のうるささを分割前より増やさないため。
+ * なべの発話はもともと GAME_SUGGEST_RESET_MS（30分）・END_POLL_COOLDOWN_MS（60分）・
+ * END_POLL_MAX（2回）で強く制限されているので、10分に2発話あれば足りる。
+ */
+export const NABE_RATE_MAX = 2;
 /** 沈黙とみなすまでの無操作時間（ミリ秒） */
 export const SILENCE_MS = 3 * 60_000;
 /** 話題カードを続けて投げる上限。無人の場で喋り続けないため */
@@ -121,21 +138,25 @@ export type BotUtterance = {
 };
 
 /**
- * 発話の優先度。ぐっちーの発話枠（10分5発話）の食い合いを調停する。
+ * 発話の優先度。同じ bot が持つ発話どうしの、枠の食い合いを調停する。
  *
  *   essential … 枠を確認せず必ず出す（アンケートの締め。開いたまま放置しない）
  *   normal    … 枠がある限り出す（沈黙話題・ゲーム提案）
- *   optional  … 枠に余裕があるときだけ出す（挨拶・相槌）
+ *   optional  … 枠に余裕があるときだけ出す（相槌）
  *
  * 相槌（reaction）だけを optional にしている。挨拶を optional にすると
  * 大人数が一度に入室したとき4人目以降が無視されるため normal に置く。
+ *
+ * ぐっちーとなべに役割を割ったので、この表が調停するのは
+ * 「ぐっちーの挨拶・話題カード・相槌」のあいだだけになった。
+ * なべ側は optional を持たないため、この表は実質ぐっちー用である。
  */
 const PRIORITY: Readonly<Record<BotKind, "essential" | "normal" | "optional">> = {
   naming: "essential", // しゅんぴの発話。枠の対象外
   senryu: "essential", // せりの発話。枠の対象外
   greeting: "normal", // 入室者を無視するのは場回しとして最悪なので枠を使ってでも出す
   topic: "normal",
-  gameSuggest: "normal",
+  gameSuggest: "normal", // ここから下の4種類はなべの発話
   endPoll: "normal",
   closing: "essential", // closePoll が枠を見ずに発話する（テーブルは参照されない）
   pollContinue: "essential", // 同上
@@ -168,7 +189,7 @@ export type EndPoll = {
   eligibleIds: string[];
 };
 
-/** bot 3体分の状態。ルームごとに1つ持つ */
+/** bot 4体分の状態。ルームごとに1つ持つ */
 export type BotState = {
   /** bot ごとの ON/OFF（既定は全 ON、§3.10） */
   enabled: Record<BotId, boolean>;
@@ -193,18 +214,29 @@ export type BotState = {
      */
     lastVoiceAt: number | null;
   };
-  /** ぐっちーの状態 */
+  /** ぐっちー（場を温める）の状態 */
   gucchi: {
-    /** 直近の発話時刻。GUCCHI_RATE_WINDOW_MS の窓で数える */
+    /** 直近の発話時刻。BOT_RATE_WINDOW_MS の窓で数える。なべとは別枠 */
     utteranceTimes: number[];
-    /** 話題カードを続けて投げた回数 */
+    /**
+     * 話題カードを続けて投げた回数。
+     *
+     * ぐっちーの持ち物だが、なべの判定（isWarmupExhausted）もこれを**読む**
+     * （書き換えるのはぐっちー側だけ）。「話題カードを出し切ってなお沈黙して
+     * いる」という条件そのものなので、なべ側に複製すると意味が壊れるため。
+     */
     silenceStreak: number;
+    /** 使った話題カードID */
+    usedTopicIds: string[];
+  };
+  /** なべ（進行を仕切る）の状態 */
+  nabe: {
+    /** 直近の発話時刻。BOT_RATE_WINDOW_MS の窓で数える。ぐっちーとは別枠 */
+    utteranceTimes: number[];
     /** 提案済みのゲームID */
     suggestedGameIds: string[];
     /** 最後にゲームを提案した時刻。候補を戻す判定に使う */
     lastGameSuggestAt: number | null;
-    /** 使った話題カードID */
-    usedTopicIds: string[];
     /** 集計中の終了アンケート */
     poll: EndPoll | null;
     /** 終了アンケートを出した回数。END_POLL_MAX まで */
@@ -217,7 +249,7 @@ export type BotState = {
 /** 初期状態を作る */
 export function createBotState(now: number): BotState {
   return {
-    enabled: { shunpi: true, seri: true, gucchi: true },
+    enabled: { shunpi: true, seri: true, gucchi: true, nabe: true },
     startedAt: now,
     lastHumanAt: now,
     lastActivityAt: now,
@@ -226,9 +258,12 @@ export function createBotState(now: number): BotState {
     gucchi: {
       utteranceTimes: [],
       silenceStreak: 0,
+      usedTopicIds: [],
+    },
+    nabe: {
+      utteranceTimes: [],
       suggestedGameIds: [],
       lastGameSuggestAt: null,
-      usedTopicIds: [],
       poll: null,
       pollsHeld: 0,
       lastPollAt: null,
@@ -318,28 +353,50 @@ export type BotResult = {
 };
 
 // ---------------------------------------------------------------------------
-// 発話枠（ぐっちーのみ）
+// 発話枠（ぐっちー / なべ。bot ごとに独立して数える）
 // ---------------------------------------------------------------------------
+
+/**
+ * 発話枠を持つ bot。
+ * しゅんぴ（命名）とせり（川柳）は人の行動に1対1で応じるだけで自発的に
+ * 喋らないので、枠を持たない（§3.10 の頻度上限は自発的な発話への制限）。
+ */
+type RateLimitedBotId = "gucchi" | "nabe";
+
+/** bot ごとの、窓のなかで許す発話数 */
+const RATE_MAX: Readonly<Record<RateLimitedBotId, number>> = {
+  gucchi: GUCCHI_RATE_MAX,
+  nabe: NABE_RATE_MAX,
+};
 
 /** 窓から外れた発話時刻を捨てる */
 function recentTimes(times: readonly number[], now: number): number[] {
-  return times.filter((at) => now - at < GUCCHI_RATE_WINDOW_MS);
+  return times.filter((at) => now - at < BOT_RATE_WINDOW_MS);
 }
 
-/** ぐっちーがこの種類の発話をしてよいか（§3.10 の 10分5発話） */
-function canGucchiSpeak(state: BotState, kind: BotKind, now: number): boolean {
-  const used = recentTimes(state.gucchi.utteranceTimes, now).length;
-  const remaining = GUCCHI_RATE_MAX - used;
+/**
+ * その bot がこの種類の発話をしてよいか（§3.10 の頻度上限）。
+ * 枠は bot ごとに独立しているので、ぐっちーが使い切ってもなべは喋れる。
+ */
+function canSpeak(
+  state: BotState,
+  botId: RateLimitedBotId,
+  kind: BotKind,
+  now: number,
+): boolean {
+  const used = recentTimes(state[botId].utteranceTimes, now).length;
+  const remaining = RATE_MAX[botId] - used;
   if (remaining <= 0) return false;
   return PRIORITY[kind] !== "optional" || remaining > OPTIONAL_RESERVE;
 }
 
-/** ぐっちーの発話を1件記録する */
-function spend(state: BotState, now: number): BotState["gucchi"] {
-  return {
-    ...state.gucchi,
-    utteranceTimes: [...recentTimes(state.gucchi.utteranceTimes, now), now],
-  };
+/**
+ * 発話を1件記録した utteranceTimes を返す。
+ * bot の状態ごと差し替えないのは、gucchi と nabe で中身が違うため
+ * （呼び出し側で `{ ...state.nabe, utteranceTimes: spend(...) }` と綴る）。
+ */
+function spend(times: readonly number[], now: number): number[] {
+  return [...recentTimes(times, now), now];
 }
 
 // ---------------------------------------------------------------------------
@@ -460,7 +517,7 @@ function senryuUtterance(
 }
 
 // ---------------------------------------------------------------------------
-// ぐっちー（場回しbot）
+// ぐっちー（場を温めるbot）: 挨拶・話題カード・相槌
 // ---------------------------------------------------------------------------
 
 /** まだ使っていない話題カードを選ぶ。共通タグに対応するカードを優先する */
@@ -471,13 +528,17 @@ function chooseTopic(state: BotState, ctx: BotContext): TopicCard | null {
   return pick(tagged.length > 0 ? tagged : pool, ctx.rng);
 }
 
+// ---------------------------------------------------------------------------
+// なべ（進行bot）: ゲーム提案・終了アンケート・締め
+// ---------------------------------------------------------------------------
+
 /**
  * まだ提案していないゲームを選ぶ。
  * 全部出し切っていても、前回の提案から十分に間が空いていれば誘い直す
  * （3本しかないので、序盤で撃ち尽くすと以後永久に提案できなくなる）。
  */
 function chooseGame(state: BotState, ctx: BotContext): { id: string; title: string } | null {
-  const { suggestedGameIds, lastGameSuggestAt } = state.gucchi;
+  const { suggestedGameIds, lastGameSuggestAt } = state.nabe;
   const unused = ctx.games.filter((game) => !suggestedGameIds.includes(game.id));
   if (unused.length > 0) return pick(unused, ctx.rng);
   if (lastGameSuggestAt === null || ctx.now - lastGameSuggestAt < GAME_SUGGEST_RESET_MS) {
@@ -513,28 +574,46 @@ function isPollDecided(poll: EndPoll): boolean {
 }
 
 /**
+ * 「場を温める手」が尽きているか。なべが動き出してよい前提条件。
+ *
+ * ふだんはぐっちーの silenceStreak を読む（書き換えはぐっちー側だけが行う）。
+ * 「話題カードを出し切ってなお沈黙している」という条件そのものなので、
+ * なべ側に別カウンタを持たせると意味が変わるためである。
+ *
+ * ぐっちーが OFF のときは最初から尽きている扱いにする。話題カード自体が
+ * 出ないので silenceStreak が 0 のまま増えず、これがないと
+ * 「ぐっちーを切るとなべまで動けない」＝2体を分けた意味がなくなる。
+ *
+ * ゲーム提案（stuck）と終了アンケート（canStartPoll）の両方がこれを使う。
+ * 片方だけ条件を変えると「誘いは来るのにお開きは訊かれない」とちぐはぐになる。
+ */
+function isWarmupExhausted(state: BotState): boolean {
+  return !state.enabled.gucchi || state.gucchi.silenceStreak >= SILENCE_MAX_STREAK;
+}
+
+/**
  * 終了アンケートを出せる状況か。
  * 1ルームで END_POLL_MAX 回まで、かつ前回から END_POLL_COOLDOWN_MS 空ける。
  * 訊き続けると誰も反応しない部屋で永久ループになるうえ、単純にしつこい。
  * 「お開き」で締めた場合は closePoll が回数を上限まで進めて打ち止めにする。
  */
 function canStartPoll(state: BotState, now: number): boolean {
-  if (state.gucchi.poll !== null) return false;
-  if (state.gucchi.silenceStreak < SILENCE_MAX_STREAK) return false;
-  if (state.gucchi.pollsHeld >= END_POLL_MAX) return false;
+  if (state.nabe.poll !== null) return false;
+  if (!isWarmupExhausted(state)) return false;
+  if (state.nabe.pollsHeld >= END_POLL_MAX) return false;
   if (now - state.startedAt < END_POLL_MIN_AGE_MS) return false;
-  const last = state.gucchi.lastPollAt;
+  const last = state.nabe.lastPollAt;
   return last === null || now - last >= END_POLL_COOLDOWN_MS;
 }
 
 /**
  * 終了アンケートを締める。過半数が賛成なら締めの一言、届かなければ続行の一言。
  *
- * ここだけは発話枠（GUCCHI_RATE_MAX）を確認せずに必ず発話する。開いたアンケートを
+ * ここだけは発話枠（NABE_RATE_MAX）を確認せずに必ず発話する。開いたアンケートを
  * 結果不明のまま放置するほうが害が大きいため。枠は1つ超過しうる。
  */
 function closePoll(state: BotState, ctx: BotContext): BotResult {
-  const poll = state.gucchi.poll;
+  const poll = state.nabe.poll;
   if (poll === null) return { state, utterances: [], effects: [] };
   // 誰もいない部屋、または OFF のあいだは黙って閉じる（§3.10「無人の場で喋り続けない」）。
   // 発話しなくてもアンケート自体は必ず片付ける。開いたまま放置すると
@@ -542,60 +621,66 @@ function closePoll(state: BotState, ctx: BotContext): BotResult {
   const total = poll.eligibleIds.length;
   const { agreed } = countVotes(poll);
   const majority = total > 0 && agreed * 2 > total;
-  if (!state.enabled.gucchi || total === 0 || ctx.connectedPlayerIds.length === 0) {
+  // 見るのは enabled.nabe。締めの一言はなべの発話なので、ぐっちーの ON/OFF とは無関係
+  if (!state.enabled.nabe || total === 0 || ctx.connectedPlayerIds.length === 0) {
     // 発話は控えるが、集計結果は捨てない。参加者が過半数でお開きに賛成したのに
     // ルーム層へ「合意なし」と伝えてしまうと部屋が閉じられなくなる
     return {
-      state: { ...state, gucchi: { ...state.gucchi, poll: null } },
+      state: { ...state, nabe: { ...state.nabe, poll: null } },
       utterances: [],
       effects: [{ t: "pollClosed", pollId: poll.id, agreed: majority }],
     };
   }
   const kind: BotKind = majority ? "closing" : "pollContinue";
   const text = majority ? pick(CLOSING_TEXTS, ctx.rng) : pick(CONTINUE_TEXTS, ctx.rng);
-  // silenceStreak は戻さない。戻すと話題カードの「連続2回まで」が復活し、
+  // ぐっちーの silenceStreak は戻さない。戻すと話題カードの「連続2回まで」が復活し、
   // 誰も反応しない場で永久に喋り続けてしまう（§3.10）。
   // 「お開き」で締めたあとは訊き直す意味がないので打ち止めにする
-  const gucchi = {
-    ...spend(state, ctx.now),
+  const nabe = {
+    ...state.nabe,
+    utteranceTimes: spend(state.nabe.utteranceTimes, ctx.now),
     poll: null,
-    pollsHeld: majority ? END_POLL_MAX : state.gucchi.pollsHeld,
+    pollsHeld: majority ? END_POLL_MAX : state.nabe.pollsHeld,
   };
   return {
-    state: { ...state, gucchi, lastActivityAt: ctx.now },
-    utterances: [{ botId: "gucchi", kind, text }],
+    state: { ...state, nabe, lastActivityAt: ctx.now },
+    utterances: [{ botId: "nabe", kind, text }],
     effects: [{ t: "pollClosed", pollId: poll.id, agreed: majority }],
   };
 }
 
 /**
- * 沈黙・経過時間で発火するぐっちーの発話を決める。
+ * 沈黙・経過時間で発火する発話を決める（ぐっちーとなべの両方）。
  * 優先順は「集計中アンケートの締め > 話題カード > ゲーム提案 > 終了アンケート」。
  * 終了を切り出すのは、話題もゲーム提案も出しきってなお沈黙しているときだけ。
+ *
+ * ON/OFF は bot ごとに見る。ぐっちーを切っても、なべはゲームに誘えるし
+ * お開きも切り出せる（その逆も同じ）。
  */
-function tickGucchi(state: BotState, ctx: BotContext): BotResult {
-  // 集計中のアンケートは、ぐっちーが OFF でも締切が来たら必ず片付ける
-  const poll = state.gucchi.poll;
+function tickBots(state: BotState, ctx: BotContext): BotResult {
+  // 集計中のアンケートは、なべが OFF でも締切が来たら必ず片付ける
+  const poll = state.nabe.poll;
   if (poll !== null) {
     return ctx.now - poll.startedAt >= END_POLL_MS
       ? closePoll(state, ctx)
       : { state, utterances: [], effects: [] };
   }
-  if (!state.enabled.gucchi) return { state, utterances: [], effects: [] };
   // 全員が切断しているルームでは何も喋らない（§3.10「無人の場で喋り続けない」）
   if (ctx.connectedPlayerIds.length === 0) return { state, utterances: [], effects: [] };
   const silent = ctx.now - state.lastActivityAt >= SILENCE_MS;
 
+  // --- ぐっちー ---
   // 話題カード: 沈黙 3 分ごと、連続 2 回まで（§3.10）
-  if (silent && state.gucchi.silenceStreak < SILENCE_MAX_STREAK) {
+  if (state.enabled.gucchi && silent && state.gucchi.silenceStreak < SILENCE_MAX_STREAK) {
     const card = chooseTopic(state, ctx);
-    if (card !== null && canGucchiSpeak(state, "topic", ctx.now)) {
+    if (card !== null && canSpeak(state, "gucchi", "topic", ctx.now)) {
       // 全カードを使い切ったら履歴を捨てて数え直す（無制限に伸ばさない）
       const used = state.gucchi.usedTopicIds.length + 1 >= TOPIC_CARDS.length
         ? [card.id]
         : [...state.gucchi.usedTopicIds, card.id];
       const gucchi = {
-        ...spend(state, ctx.now),
+        ...state.gucchi,
+        utteranceTimes: spend(state.gucchi.utteranceTimes, ctx.now),
         silenceStreak: state.gucchi.silenceStreak + 1,
         usedTopicIds: used,
       };
@@ -608,6 +693,9 @@ function tickGucchi(state: BotState, ctx: BotContext): BotResult {
     }
   }
 
+  // --- なべ ---
+  if (!state.enabled.nabe) return { state, utterances: [], effects: [] };
+
   // ゲーム提案: ロビーで 5 分経過（§3.10）、または話題カードが打ち止めのとき。
   // 終了を切り出す前に、まず場を立て直す手を出す。
   // ロビー起点の提案は「会話が一段落したところ」を狙う。盛り上がっている最中に
@@ -615,26 +703,28 @@ function tickGucchi(state: BotState, ctx: BotContext): BotResult {
   const lobbyStale = state.lobbySince !== null &&
     ctx.now - state.lobbySince >= LOBBY_SUGGEST_MS &&
     ctx.now - state.lastActivityAt >= LOBBY_QUIET_MS;
-  const stuck = silent && state.gucchi.silenceStreak >= SILENCE_MAX_STREAK;
+  // 場を温める手が尽きてなお沈黙しているか（ぐっちー OFF なら最初から尽きている）
+  const stuck = silent && isWarmupExhausted(state);
   const game = lobbyStale || stuck ? chooseGame(state, ctx) : null;
-  if (game !== null && canGucchiSpeak(state, "gameSuggest", ctx.now)) {
+  if (game !== null && canSpeak(state, "nabe", "gameSuggest", ctx.now)) {
     // 一巡して候補が戻ったときは、履歴を畳んでから積み直す
-    const cycled = ctx.games.every((g) => state.gucchi.suggestedGameIds.includes(g.id));
-    const gucchi = {
-      ...spend(state, ctx.now),
-      suggestedGameIds: cycled ? [game.id] : [...state.gucchi.suggestedGameIds, game.id],
+    const cycled = ctx.games.every((g) => state.nabe.suggestedGameIds.includes(g.id));
+    const nabe = {
+      ...state.nabe,
+      utteranceTimes: spend(state.nabe.utteranceTimes, ctx.now),
+      suggestedGameIds: cycled ? [game.id] : [...state.nabe.suggestedGameIds, game.id],
       lastGameSuggestAt: ctx.now,
     };
     return {
       state: {
         ...state,
-        gucchi,
+        nabe,
         // ゲーム中（lobbySince === null）にロビータイマーを復活させない
         lobbySince: state.lobbySince === null ? null : ctx.now,
         lastActivityAt: ctx.now,
       },
       utterances: [{
-        botId: "gucchi",
+        botId: "nabe",
         kind: "gameSuggest",
         text: fill(pick(GAME_SUGGEST_TEXTS, ctx.rng), { title: game.title }),
         card: { c: "gameSuggest", gameId: game.id, gameTitle: game.title },
@@ -644,18 +734,19 @@ function tickGucchi(state: BotState, ctx: BotContext): BotResult {
   }
 
   // 終了アンケート: 話題カードもゲーム提案も打ち止めで、まだ沈黙しているとき
-  if (stuck && canStartPoll(state, ctx.now) && canGucchiSpeak(state, "endPoll", ctx.now)) {
+  if (stuck && canStartPoll(state, ctx.now) && canSpeak(state, "nabe", "endPoll", ctx.now)) {
     const id = ctx.newPollId();
-    const gucchi = {
-      ...spend(state, ctx.now),
+    const nabe = {
+      ...state.nabe,
+      utteranceTimes: spend(state.nabe.utteranceTimes, ctx.now),
       poll: { id, startedAt: ctx.now, votes: {}, eligibleIds: [...ctx.connectedPlayerIds] },
-      pollsHeld: state.gucchi.pollsHeld + 1,
+      pollsHeld: state.nabe.pollsHeld + 1,
       lastPollAt: ctx.now,
     };
     return {
-      state: { ...state, gucchi },
+      state: { ...state, nabe },
       utterances: [{
-        botId: "gucchi",
+        botId: "nabe",
         kind: "endPoll",
         text: pick(END_POLL_TEXTS, ctx.rng),
         card: { c: "endPoll", pollId: id, deadline: ctx.now + END_POLL_MS },
@@ -696,7 +787,7 @@ export function reduce(state: BotState, event: BotEvent, ctx: BotContext): BotRe
         });
       }
       let next = state;
-      if (state.enabled.gucchi && canGucchiSpeak(state, "greeting", ctx.now)) {
+      if (state.enabled.gucchi && canSpeak(state, "gucchi", "greeting", ctx.now)) {
         utterances.push({
           botId: "gucchi",
           kind: "greeting",
@@ -704,7 +795,13 @@ export function reduce(state: BotState, event: BotEvent, ctx: BotContext): BotRe
             name: event.assignedNickname ?? event.nickname,
           }),
         });
-        next = { ...next, gucchi: spend(next, ctx.now) };
+        next = {
+          ...next,
+          gucchi: {
+            ...next.gucchi,
+            utteranceTimes: spend(next.gucchi.utteranceTimes, ctx.now),
+          },
+        };
       }
       return {
         state: {
@@ -736,16 +833,16 @@ export function reduce(state: BotState, event: BotEvent, ctx: BotContext): BotRe
     }
 
     case "playerLeft": {
-      if (state.gucchi.poll === null) return { state, utterances: [], effects: [] };
+      if (state.nabe.poll === null) return { state, utterances: [], effects: [] };
       // 退室が確定した人の票は無効にする（§8 の「当人への票は無効化」と同じ考え方）
-      const votes = { ...state.gucchi.poll.votes };
+      const votes = { ...state.nabe.poll.votes };
       delete votes[event.playerId];
       const poll: EndPoll = {
-        ...state.gucchi.poll,
+        ...state.nabe.poll,
         votes,
-        eligibleIds: state.gucchi.poll.eligibleIds.filter((id) => id !== event.playerId),
+        eligibleIds: state.nabe.poll.eligibleIds.filter((id) => id !== event.playerId),
       };
-      const next: BotState = { ...state, gucchi: { ...state.gucchi, poll } };
+      const next: BotState = { ...state, nabe: { ...state.nabe, poll } };
       // 人数が減った結果、残りの票だけで結論が出ることがある。締切を待たずに締める
       return isPollDecided(poll)
         ? closePoll(next, ctx)
@@ -794,15 +891,15 @@ export function reduce(state: BotState, event: BotEvent, ctx: BotContext): BotRe
           ...state,
           lobbySince: backToLobby ? ctx.now : null,
           lastActivityAt: ctx.now,
-          gucchi: {
-            ...state.gucchi,
-            silenceStreak: 0,
+          gucchi: { ...state.gucchi, silenceStreak: 0 },
+          nabe: {
+            ...state.nabe,
             // 1本遊び終えたら提案の弾を補充する。そうしないと収録ゲームの
             // 本数ぶんで打ち止めになり、終盤に立て直す手がなくなる。
             // ただし直前に提案したものは残し、遊んだ直後の再提案を避ける
             suggestedGameIds: backToLobby
-              ? state.gucchi.suggestedGameIds.slice(-1)
-              : state.gucchi.suggestedGameIds,
+              ? state.nabe.suggestedGameIds.slice(-1)
+              : state.nabe.suggestedGameIds,
           },
         },
         utterances: [],
@@ -818,12 +915,18 @@ export function reduce(state: BotState, event: BotEvent, ctx: BotContext): BotRe
         gucchi: { ...state.gucchi, silenceStreak: 0 },
       };
       const kind: BotKind = event.t === "roundResult" ? "reaction" : "finalReaction";
-      if (!state.enabled.gucchi || !canGucchiSpeak(state, kind, ctx.now)) {
+      if (!state.enabled.gucchi || !canSpeak(state, "gucchi", kind, ctx.now)) {
         return { state: base, utterances: [], effects: [] };
       }
       const texts = event.t === "roundResult" ? ROUND_REACTION_TEXTS : FINAL_REACTION_TEXTS;
       return {
-        state: { ...base, gucchi: spend(base, ctx.now) },
+        state: {
+          ...base,
+          gucchi: {
+            ...base.gucchi,
+            utteranceTimes: spend(base.gucchi.utteranceTimes, ctx.now),
+          },
+        },
         effects: [],
         utterances: [{
           botId: "gucchi",
@@ -834,7 +937,7 @@ export function reduce(state: BotState, event: BotEvent, ctx: BotContext): BotRe
     }
 
     case "endPollVote": {
-      const poll = state.gucchi.poll;
+      const poll = state.nabe.poll;
       if (poll === null) {
         return {
           state,
@@ -870,7 +973,7 @@ export function reduce(state: BotState, event: BotEvent, ctx: BotContext): BotRe
         ...state,
         lastActivityAt: ctx.now,
         lastHumanAt: ctx.now,
-        gucchi: { ...state.gucchi, poll: voted },
+        nabe: { ...state.nabe, poll: voted },
       };
       // 全員が投票し終えたとき、または賛成が過半数に達して結果が決まったときは
       // 締め切りを待たずに締める
@@ -880,7 +983,7 @@ export function reduce(state: BotState, event: BotEvent, ctx: BotContext): BotRe
     }
 
     case "tick":
-      return tickGucchi(state, ctx);
+      return tickBots(state, ctx);
   }
 }
 

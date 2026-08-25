@@ -467,7 +467,7 @@ select {
   color: var(--gold-2);
 }
 
-/* ── bot（しゅんぴ / せり / ぐっちー）表示。docs/design/bot.md §2 / §4 ── */
+/* ── bot（しゅんぴ / せり / ぐっちー / なべ）表示。docs/design/bot.md §2 / §4 ── */
 .bot-toggles {
   display: flex;
   flex-wrap: wrap;
@@ -673,7 +673,7 @@ select {
   transform: translateX(-50%);
 }
 
-/* しゅんぴ / せり / ぐっちーで縁の色味を変え、どの役割か見分けやすくする */
+/* しゅんぴ / せり / ぐっちー / なべで縁の色味を変え、どの役割か見分けやすくする */
 .vc-bot-face[data-bot-id="shunpi"] {
   border-color: var(--gold);
 }
@@ -684,6 +684,12 @@ select {
 
 .vc-bot-face[data-bot-id="gucchi"] {
   border-color: var(--gold-3);
+}
+
+/* なべだけ金系から外す。4体を金の濃淡だけで見分けるのは苦しく、
+   既存パレットの --green なら浮かずに区別がつく（鍋の薬味の連想も兼ねる） */
+.vc-bot-face[data-bot-id="nabe"] {
+  border-color: var(--green);
 }
 
 .vc-peer-label.vc-bot-label {

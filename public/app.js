@@ -494,7 +494,8 @@ const VC_QUALITY_MODE_LABELS = {
 const BOT_VC_INFO = [
   { id: "shunpi", name: "しゅんぴ", role: "あだ名をつける" },
   { id: "seri", name: "せり", role: "川柳を見つける" },
-  { id: "gucchi", name: "ぐっちー", role: "場を回す" },
+  { id: "gucchi", name: "ぐっちー", role: "場を温める" },
+  { id: "nabe", name: "なべ", role: "進行を仕切る" },
 ];
 
 /** botId → 自分が #vc-media に足したタイル一式（root 要素と発言演出のタイマー） */

@@ -1492,7 +1492,7 @@ export class RoomManager {
     };
     if (room.roomName !== undefined) snapshot.roomName = room.roomName;
     // 集計中のアンケートは再接続でも復元する。締切だけ渡し、投票済みかは持たせない
-    const poll = entry.bot.gucchi.poll;
+    const poll = entry.bot.nabe.poll;
     if (poll !== null) {
       snapshot.botPoll = { pollId: poll.id, deadline: poll.startedAt + END_POLL_MS };
     }

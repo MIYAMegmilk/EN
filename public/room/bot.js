@@ -1,5 +1,5 @@
 /**
- * bot の表示（しゅんぴ / せり / ぐっちー）
+ * bot の表示（しゅんぴ / せり / ぐっちー / なべ）
  * 詳細仕様書 §3.10 に対応する。ひろし担当。
  *
  * 責務:
@@ -36,7 +36,8 @@
   const BOTS = [
     { id: "shunpi", name: "しゅんぴ", role: "あだ名をつける" },
     { id: "seri", name: "せり", role: "川柳を見つける" },
-    { id: "gucchi", name: "ぐっちー", role: "場を回す" },
+    { id: "gucchi", name: "ぐっちー", role: "場を温める" },
+    { id: "nabe", name: "なべ", role: "進行を仕切る" },
   ];
 
   /** 川柳の定型のモーラ数。表示のラベル（五七五 / 字余り）を出し分ける */
@@ -59,7 +60,7 @@
     /** 自分の playerId（roomState 受信時に呼び出し側から渡される） */
     selfId: null,
     /** bot ごとの ON/OFF */
-    bots: { shunpi: true, seri: true, gucchi: true },
+    bots: { shunpi: true, seri: true, gucchi: true, nabe: true },
     /** 自分がホストか。トグルはホストのみ操作できる（§3.10） */
     isHost: false,
     /** 集計中のアンケート { pollId, deadline } */
@@ -396,7 +397,7 @@
     state.myVote = null;
     state.card = null;
     state.isHost = false;
-    state.bots = { shunpi: true, seri: true, gucchi: true };
+    state.bots = { shunpi: true, seri: true, gucchi: true, nabe: true };
     renderToggles();
     renderStage();
     renderPoll();

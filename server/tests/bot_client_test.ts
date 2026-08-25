@@ -119,7 +119,7 @@ function roomState(overrides: Record<string, unknown> = {}) {
       youId: "p1",
       youAreHost: false,
       hostId: "p9",
-      bots: { shunpi: true, seri: true, gucchi: true },
+      bots: { shunpi: true, seri: true, gucchi: true, nabe: true },
       chat: [],
       ...overrides,
     },
@@ -150,10 +150,10 @@ function senryuMessage(author = "たろう", exact = true) {
   };
 }
 
-Deno.test("bot.js: 3体分のトグルを出す", () => {
+Deno.test("bot.js: 4体分のトグルを出す", () => {
   const { container } = load();
   const text = container.text();
-  for (const name of ["しゅんぴ", "せり", "ぐっちー"]) {
+  for (const name of ["しゅんぴ", "せり", "ぐっちー", "なべ"]) {
     assert(text.includes(name), `${name} のトグルがない`);
   }
 });
@@ -177,7 +177,10 @@ Deno.test("bot.js: ON/OFF はサーバーの botState で反映する（楽観�
   // 送っただけでは変わらない
   assertEquals(Bot.getState().bots.seri, true);
 
-  Bot.handleServerMessage({ t: "botState", bots: { shunpi: true, seri: false, gucchi: true } });
+  Bot.handleServerMessage({
+    t: "botState",
+    bots: { shunpi: true, seri: false, gucchi: true, nabe: true },
+  });
   assertEquals(Bot.getState().bots.seri, false);
   assert(container.text().includes("せり（OFF）"), "OFF が表示に出ていない");
 });
