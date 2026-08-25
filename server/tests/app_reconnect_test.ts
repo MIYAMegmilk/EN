@@ -14,6 +14,7 @@
 import { assert, assertEquals, assertFalse } from "@std/assert";
 import { fromFileUrl } from "@std/path";
 import { SHUTDOWN_CLOSE_CODE } from "../rooms.ts";
+import { createFakeDocument, type FakeElement } from "./fake_dom.ts";
 
 const APP_JS = fromFileUrl(new URL("../../public/app.js", import.meta.url));
 const source = await Deno.readTextFile(APP_JS);
@@ -21,65 +22,6 @@ const source = await Deno.readTextFile(APP_JS);
 // ---------------------------------------------------------------------------
 // 偽の DOM
 // ---------------------------------------------------------------------------
-
-/** app.js が使う範囲だけの要素。textContent と class が読めれば足りる */
-class FakeElement {
-  readonly children: FakeElement[] = [];
-  readonly attributes = new Map<string, string>();
-  readonly dataset: Record<string, string> = {};
-  textContent = "";
-  className = "";
-  value = "";
-  checked = false;
-  disabled = false;
-  scrollTop = 0;
-  scrollHeight = 0;
-
-  constructor(readonly tagName: string, readonly id = "") {}
-
-  readonly classList = {
-    add: (name: string) => this.setClasses([...this.classes(), name]),
-    remove: (name: string) => this.setClasses(this.classes().filter((c) => c !== name)),
-    contains: (name: string) => this.classes().includes(name),
-    toggle: (name: string, force?: boolean) => {
-      const on = force ?? !this.classes().includes(name);
-      if (on) this.classList.add(name);
-      else this.classList.remove(name);
-      return on;
-    },
-  };
-
-  private classes(): string[] {
-    return this.className.split(" ").filter((c) => c.length > 0);
-  }
-
-  private setClasses(list: string[]): void {
-    this.className = [...new Set(list)].join(" ");
-  }
-
-  get firstChild(): FakeElement | null {
-    return this.children[0] ?? null;
-  }
-
-  appendChild(child: FakeElement): FakeElement {
-    this.children.push(child);
-    return child;
-  }
-
-  removeChild(child: FakeElement): void {
-    const at = this.children.indexOf(child);
-    if (at >= 0) this.children.splice(at, 1);
-  }
-
-  remove(): void {}
-  addEventListener(): void {}
-  setAttribute(name: string, value: string): void {
-    this.attributes.set(name, value);
-  }
-  querySelectorAll(): FakeElement[] {
-    return [];
-  }
-}
 
 /** 開かれた WebSocket の偽物。テストからイベントを起こせるようにする */
 class FakeSocket {
@@ -139,6 +81,8 @@ type Harness = {
   app: App;
   elements: Map<string, FakeElement>;
   storage: Map<string, string>;
+  /** VC / Chat などのモジュールで呼ばれた関数（"VC.teardown" 形式） */
+  calls: string[];
   /** 予約されたタイマーを、待たずに全部発火する */
   runTimers(): void;
   /** 予約されているタイマーの遅延（ミリ秒、予約順） */
@@ -148,11 +92,19 @@ type Harness = {
 };
 
 /** 何もしないダミーモジュール（vc.js / chat.js などの代わり） */
-function stubModule(extra: Record<string, unknown> = {}): Record<string, unknown> {
+function stubModule(
+  name: string,
+  calls: string[],
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
   return new Proxy({ ...extra }, {
     get(target, prop: string) {
       if (prop in target) return target[prop];
-      return () => {};
+      // 呼ばれたことだけ控える（どのモジュールのどの関数を呼んだかの検証用）
+      return (...args: unknown[]) => {
+        calls.push(`${name}.${prop}`);
+        return args.length === 0 ? undefined : undefined;
+      };
     },
   });
 }
@@ -160,31 +112,11 @@ function stubModule(extra: Record<string, unknown> = {}): Record<string, unknown
 /** app.js を偽の環境で読み込む */
 async function load(): Promise<Harness> {
   FakeSocket.instances = [];
-  const elements = new Map<string, FakeElement>();
+  const { elements, document } = createFakeDocument();
   const storage = new Map<string, string>();
   const timers: Array<{ id: number; fn: () => void; ms: number }> = [];
+  const calls: string[] = [];
   let timerSeq = 1;
-
-  const getElementById = (id: string): FakeElement => {
-    const found = elements.get(id);
-    if (found !== undefined) return found;
-    const created = new FakeElement("div", id);
-    // index.html の #error は .alert（赤い警告）で始まる
-    if (id === "error") created.className = "alert";
-    elements.set(id, created);
-    return created;
-  };
-
-  const document = {
-    getElementById,
-    createElement: (tag: string) => new FakeElement(tag),
-    createTextNode: (text: string) => {
-      const node = new FakeElement("#text");
-      node.textContent = text;
-      return node;
-    },
-    querySelectorAll: () => [] as FakeElement[],
-  };
 
   // 起動時に叩く API はすべて「使えない」応答にする（app.js は握りつぶして続行する）
   const fetchStub = () =>
@@ -229,7 +161,7 @@ async function load(): Promise<Harness> {
       const at = timers.findIndex((t) => t.id === id);
       if (at >= 0) timers.splice(at, 1);
     },
-    stubModule({
+    stubModule("VC", calls, {
       getState: () => ({
         active: false,
         muted: false,
@@ -239,10 +171,10 @@ async function load(): Promise<Harness> {
         quality: null,
       }),
     }),
-    stubModule({ getState: () => ({ enabled: false }), isSupported: () => false }),
-    stubModule(),
-    stubModule({ getState: () => ({ bots: {} }) }),
-    stubModule(),
+    stubModule("Voice", calls, { getState: () => ({ enabled: false }), isSupported: () => false }),
+    stubModule("Chat", calls),
+    stubModule("Bot", calls, { getState: () => ({ bots: {} }) }),
+    stubModule("Sandbox", calls),
   ) as App;
 
   // start() は fetch を await してから connect() する。その解決を待つ
@@ -252,13 +184,15 @@ async function load(): Promise<Harness> {
     app,
     elements,
     storage,
+    calls,
     runTimers: () => {
       const pending = timers.splice(0, timers.length);
       for (const timer of pending) timer.fn();
     },
     timerDelays: () => timers.map((t) => t.ms),
     socket: () => FakeSocket.instances[FakeSocket.instances.length - 1],
-    errorBox: () => getElementById("error"),
+    // 未生成でも作られるよう document 経由で取る
+    errorBox: () => document.getElementById("error"),
   };
 }
 
@@ -375,6 +309,25 @@ Deno.test("app.js: 再起動での復帰 join が ROOM_NOT_FOUND なら、解散
   // 次に取れる行動（別の卓に入る・作り直す）へ繋がるよう、一覧の見える画面に戻す
   assertFalse(h.elements.get("entry")!.classList.contains("hidden"), "卓一覧が見える");
   assert(h.elements.get("room")!.classList.contains("hidden"), "卓の画面は畳む");
+});
+
+Deno.test("app.js: 再起動での解散では、bye を送らない後始末で VC を畳む", async () => {
+  const h = await load();
+  enterRoom(h);
+  h.socket().closeFromServer(SHUTDOWN_CLOSE_CODE);
+  h.runTimers();
+  h.socket().open();
+  h.calls.length = 0;
+
+  h.socket().receive({ t: "error", code: "ROOM_NOT_FOUND", message: "ルームが見つかりません" });
+
+  // teardown はピアへ bye を送らずにマイク・カメラを止める（vc_teardown_test.ts で検証）。
+  // ここで leave() を呼ぶと、繋ぎ直した先の新しいサーバーへ宛先不明の rtcSignal が飛び、
+  // その拒否応答で「サーバーが再起動したため…」の案内が消えてしまう
+  assert(h.calls.includes("VC.teardown"), `VC.teardown が呼ばれていない: ${h.calls.join(", ")}`);
+  assertFalse(h.calls.includes("VC.leave"), "再起動での解散で bye を送ってはいけない");
+  // 案内が VC 側の通知で上書きされていないこと
+  assert(h.errorBox().textContent.includes("解散"));
 });
 
 Deno.test("app.js: 打ち間違いの ROOM_NOT_FOUND は今までどおりのエラー表示", async () => {
