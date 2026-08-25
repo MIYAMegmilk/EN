@@ -6,7 +6,7 @@
  * ユーザー投稿は一切受け付けない。bot の発話はすべてこのファイルの文面から選ぶ。
  * 外部 AI API は使わない（§3.10）。
  *
- * bot の表示名はここだけを直せば変えられる。せり・ぐっちーは仮称。
+ * bot の表示名はここだけを直せば変えられる。せり・ぐっちー・なべは仮称。
  */
 
 import type { HobbyTagId } from "./hobby_tags.ts";
@@ -29,15 +29,23 @@ export type BotProfile = {
   role: string;
 };
 
-/** ルームにいる bot 3体。参加者数にはカウントしない（§3.10） */
+/**
+ * ルームにいる bot 4体。参加者数にはカウントしない（§3.10）。
+ *
+ * ぐっちーとなべを分けているのは、以前ぐっちー1体が「挨拶・話題カード・相槌・
+ * ゲーム提案・終了アンケート・締め」の6役を抱えていて、10分5発話の枠を
+ * 役割どうしで食い合っていたため（大人数が同時入室すると4人目以降の挨拶が
+ * 消えるなど）。「場を温める」役と「進行を仕切る」役に割り、枠も別々にした。
+ */
 export const BOTS: Readonly<Record<BotId, BotProfile>> = {
   shunpi: { id: "shunpi", name: "しゅんぴ", role: "あだ名をつける" },
   seri: { id: "seri", name: "せり", role: "川柳を見つける" },
-  gucchi: { id: "gucchi", name: "ぐっちー", role: "場を回す" },
+  gucchi: { id: "gucchi", name: "ぐっちー", role: "場を温める" },
+  nabe: { id: "nabe", name: "なべ", role: "進行を仕切る" },
 };
 
 /** 全 bot の識別子 */
-export const BOT_IDS: readonly BotId[] = ["shunpi", "seri", "gucchi"];
+export const BOT_IDS: readonly BotId[] = ["shunpi", "seri", "gucchi", "nabe"];
 
 // ---------------------------------------------------------------------------
 // しゅんぴ（あだ名bot）
@@ -117,7 +125,9 @@ export const SENRYU_VOICE_TEXTS: readonly string[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// ぐっちー（場回しbot）
+// ぐっちー（場を温めるbot）
+//
+// 担当は「挨拶・話題カード・相槌」。場の温度を上げる側で、進行の判断はしない。
 // ---------------------------------------------------------------------------
 
 /** 入室者への挨拶。{name} は入室者のあだ名 */
@@ -165,6 +175,26 @@ export const TOPIC_CARDS: readonly TopicCard[] = [
   { id: "work", text: "今日はどんな一日でした？", tags: [] },
 ];
 
+/** ラウンド結果への相槌。{name} は首位のあだ名 */
+export const ROUND_REACTION_TEXTS: readonly string[] = [
+  "{name}さん強いですね",
+  "いい勝負です。{name}さんを追いかけましょう",
+  "{name}さんが抜けてますね",
+];
+
+/** 最終結果への相槌。{name} は優勝者のあだ名 */
+export const FINAL_REACTION_TEXTS: readonly string[] = [
+  "{name}さん優勝おめでとう。拍手",
+  "お疲れさまでした。{name}さんの勝ちです",
+];
+
+// ---------------------------------------------------------------------------
+// なべ（進行bot）
+//
+// 鍋奉行の「なべ」。担当は「ゲームに誘う・お開きを切り出す・締める」。
+// 場を温めるぐっちーと違い、こちらは会の進行そのものを動かす発話しか持たない。
+// ---------------------------------------------------------------------------
+
 /** ゲーム提案の文。{title} に提案するゲーム名が入る */
 export const GAME_SUGGEST_TEXTS: readonly string[] = [
   "「{title}」でもやってみます？ホストの人、よかったら選んでください",
@@ -188,19 +218,6 @@ export const CLOSING_TEXTS: readonly string[] = [
 export const CONTINUE_TEXTS: readonly string[] = [
   "まだいけますね。もう少し続けましょう",
   "続行です。おかわりどうぞ",
-];
-
-/** ラウンド結果への相槌。{name} は首位のあだ名 */
-export const ROUND_REACTION_TEXTS: readonly string[] = [
-  "{name}さん強いですね",
-  "いい勝負です。{name}さんを追いかけましょう",
-  "{name}さんが抜けてますね",
-];
-
-/** 最終結果への相槌。{name} は優勝者のあだ名 */
-export const FINAL_REACTION_TEXTS: readonly string[] = [
-  "{name}さん優勝おめでとう。拍手",
-  "お疲れさまでした。{name}さんの勝ちです",
 ];
 
 // ---------------------------------------------------------------------------

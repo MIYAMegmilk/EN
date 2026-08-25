@@ -284,7 +284,7 @@ Deno.test("配線: ホストが bot を OFF にすると botState が配信さ�
 
   const state = last(host.link, "botState");
   assertExists(state);
-  assertEquals(state.bots, { shunpi: false, seri: false, gucchi: false });
+  assertEquals(state.bots, { shunpi: false, seri: false, gucchi: false, nabe: false });
 
   const before = botChats(host.link).length;
   manager.handle(host.link, { t: "chat", text: "ふるいけやかわずとびこむみずのおと" });
@@ -302,6 +302,7 @@ Deno.test("配線: botId を指定すると1体だけ切り替わる", () => {
     shunpi: true,
     seri: false,
     gucchi: true,
+    nabe: true,
   });
   // せりは黙るが、ぐっちーの挨拶は出る
   manager.handle(host.link, { t: "chat", text: "ふるいけやかわずとびこむみずのおと" });
@@ -344,7 +345,7 @@ Deno.test("配線: 知らない botId は INVALID_INPUT", () => {
 Deno.test("配線: スナップショットに bot の ON/OFF が入る", () => {
   const { manager } = setup();
   const host = createRoom(manager);
-  assertEquals(host.snapshot.bots, { shunpi: true, seri: true, gucchi: true });
+  assertEquals(host.snapshot.bots, { shunpi: true, seri: true, gucchi: true, nabe: true });
   assertEquals(host.snapshot.botPoll, undefined);
   manager.dispose();
 });
@@ -398,7 +399,7 @@ Deno.test("配線: 終了アンケートは過半数の賛成で締切前に締�
   assertExists(poll, "沈黙を続ければ終了アンケートまで到達すること");
   assert(poll.card?.c === "endPoll");
   const pollId = poll.card.pollId;
-  assertEquals(poll.botId, "gucchi");
+  assertEquals(poll.botId, "nabe");
 
   // 集計中は再接続者のスナップショットにも載る
   const late = new MockLink();
@@ -438,5 +439,49 @@ Deno.test("配線: 締め切ったアンケートへの遅れた投票は PHASE_
   manager.handle(guest, { t: "endPollVote", pollId, agree: false });
 
   assertEquals(last(guest, "error")?.code, "PHASE_MISMATCH");
+  manager.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// ぐっちー / なべの分割（§3.10）
+// ---------------------------------------------------------------------------
+
+Deno.test("配線: ゲーム提案はなべの名前で届く（新しい bot が配信経路に載っている）", () => {
+  const { clock, manager } = setup();
+  const host = createRoom(manager);
+
+  // 静かなロビーが続くと、まず話題カード、続いてゲーム提案が出る
+  let suggest: ReturnType<typeof botChats>[number] | undefined;
+  for (let i = 0; i < 30 && suggest === undefined; i++) {
+    clock.advance(60_000);
+    suggest = botChats(host.link).find((m) => m.botKind === "gameSuggest");
+  }
+  assertExists(suggest, "沈黙を続ければゲーム提案まで到達すること");
+  assertEquals(suggest.botId, "nabe");
+  assertEquals(suggest.nickname, BOTS.nabe.name);
+  manager.dispose();
+});
+
+Deno.test("配線: なべだけ OFF にしてもぐっちーは喋る（枠と ON/OFF は bot ごと）", () => {
+  const { clock, manager } = setup();
+  const host = createRoom(manager);
+  manager.handle(host.link, { t: "setBot", botId: "nabe", enabled: false });
+
+  assertEquals(last(host.link, "botState")?.bots, {
+    shunpi: true,
+    seri: true,
+    gucchi: true,
+    nabe: false,
+  });
+
+  // 入室の挨拶（ぐっちー）は出る
+  const guest = new MockLink();
+  manager.handle(guest, { t: "join", roomCode: host.code, nickname: "ゲスト" });
+  assertExists(botChats(host.link).find((m) => m.botKind === "greeting"));
+
+  // 沈黙が続いても、話題カードは出るがゲーム提案は出ない
+  for (let i = 0; i < 30; i++) clock.advance(60_000);
+  assertExists(botChats(host.link).find((m) => m.botKind === "topic"));
+  assertEquals(botChats(host.link).filter((m) => m.botKind === "gameSuggest").length, 0);
   manager.dispose();
 });

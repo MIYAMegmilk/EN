@@ -171,8 +171,8 @@ export type PendingEntry = {
 // §3.10 場回し bot
 // ---------------------------------------------------------------------------
 
-/** bot の識別子（§3.10）。ルームには役割の違う3体がいる */
-export type BotId = "shunpi" | "seri" | "gucchi";
+/** bot の識別子（§3.10）。ルームには役割の違う4体がいる */
+export type BotId = "shunpi" | "seri" | "gucchi" | "nabe";
 
 /** bot ごとの ON/OFF（§3.10） */
 export type BotSwitches = Record<BotId, boolean>;

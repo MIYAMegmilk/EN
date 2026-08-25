@@ -5,17 +5,20 @@
 
 import { assert, assertEquals, assertNotEquals } from "@std/assert";
 import {
+  BOT_RATE_WINDOW_MS,
   type BotContext,
   type BotEvent,
+  type BotId,
   type BotResult,
   type BotState,
   createBotState,
   END_POLL_MAX,
+  END_POLL_MIN_AGE_MS,
   END_POLL_MS,
   GUCCHI_RATE_MAX,
-  GUCCHI_RATE_WINDOW_MS,
   LOBBY_QUIET_MS,
   LOBBY_SUGGEST_MS,
+  NABE_RATE_MAX,
   pickNickname,
   QUOTE_LINE_MAX,
   reduce,
@@ -25,6 +28,7 @@ import {
   SILENCE_MS,
 } from "../bot.ts";
 import {
+  BOT_IDS,
   BOTS,
   CLOSING_TEXTS,
   CONTINUE_TEXTS,
@@ -382,7 +386,7 @@ Deno.test("ぐっちー: 声で会話が続いている部屋を沈黙と判定�
 });
 
 // ---------------------------------------------------------------------------
-// ぐっちー（場回しbot）: 沈黙検知
+// ぐっちー（場を温めるbot）: 沈黙検知
 // ---------------------------------------------------------------------------
 
 Deno.test("ぐっちー: 沈黙3分で話題カードを投げる", () => {
@@ -432,10 +436,10 @@ Deno.test("ぐっちー: 共通タグがあれば対応する話題カードを�
 });
 
 // ---------------------------------------------------------------------------
-// ぐっちー: ゲーム提案
+// なべ（進行bot）: ゲーム提案
 // ---------------------------------------------------------------------------
 
-Deno.test("ぐっちー: 静かなロビーが5分続くとゲームを提案する", () => {
+Deno.test("なべ: 静かなロビーが5分続くとゲームを提案する", () => {
   // 会話が続いているあいだは lobbySince が進むので提案しない
   let chatty = createBotState(T0);
   for (let minute = 1; minute <= 5; minute++) {
@@ -464,22 +468,22 @@ Deno.test("ぐっちー: 静かなロビーが5分続くとゲームを提案す
   assert(suggest.text.includes("大喜利"));
 });
 
-Deno.test("ぐっちー: ゲームを1本遊び終えたら提案の弾を補充する", () => {
+Deno.test("なべ: ゲームを1本遊び終えたら提案の弾を補充する", () => {
   let state = createBotState(T0);
   // 3本すべて提案して弾切れにする
   for (let i = 1; i <= 8; i++) state = reduce(state, { t: "tick" }, ctx(T0 + SILENCE_MS * i)).state;
-  assertEquals(state.gucchi.suggestedGameIds.length, 3);
+  assertEquals(state.nabe.suggestedGameIds.length, 3);
   // ゲームを始めて終える
   state = reduce(state, { t: "phaseChanged", phase: "input" }, ctx(T0 + 60 * 60_000)).state;
   state = reduce(state, { t: "phaseChanged", phase: "lobby" }, ctx(T0 + 70 * 60_000)).state;
   assertEquals(
-    state.gucchi.suggestedGameIds.length,
+    state.nabe.suggestedGameIds.length,
     1,
     "遊び終えても弾が補充されない（直前の1本だけ残す）",
   );
 });
 
-Deno.test("ぐっちー: 同じゲームを二度提案しない", () => {
+Deno.test("なべ: 同じゲームを二度提案しない", () => {
   let state = createBotState(T0);
   const suggested: string[] = [];
   for (let i = 1; i <= 8; i++) {
@@ -494,17 +498,17 @@ Deno.test("ぐっちー: 同じゲームを二度提案しない", () => {
 });
 
 // ---------------------------------------------------------------------------
-// ぐっちー: 終了アンケート
+// なべ: 終了アンケート
 // ---------------------------------------------------------------------------
 
-Deno.test("ぐっちー: 沈黙が続くと終了アンケートを出す", () => {
+Deno.test("なべ: 沈黙が続くと終了アンケートを出す", () => {
   const { state, pollId } = advanceToPoll();
-  assertEquals(state.gucchi.poll?.id, pollId);
+  assertEquals(state.nabe.poll?.id, pollId);
 });
 
-Deno.test("ぐっちー: 過半数が賛成したら締めの一言を出す", () => {
+Deno.test("なべ: 過半数が賛成したら締めの一言を出す", () => {
   const { state, pollId } = advanceToPoll();
-  const at = (state.gucchi.poll?.startedAt ?? T0) + 1_000;
+  const at = (state.nabe.poll?.startedAt ?? T0) + 1_000;
   const voted = run(state, [
     { at, event: { t: "endPollVote", pollId, playerId: "p1", agree: true } },
     { at: at + 1, event: { t: "endPollVote", pollId, playerId: "p2", agree: true } },
@@ -513,12 +517,12 @@ Deno.test("ぐっちー: 過半数が賛成したら締めの一言を出す", (
   const closing = voted.all.find((u) => u.kind === "closing");
   assert(closing !== undefined);
   assert(CLOSING_TEXTS.includes(closing.text), `締めの文面ではない: ${closing.text}`);
-  assertEquals(voted.state.gucchi.poll, null);
+  assertEquals(voted.state.nabe.poll, null);
 });
 
-Deno.test("ぐっちー: 過半数に届かなければ続行の一言を出す", () => {
+Deno.test("なべ: 過半数に届かなければ続行の一言を出す", () => {
   const { state, pollId } = advanceToPoll();
-  const at = (state.gucchi.poll?.startedAt ?? T0) + 1_000;
+  const at = (state.nabe.poll?.startedAt ?? T0) + 1_000;
   const result = run(state, [
     { at, event: { t: "endPollVote", pollId, playerId: "p1", agree: true } },
     { at: at + 1, event: { t: "endPollVote", pollId, playerId: "p2", agree: false } },
@@ -530,12 +534,12 @@ Deno.test("ぐっちー: 過半数に届かなければ続行の一言を出す"
     CONTINUE_TEXTS.includes(result.all[0].text),
     `続行の文面ではない: ${result.all[0].text}`,
   );
-  assertEquals(result.state.gucchi.poll, null);
+  assertEquals(result.state.nabe.poll, null);
 });
 
-Deno.test("ぐっちー: 締め切り時刻を過ぎたら tick で集計する", () => {
+Deno.test("なべ: 締め切り時刻を過ぎたら tick で集計する", () => {
   const { state, pollId } = advanceToPoll();
-  const startedAt = state.gucchi.poll?.startedAt ?? T0;
+  const startedAt = state.nabe.poll?.startedAt ?? T0;
   const voted = reduce(
     state,
     { t: "endPollVote", pollId, playerId: "p1", agree: true },
@@ -544,12 +548,12 @@ Deno.test("ぐっちー: 締め切り時刻を過ぎたら tick で集計する"
   assertEquals(voted.utterances.length, 0, "全員そろうまでは締めない");
   const closed = reduce(voted.state, { t: "tick" }, ctx(startedAt + END_POLL_MS));
   assertEquals(closed.utterances.length, 1);
-  assertEquals(closed.state.gucchi.poll, null);
+  assertEquals(closed.state.nabe.poll, null);
 });
 
-Deno.test("ぐっちー: 別のアンケートID宛の遅延投票は無視する", () => {
+Deno.test("なべ: 別のアンケートID宛の遅延投票は無視する", () => {
   const { state, pollId } = advanceToPoll();
-  const at = (state.gucchi.poll?.startedAt ?? T0) + 1_000;
+  const at = (state.nabe.poll?.startedAt ?? T0) + 1_000;
   const stale = run(state, [
     { at, event: { t: "endPollVote", pollId: `${pollId}-old`, playerId: "p1", agree: true } },
     {
@@ -558,24 +562,24 @@ Deno.test("ぐっちー: 別のアンケートID宛の遅延投票は無視す�
     },
   ]);
   assertEquals(stale.all.length, 0);
-  assertEquals(stale.state.gucchi.poll?.votes, {});
+  assertEquals(stale.state.nabe.poll?.votes, {});
 });
 
-Deno.test("ぐっちー: 接続していないIDからの投票は数えない", () => {
+Deno.test("なべ: 接続していないIDからの投票は数えない", () => {
   const { state, pollId } = advanceToPoll();
-  const at = (state.gucchi.poll?.startedAt ?? T0) + 1_000;
+  const at = (state.nabe.poll?.startedAt ?? T0) + 1_000;
   const ghosts = run(state, [
     { at, event: { t: "endPollVote", pollId, playerId: "x1", agree: true } },
     { at: at + 1, event: { t: "endPollVote", pollId, playerId: "x2", agree: true } },
     { at: at + 2, event: { t: "endPollVote", pollId, playerId: "x3", agree: true } },
   ]);
   assertEquals(ghosts.all.length, 0, "幽霊票だけでは締まらない");
-  assertEquals(ghosts.state.gucchi.poll?.votes, {});
+  assertEquals(ghosts.state.nabe.poll?.votes, {});
 });
 
-Deno.test("ぐっちー: 退室で人数が減ったら残りの票だけで締める", () => {
+Deno.test("なべ: 退室で人数が減ったら残りの票だけで締める", () => {
   const { state, pollId } = advanceToPoll();
-  const at = (state.gucchi.poll?.startedAt ?? T0) + 1_000;
+  const at = (state.nabe.poll?.startedAt ?? T0) + 1_000;
   // p1・p2 が投票済みで未決 → p3 が退室すると 2人中2人投票済みになり決着する
   const voted = run(state, [
     { at, event: { t: "endPollVote", pollId, playerId: "p1", agree: true } },
@@ -588,12 +592,12 @@ Deno.test("ぐっちー: 退室で人数が減ったら残りの票だけで締�
     ctx(at + 2, { connectedPlayerIds: ["p1", "p2"] }),
   );
   assertEquals(left.utterances.length, 1);
-  assertEquals(left.state.gucchi.poll, null);
+  assertEquals(left.state.nabe.poll, null);
 });
 
-Deno.test("ぐっちー: 退室した人の票は無効になる", () => {
+Deno.test("なべ: 退室した人の票は無効になる", () => {
   const { state, pollId } = advanceToPoll();
-  const at = (state.gucchi.poll?.startedAt ?? T0) + 1_000;
+  const at = (state.nabe.poll?.startedAt ?? T0) + 1_000;
   const voted =
     reduce(state, { t: "endPollVote", pollId, playerId: "p1", agree: true }, ctx(at)).state;
   const left = reduce(
@@ -601,19 +605,19 @@ Deno.test("ぐっちー: 退室した人の票は無効になる", () => {
     { t: "playerLeft", playerId: "p1" },
     ctx(at + 1, { connectedPlayerIds: ["p2", "p3"] }),
   ).state;
-  assertEquals(left.gucchi.poll?.votes, {});
+  assertEquals(left.nabe.poll?.votes, {});
 });
 
-Deno.test("ぐっちー: 終了アンケートは1ルームにつき1回しか出さない", () => {
+Deno.test("なべ: 終了アンケートは1ルームにつき1回しか出さない", () => {
   const { state, pollId } = advanceToPoll();
-  const startedAt = state.gucchi.poll?.startedAt ?? T0;
+  const startedAt = state.nabe.poll?.startedAt ?? T0;
   const closed = run(state, [
     { at: startedAt + 1, event: { t: "endPollVote", pollId, playerId: "p1", agree: false } },
     { at: startedAt + 2, event: { t: "endPollVote", pollId, playerId: "p2", agree: false } },
     { at: startedAt + 3, event: { t: "endPollVote", pollId, playerId: "p3", agree: false } },
   ]);
-  assertEquals(closed.state.gucchi.poll, null);
-  assertEquals(closed.state.gucchi.pollsHeld, 1);
+  assertEquals(closed.state.nabe.poll, null);
+  assertEquals(closed.state.nabe.pollsHeld, 1);
   // クールダウン中（60分）は訊き直さない
   let s = closed.state;
   let askedDuringCooldown = 0;
@@ -631,19 +635,19 @@ Deno.test("ぐっちー: 終了アンケートは1ルームにつき1回しか�
     asked += result.utterances.filter((u) => u.kind === "endPoll").length;
   }
   assertEquals(asked, 1, "上限2回を超えて訊いている / まったく訊かない");
-  assertEquals(s.gucchi.pollsHeld, END_POLL_MAX);
+  assertEquals(s.nabe.pollsHeld, END_POLL_MAX);
 });
 
-Deno.test("ぐっちー: お開きで締めたあとは二度と訊かない", () => {
+Deno.test("なべ: お開きで締めたあとは二度と訊かない", () => {
   const { state, pollId } = advanceToPoll();
-  const startedAt = state.gucchi.poll?.startedAt ?? T0;
+  const startedAt = state.nabe.poll?.startedAt ?? T0;
   // 過半数賛成で締める
   const closed = run(state, [
     { at: startedAt + 1, event: { t: "endPollVote", pollId, playerId: "p1", agree: true } },
     { at: startedAt + 2, event: { t: "endPollVote", pollId, playerId: "p2", agree: true } },
   ]);
   assertEquals(closed.all[0].kind, "closing");
-  assertEquals(closed.state.gucchi.pollsHeld, END_POLL_MAX, "締めたら打ち止めのはず");
+  assertEquals(closed.state.nabe.pollsHeld, END_POLL_MAX, "締めたら打ち止めのはず");
   let s = closed.state;
   let asked = 0;
   for (let i = 1; i <= 300; i++) {
@@ -658,20 +662,25 @@ Deno.test("ぐっちー: お開きで締めたあとは二度と訊かない", (
 // 発話枠と ON/OFF
 // ---------------------------------------------------------------------------
 
-Deno.test("ぐっちー: どの10分窓を切っても5発話を超えない（§3.10）", () => {
+Deno.test("枠: どの10分窓を切っても bot ごとの上限を超えない（§3.10）", () => {
   let state = createBotState(T0);
-  const spokenAt: number[] = [];
-  // 1分ごとに2時間ぶん回し、発話時刻を全部記録する
+  const spoken: Array<{ at: number; botId: BotId }> = [];
+  // 1分ごとに2時間ぶん回し、発話時刻を bot ごとに全部記録する
   for (let i = 1; i <= 120; i++) {
     const at = T0 + 60_000 * i;
     const result = reduce(state, { t: "tick" }, ctx(at));
     state = result.state;
-    for (const _ of result.utterances) spokenAt.push(at);
+    for (const utterance of result.utterances) spoken.push({ at, botId: utterance.botId });
   }
-  assert(spokenAt.length > 0, "そもそも発話が起きていない");
-  for (const start of spokenAt) {
-    const inWindow = spokenAt.filter((at) => at >= start && at - start < GUCCHI_RATE_WINDOW_MS);
-    assert(inWindow.length <= GUCCHI_RATE_MAX, `10分窓に ${inWindow.length} 発話`);
+  assert(spoken.length > 0, "そもそも発話が起きていない");
+  // 枠は bot ごとに独立しているので、窓も bot ごとに切って数える
+  const max: Record<string, number> = { gucchi: GUCCHI_RATE_MAX, nabe: NABE_RATE_MAX };
+  for (const [botId, limit] of Object.entries(max)) {
+    const times = spoken.filter((s) => s.botId === botId).map((s) => s.at);
+    for (const start of times) {
+      const inWindow = times.filter((at) => at >= start && at - start < BOT_RATE_WINDOW_MS);
+      assert(inWindow.length <= limit, `${botId} の10分窓に ${inWindow.length} 発話`);
+    }
   }
 });
 
@@ -723,7 +732,7 @@ Deno.test("ぐっちー: 10分の窓から外れた発話は数えなおす", ()
   const stillFull = reduce(state, { t: "tick" }, ctx(T0 + SILENCE_MS));
   assertEquals(stillFull.utterances.length, 0);
 
-  const later = reduce(state, { t: "tick" }, ctx(T0 + GUCCHI_RATE_WINDOW_MS));
+  const later = reduce(state, { t: "tick" }, ctx(T0 + BOT_RATE_WINDOW_MS));
   assertEquals(later.utterances.length, 1);
 });
 
@@ -764,13 +773,24 @@ Deno.test("setBot: しゅんぴ単体・ぐっちー単体でも切り替わる"
     { t: "setBot", botId: "gucchi", enabled: false },
     ctx(T0),
   );
+  // ぐっちーが黙ること（＝話題カードが出ないこと）を見る。
+  // なべは独立して動くので「発話が0件」ではなく「ぐっちーの発話が0件」で判定する
   const silent = reduce(noGucchi.state, { t: "tick" }, ctx(T0 + SILENCE_MS));
-  assertEquals(silent.utterances.length, 0);
+  assertEquals(silent.utterances.filter((u) => u.botId === "gucchi").length, 0);
+  assertEquals(silent.utterances.filter((u) => u.kind === "topic").length, 0);
 });
 
-Deno.test("setBot: botId 省略で3体まとめて切り替わる", () => {
+Deno.test("setBot: botId 省略で4体まとめて切り替わる", () => {
   const off = reduce(createBotState(T0), { t: "setBot", enabled: false }, ctx(T0));
-  assertEquals(off.state.enabled, { shunpi: false, seri: false, gucchi: false });
+  assertEquals(off.state.enabled, {
+    shunpi: false,
+    seri: false,
+    gucchi: false,
+    nabe: false,
+  });
+  // ON も同様にまとめて戻る
+  const on = reduce(off.state, { t: "setBot", enabled: true }, ctx(T0 + 1));
+  assertEquals(on.state.enabled, { shunpi: true, seri: true, gucchi: true, nabe: true });
   const nothing = run(off.state, [
     {
       at: T0 + 1,
@@ -781,11 +801,17 @@ Deno.test("setBot: botId 省略で3体まとめて切り替わる", () => {
   assertEquals(nothing.all.length, 0);
 });
 
-Deno.test("BOTS: 3体の表示名が定義されている", () => {
+Deno.test("BOTS: 4体の表示名と役割が定義されている", () => {
   assertEquals(BOTS.shunpi.name, "しゅんぴ");
   assertEquals(BOTS.seri.name, "せり");
   assertEquals(BOTS.gucchi.name, "ぐっちー");
-  assertEquals(Object.keys(BOTS).length, 3);
+  assertEquals(BOTS.nabe.name, "なべ");
+  assertEquals(Object.keys(BOTS).length, 4);
+  // 役割は UI のトグルに出るので、ぐっちーとなべの違いが分かる文言にしておく
+  assertEquals(BOTS.gucchi.role, "場を温める");
+  assertEquals(BOTS.nabe.role, "進行を仕切る");
+  // BOT_IDS と BOTS の顔ぶれがずれていないこと
+  assertEquals([...BOT_IDS].sort(), Object.keys(BOTS).sort());
 });
 
 // ---------------------------------------------------------------------------
@@ -798,8 +824,9 @@ Deno.test("BOTS: 3体の表示名が定義されている", () => {
 Deno.test("§3.10 の数値が仕様どおりであること", () => {
   assertEquals(SILENCE_MS, 3 * 60_000, "沈黙検知は3分");
   assertEquals(SILENCE_MAX_STREAK, 2, "話題カードの連続投下は2回まで");
-  assertEquals(GUCCHI_RATE_MAX, 5, "場回しbotは10分あたり5発話まで");
-  assertEquals(GUCCHI_RATE_WINDOW_MS, 10 * 60_000, "発話枠の窓は10分");
+  assertEquals(GUCCHI_RATE_MAX, 5, "ぐっちーは10分あたり5発話まで");
+  assertEquals(NABE_RATE_MAX, 2, "なべは10分あたり2発話まで");
+  assertEquals(BOT_RATE_WINDOW_MS, 10 * 60_000, "発話枠の窓は10分");
   assertEquals(LOBBY_SUGGEST_MS, 5 * 60_000, "ロビー5分でゲーム提案");
   assertEquals(END_POLL_MS, 60_000, "終了アンケートの集計は60秒");
   assertEquals(SENRYU_MEMORY, 5, "せりが覚えている川柳は5件");
@@ -850,16 +877,16 @@ Deno.test("回帰: ゲーム中はロビー起点のゲーム提案が発火し�
   }
 });
 
-Deno.test("回帰: ぐっちー OFF でもアンケートは締切で必ず閉じる", () => {
+Deno.test("回帰: なべ OFF でもアンケートは締切で必ず閉じる", () => {
   const { state, pollId } = advanceToPoll();
-  const off = reduce(state, { t: "setBot", botId: "gucchi", enabled: false }, ctx(T0)).state;
-  assert(off.gucchi.poll !== null);
+  const off = reduce(state, { t: "setBot", botId: "nabe", enabled: false }, ctx(T0)).state;
+  assert(off.nabe.poll !== null);
   const voted = reduce(off, { t: "endPollVote", pollId, playerId: "p1", agree: true }, ctx(T0 + 1));
-  assertEquals(voted.utterances.length, 0, "OFF のぐっちーが喋っている");
-  const startedAt = state.gucchi.poll?.startedAt ?? T0;
+  assertEquals(voted.utterances.length, 0, "OFF のなべが喋っている");
+  const startedAt = state.nabe.poll?.startedAt ?? T0;
   const closed = reduce(voted.state, { t: "tick" }, ctx(startedAt + END_POLL_MS));
   assertEquals(closed.utterances.length, 0);
-  assertEquals(closed.state.gucchi.poll, null, "OFF だとアンケートが閉じない");
+  assertEquals(closed.state.nabe.poll, null, "OFF だとアンケートが閉じない");
 });
 
 Deno.test("回帰: A/B 交互のコピペ連投は弾く", () => {
@@ -892,7 +919,7 @@ Deno.test("回帰: A/B 交互のコピペ連投は弾く", () => {
 Deno.test("回帰: 未投票者が一時切断しても結論を出さない（§8）", () => {
   const four = ["a", "b", "c", "d"];
   const { state, pollId } = advanceToPoll({ connectedPlayerIds: four });
-  const at = (state.gucchi.poll?.startedAt ?? T0) + 1_000;
+  const at = (state.nabe.poll?.startedAt ?? T0) + 1_000;
   const voted = run(state, [
     {
       at,
@@ -913,7 +940,7 @@ Deno.test("回帰: 未投票者が一時切断しても結論を出さない（�
     ctx(at + 2, { connectedPlayerIds: ["a", "b", "c"] }),
   );
   assertEquals(dropped.utterances.length, 0, "一時切断だけで締めてしまっている");
-  assert(dropped.state.gucchi.poll !== null);
+  assert(dropped.state.nabe.poll !== null);
 });
 
 Deno.test("回帰: 再接続では挨拶しない", () => {
@@ -939,7 +966,7 @@ Deno.test("回帰: 再接続では挨拶しない", () => {
 
 Deno.test("回帰: 無人の部屋ではアンケートも黙って閉じる", () => {
   const { state } = advanceToPoll();
-  const startedAt = state.gucchi.poll?.startedAt ?? T0;
+  const startedAt = state.nabe.poll?.startedAt ?? T0;
   // 集計中に全員切断 → 締切が来ても発話しない
   const closed = reduce(
     state,
@@ -947,7 +974,7 @@ Deno.test("回帰: 無人の部屋ではアンケートも黙って閉じる", (
     ctx(startedAt + END_POLL_MS, { connectedPlayerIds: [] }),
   );
   assertEquals(closed.utterances.length, 0, "無人の部屋で喋っている");
-  assertEquals(closed.state.gucchi.poll, null, "アンケートが閉じていない");
+  assertEquals(closed.state.nabe.poll, null, "アンケートが閉じていない");
 
   // playerLeft 経路でも同じ: 全員が順に退室しても発話しない
   const emptied = run(state, [
@@ -968,7 +995,7 @@ Deno.test("回帰: 無人の部屋ではアンケートも黙って閉じる", (
     },
   ]);
   assertEquals(emptied.all.length, 0, "無人になった部屋で喋っている");
-  assertEquals(emptied.state.gucchi.poll, null, "全員退室でアンケートが閉じていない");
+  assertEquals(emptied.state.nabe.poll, null, "全員退室でアンケートが閉じていない");
 });
 
 Deno.test("回帰: clamp はコードポイント単位（絵文字を割らない）", () => {
@@ -1092,7 +1119,7 @@ Deno.test("シナリオ: 入室 → 川柳 → 沈黙2回 → ゲーム提案ま
     "seri:senryu",
     "gucchi:topic",
     "gucchi:topic",
-    "gucchi:gameSuggest",
+    "nabe:gameSuggest",
   ]);
 });
 
@@ -1187,10 +1214,10 @@ Deno.test("clamp: 上限を超えるあだ名は省略記号込みで上限内�
   assert(author.endsWith("…"), "切り詰めたのに省略記号がない");
 });
 
-Deno.test("ぐっちー: 偶数人数の同数タイは「続行」にする", () => {
+Deno.test("なべ: 偶数人数の同数タイは「続行」にする", () => {
   const four = ["p1", "p2", "p3", "p4"];
   const { state, pollId } = advanceToPoll({ connectedPlayerIds: four });
-  const at = (state.gucchi.poll?.startedAt ?? T0) + 1_000;
+  const at = (state.nabe.poll?.startedAt ?? T0) + 1_000;
   // 4人中2人賛成・2人反対 = 同数。過半数ではないので続行
   const result = run(state, [
     {
@@ -1218,15 +1245,15 @@ Deno.test("ぐっちー: 偶数人数の同数タイは「続行」にする", (
   assertEquals(result.all[0].kind, "pollContinue", "同数タイでお開きにしている");
 });
 
-Deno.test("ぐっちー: 発話枠を使い切っていても締めの一言は必ず出す", () => {
+Deno.test("なべ: 発話枠を使い切っていても締めの一言は必ず出す", () => {
   const { state, pollId } = advanceToPoll();
   // 枠を使い切った状態にする
-  const startedAt = state.gucchi.poll?.startedAt ?? T0;
+  const startedAt = state.nabe.poll?.startedAt ?? T0;
   const full: BotState = {
     ...state,
-    gucchi: {
-      ...state.gucchi,
-      utteranceTimes: Array.from({ length: GUCCHI_RATE_MAX }, () => startedAt),
+    nabe: {
+      ...state.nabe,
+      utteranceTimes: Array.from({ length: NABE_RATE_MAX }, () => startedAt),
     },
   };
   const closed = run(full, [
@@ -1235,7 +1262,7 @@ Deno.test("ぐっちー: 発話枠を使い切っていても締めの一言は�
   ]);
   assertEquals(closed.all.length, 1, "枠切れでアンケートが結果不明のまま放置されている");
   assertEquals(closed.all[0].kind, "closing");
-  assertEquals(closed.state.gucchi.poll, null);
+  assertEquals(closed.state.nabe.poll, null);
 });
 
 Deno.test("せり: 字余りと字足らずで呼び名を出し分ける", () => {
@@ -1288,7 +1315,7 @@ Deno.test("回帰: OFF 中でも過半数の賛成を握りつぶさない", () 
   const { state, pollId } = advanceToPoll();
   const voted =
     reduce(state, { t: "endPollVote", pollId, playerId: "p1", agree: true }, ctx(T0 + 1)).state;
-  const off = reduce(voted, { t: "setBot", botId: "gucchi", enabled: false }, ctx(T0 + 2)).state;
+  const off = reduce(voted, { t: "setBot", botId: "nabe", enabled: false }, ctx(T0 + 2)).state;
   // 2/3 が賛成 = 過半数。発話はしないが結果は正しく伝える
   const closed = reduce(
     off,
@@ -1302,14 +1329,14 @@ Deno.test("回帰: OFF 中でも過半数の賛成を握りつぶさない", () 
 Deno.test("回帰: 遊び終えても直前のゲームはすぐ再提案しない", () => {
   let state = createBotState(T0);
   for (let i = 1; i <= 8; i++) state = reduce(state, { t: "tick" }, ctx(T0 + SILENCE_MS * i)).state;
-  const last = state.gucchi.suggestedGameIds.at(-1);
+  const last = state.nabe.suggestedGameIds.at(-1);
   assert(last !== undefined);
   state = reduce(state, { t: "phaseChanged", phase: "input" }, ctx(T0 + 60 * 60_000)).state;
   state = reduce(state, { t: "phaseChanged", phase: "lobby" }, ctx(T0 + 70 * 60_000)).state;
-  assertEquals(state.gucchi.suggestedGameIds, [last], "直前のゲームが候補に戻っている");
+  assertEquals(state.nabe.suggestedGameIds, [last], "直前のゲームが候補に戻っている");
 });
 
-Deno.test("回帰: 誰も反応しない部屋ではゲーム提案を蒸し返さない", () => {
+Deno.test("回帰: 誰も反応しない部屋ではなべがゲーム提案を蒸し返さない", () => {
   // 提案の候補は時間が経てば戻るが、反応がないまま繰り返すのは §3.10 に反する
   let state = createBotState(T0);
   let suggests = 0;
@@ -1325,7 +1352,7 @@ Deno.test("回帰: 人が反応していればゲーム提案の候補は戻る"
   let state = createBotState(T0);
   // 3本出し切る
   for (let i = 1; i <= 8; i++) state = reduce(state, { t: "tick" }, ctx(T0 + SILENCE_MS * i)).state;
-  assertEquals(state.gucchi.suggestedGameIds.length, 3);
+  assertEquals(state.nabe.suggestedGameIds.length, 3);
   // 誰かが喋る
   const at = T0 + 40 * 60_000;
   state = reduce(
@@ -1341,4 +1368,299 @@ Deno.test("回帰: 人が反応していればゲーム提案の候補は戻る"
     revived += result.utterances.filter((u) => u.kind === "gameSuggest").length;
   }
   assert(revived > 0, "反応があっても誘い直さない");
+});
+
+// ---------------------------------------------------------------------------
+// ぐっちー / なべの分割（中間レビューの「ぐっちー過労問題」）
+//
+// 分割前は10種類の発話のうち6種類がぐっちー1体に集まっていて、10分5発話の
+// 枠を役割どうしで食い合っていた。ここで守るのは「枠と ON/OFF が bot ごとに
+// 独立していること」で、これが崩れると過労問題がそのまま再発する。
+// ---------------------------------------------------------------------------
+
+Deno.test("分割: ぐっちーが枠を使い切ってもなべはゲーム提案と終了アンケートを出せる", () => {
+  const base = createBotState(T0);
+  // ぐっちーが10分枠を使い切り、話題カードも打ち止め（＝場を温める手が尽きた）状態
+  const exhausted: BotState = {
+    ...base,
+    gucchi: {
+      ...base.gucchi,
+      utteranceTimes: Array.from({ length: GUCCHI_RATE_MAX }, () => T0),
+      silenceStreak: SILENCE_MAX_STREAK,
+    },
+  };
+  const at = T0 + SILENCE_MS;
+  // 前提: このときぐっちーは枠切れで挨拶すらできない
+  const greeted = reduce(
+    exhausted,
+    { t: "playerJoined", playerId: "p9", nickname: "ゲスト" },
+    ctx(at),
+  );
+  assertEquals(
+    greeted.utterances.filter((u) => u.botId === "gucchi").length,
+    0,
+    "前提が崩れている: ぐっちーの枠が空いている",
+  );
+
+  // 本題1: それでもなべはゲームに誘える
+  const suggest = reduce(exhausted, { t: "tick" }, ctx(at));
+  assertEquals(suggest.utterances.length, 1, "ぐっちーの枠切れがなべを巻き添えにしている");
+  assertEquals(suggest.utterances[0].botId, "nabe");
+  assertEquals(suggest.utterances[0].kind, "gameSuggest");
+
+  // 本題2: ゲームも出し切ったあと、お開きも切り出せる
+  const pollAt = T0 + END_POLL_MIN_AGE_MS;
+  const stuck: BotState = {
+    ...exhausted,
+    // 判定時刻でもぐっちーの枠が埋まっているようにする
+    gucchi: {
+      ...exhausted.gucchi,
+      utteranceTimes: Array.from({ length: GUCCHI_RATE_MAX }, () => pollAt - 1_000),
+    },
+    nabe: {
+      ...exhausted.nabe,
+      suggestedGameIds: ["official-ogiri", "official-ishindenshin", "official-quiz"],
+      lastGameSuggestAt: T0,
+    },
+  };
+  const poll = reduce(stuck, { t: "tick" }, ctx(pollAt));
+  assertEquals(poll.utterances.length, 1, "ぐっちーの枠切れでアンケートまで止まっている");
+  assertEquals(poll.utterances[0].botId, "nabe");
+  assertEquals(poll.utterances[0].kind, "endPoll");
+  assertEquals(poll.effects.length, 1);
+});
+
+Deno.test("分割: なべが枠を使い切ってもぐっちーは挨拶できる", () => {
+  const base = createBotState(T0);
+  const nabeFull: BotState = {
+    ...base,
+    nabe: {
+      ...base.nabe,
+      utteranceTimes: Array.from({ length: NABE_RATE_MAX }, () => T0),
+    },
+    // ゲーム提案の条件（話題カード打ち止め＋沈黙）を満たしておく
+    gucchi: { ...base.gucchi, silenceStreak: SILENCE_MAX_STREAK },
+  };
+  // 前提: なべは枠切れでゲーム提案が出ない
+  const blocked = reduce(nabeFull, { t: "tick" }, ctx(T0 + SILENCE_MS));
+  assertEquals(blocked.utterances.length, 0, "前提が崩れている: なべの枠が空いている");
+
+  // 本題: ぐっちーの挨拶は影響を受けない
+  const joined = reduce(
+    nabeFull,
+    { t: "playerJoined", playerId: "p1", nickname: "ゲスト" },
+    ctx(T0 + SILENCE_MS),
+  );
+  const greeting = joined.utterances.filter((u) => u.kind === "greeting");
+  assertEquals(greeting.length, 1, "なべの枠切れでぐっちーが黙っている");
+  assertEquals(greeting[0].botId, "gucchi");
+});
+
+Deno.test("分割: なべだけ OFF にするとぐっちーは喋り続けるが進行の発話は止まる", () => {
+  const off = reduce(
+    createBotState(T0),
+    { t: "setBot", botId: "nabe", enabled: false },
+    ctx(T0),
+  ).state;
+  assertEquals(off.enabled, { shunpi: true, seri: true, gucchi: true, nabe: false });
+
+  // ぐっちーの挨拶は出る
+  const joined = reduce(
+    off,
+    { t: "playerJoined", playerId: "p1", nickname: "ゲスト" },
+    ctx(T0 + 1),
+  );
+  assertEquals(joined.utterances.filter((u) => u.kind === "greeting").length, 1);
+
+  // 2時間ぶん回しても、なべの発話だけが出ない
+  let state = off;
+  const kinds: string[] = [];
+  for (let i = 1; i <= 120; i++) {
+    const result = reduce(state, { t: "tick" }, ctx(T0 + 60_000 * i));
+    state = result.state;
+    for (const utterance of result.utterances) kinds.push(utterance.kind);
+  }
+  assertEquals(
+    kinds.filter((k) => k === "topic").length,
+    SILENCE_MAX_STREAK,
+    "なべを切るとぐっちーまで黙っている",
+  );
+  assertEquals(kinds.filter((k) => k === "gameSuggest").length, 0, "OFF のなべが誘っている");
+  assertEquals(kinds.filter((k) => k === "endPoll").length, 0, "OFF のなべが訊いている");
+});
+
+Deno.test("分割: なべ OFF でも集計中アンケートは発話なしで必ず片付く", () => {
+  const { state, pollId } = advanceToPoll();
+  const startedAt = state.nabe.poll?.startedAt ?? T0;
+  const off = reduce(
+    state,
+    { t: "setBot", botId: "nabe", enabled: false },
+    ctx(startedAt + 1),
+  ).state;
+  assert(off.nabe.poll !== null, "前提: 集計中のアンケートがある");
+
+  const closed = reduce(off, { t: "tick" }, ctx(startedAt + END_POLL_MS));
+  assertEquals(closed.utterances, [], "OFF のなべが喋っている");
+  assertEquals(closed.state.nabe.poll, null, "アンケートが開いたまま残っている");
+  // 発話しなくても、ルーム層への通知は必ず出す（締切のないアンケートを表示させない）
+  assertEquals(closed.effects, [{ t: "pollClosed", pollId, agreed: false }]);
+});
+
+Deno.test("分割: ぐっちー OFF でもロビー起点のゲーム提案は出る", () => {
+  const off = reduce(
+    createBotState(T0),
+    { t: "setBot", botId: "gucchi", enabled: false },
+    ctx(T0),
+  ).state;
+  // ロビーが静かなまま5分経てば、ぐっちー抜きでもなべがゲームに誘う
+  const quiet = reduce(off, { t: "gameAction" }, ctx(T0 + LOBBY_SUGGEST_MS - LOBBY_QUIET_MS)).state;
+  const result = reduce(quiet, { t: "tick" }, ctx(T0 + LOBBY_SUGGEST_MS));
+  assertEquals(result.utterances.length, 1, "ぐっちーを切るとなべまで黙っている");
+  assertEquals(result.utterances[0].botId, "nabe");
+  assertEquals(result.utterances[0].kind, "gameSuggest");
+});
+
+Deno.test("分割: ぐっちー OFF でも沈黙起点でゲーム提案と終了アンケートが出る", () => {
+  // ぐっちーが OFF だと話題カードが出ないので silenceStreak が増えない。
+  // 「話題カードを出し切ったか」だけを見ていると、なべが永久に動けなくなる
+  const off = reduce(
+    createBotState(T0),
+    { t: "setBot", botId: "gucchi", enabled: false },
+    ctx(T0),
+  ).state;
+
+  // 沈黙3分で、話題カードを飛ばしていきなりゲームに誘う
+  const suggest = reduce(off, { t: "tick" }, ctx(T0 + SILENCE_MS));
+  assertEquals(suggest.utterances.length, 1, "ぐっちー OFF でなべまで止まっている");
+  assertEquals(suggest.utterances[0].botId, "nabe");
+  assertEquals(suggest.utterances[0].kind, "gameSuggest");
+
+  // 時間が経てばお開きも切り出す（ゲーム提案だけ出てアンケートが出ない、を防ぐ）
+  let state = off;
+  const kinds: string[] = [];
+  for (let i = 1; i <= 120; i++) {
+    const result = reduce(state, { t: "tick" }, ctx(T0 + 60_000 * i));
+    state = result.state;
+    for (const utterance of result.utterances) {
+      assertEquals(utterance.botId, "nabe", "OFF のぐっちーが喋っている");
+      kinds.push(utterance.kind);
+    }
+  }
+  assertEquals(kinds.filter((k) => k === "topic").length, 0, "OFF のぐっちーが話題を投げている");
+  assert(kinds.includes("gameSuggest"), "ぐっちー OFF だとゲームに誘えない");
+  assert(kinds.includes("endPoll"), "ぐっちー OFF だとお開きを切り出せない");
+});
+
+Deno.test("回帰: ぐっちー OFF の部屋でもなべは喋りすぎない", () => {
+  // 話題カードの打ち止めを待たずに動き出すぶん、なべが饒舌になっていないか。
+  // 抑えているのは3重（なべの枠 / 収録ゲームの本数 / アンケートの回数と間隔）
+  const off = reduce(
+    createBotState(T0),
+    { t: "setBot", botId: "gucchi", enabled: false },
+    ctx(T0),
+  ).state;
+  let state = off;
+  const spokenAt: number[] = [];
+  const kinds: string[] = [];
+  for (let i = 1; i <= 120; i++) {
+    const at = T0 + 60_000 * i;
+    const result = reduce(state, { t: "tick" }, ctx(at));
+    state = result.state;
+    for (const utterance of result.utterances) {
+      spokenAt.push(at);
+      kinds.push(utterance.kind);
+    }
+  }
+  // 1) なべ自身の枠。closePoll だけは枠を見ずに必ず発話するので1件の超過を許す
+  for (const start of spokenAt) {
+    const inWindow = spokenAt.filter((at) => at >= start && at - start < BOT_RATE_WINDOW_MS);
+    assert(inWindow.length <= NABE_RATE_MAX + 1, `なべの10分窓に ${inWindow.length} 発話`);
+  }
+  // 2) ゲーム提案は収録本数どまり（反応のない部屋では蒸し返さない）
+  assertEquals(
+    kinds.filter((k) => k === "gameSuggest").length,
+    3,
+    "3分沈黙ごとにゲーム提案が湧いている",
+  );
+  // 3) 終了アンケートは上限まで
+  assert(
+    kinds.filter((k) => k === "endPoll").length <= END_POLL_MAX,
+    "アンケートが上限を超えている",
+  );
+  // ぐっちー ON の部屋（「誰も反応しなくても永久に喋り続けない」）と同じ水準に収める
+  assert(kinds.length <= 12, `2時間で ${kinds.length} 発話は多すぎる`);
+});
+
+Deno.test("分割: 発話の種類ごとに担当 bot が正しい", () => {
+  /** 発話の種類 → 担当 bot。この表が分割の結果そのもの */
+  const owner: Readonly<Record<string, BotId>> = {
+    naming: "shunpi",
+    senryu: "seri",
+    greeting: "gucchi",
+    topic: "gucchi",
+    reaction: "gucchi",
+    finalReaction: "gucchi",
+    gameSuggest: "nabe",
+    endPoll: "nabe",
+    closing: "nabe",
+    pollContinue: "nabe",
+  };
+  const seen = new Set<string>();
+  const check = (utterances: BotResult["utterances"]) => {
+    for (const utterance of utterances) {
+      assertEquals(utterance.botId, owner[utterance.kind], `${utterance.kind} の担当が違う`);
+      seen.add(utterance.kind);
+    }
+  };
+
+  // 入室（naming / greeting）・川柳（senryu）・結果（reaction / finalReaction）
+  check(
+    run(createBotState(T0), [
+      {
+        at: T0,
+        event: {
+          t: "playerJoined",
+          playerId: "p1",
+          nickname: "",
+          assignedNickname: "ほろよいペンギン",
+        },
+      },
+      {
+        at: T0 + 1_000,
+        event: {
+          t: "message",
+          playerId: "p1",
+          nickname: "たろう",
+          text: "ふるいけやかわずとびこむみずのおと",
+          source: "chat",
+        },
+      },
+      { at: T0 + 2_000, event: { t: "roundResult", topNickname: "たろう" } },
+      { at: T0 + 3_000, event: { t: "finalResult", topNickname: "たろう" } },
+    ]).all,
+  );
+
+  // 沈黙（topic / gameSuggest / endPoll / pollContinue）
+  let state = createBotState(T0);
+  for (let i = 1; i <= 60; i++) {
+    const result = reduce(state, { t: "tick" }, ctx(T0 + 60_000 * i));
+    state = result.state;
+    check(result.utterances);
+  }
+
+  // 過半数賛成での締め（closing）
+  const agreed = advanceToPoll();
+  const at = (agreed.state.nabe.poll?.startedAt ?? T0) + 1_000;
+  check(
+    run(agreed.state, [
+      { at, event: { t: "endPollVote", pollId: agreed.pollId, playerId: "p1", agree: true } },
+      {
+        at: at + 1,
+        event: { t: "endPollVote", pollId: agreed.pollId, playerId: "p2", agree: true },
+      },
+    ]).all,
+  );
+
+  const missing = Object.keys(owner).filter((kind) => !seen.has(kind));
+  assertEquals(missing, [], `検証できていない発話の種類がある: ${missing.join(", ")}`);
 });
