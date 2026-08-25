@@ -17,6 +17,7 @@ import { serveDir } from "@std/http/file-server";
 import { fromFileUrl } from "@std/path";
 import { getCookies } from "@std/http/cookie";
 import { AuthApi, SESSION_COOKIE_NAME, verifySession } from "./auth.ts";
+import { DEBUG_EVENTS_PATH, DEBUG_SUMMARY_PATH, DebugApi, DebugRecorder } from "./debug.ts";
 import { type ClientLink, RoomManager, validateRoomDescription } from "./rooms.ts";
 import { isValidRoomTagId, ROOM_TAGS, type RoomTagId } from "./room_tags.ts";
 import { createSenryuDetector } from "./senryu.ts";
@@ -37,6 +38,13 @@ import {
 
 /** WS メッセージ1件の上限（§3.8 の KV 上限に合わせた 64KB） */
 export const MAX_MESSAGE_BYTES = 64 * 1024;
+
+/**
+ * デバッグ画面を構成する静的ファイル（public/debug.html・public/debug.js）。
+ * EN_DEBUG_TOKEN が無効、または x-debug-token が不一致のときは、この2つとも
+ * 「存在しない」ように404にする（handleStatic 参照）。
+ */
+const DEBUG_STATIC_PATHS: ReadonlySet<string> = new Set(["/debug.html", "/debug.js"]);
 
 /** 静的配信のルート */
 const PUBLIC_DIR = fromFileUrl(new URL("../public/", import.meta.url));
@@ -236,11 +244,16 @@ async function handleWebSocket(
   req: Request,
   manager: RoomManager,
   kv: Deno.Kv | null,
+  debug: DebugRecorder,
 ): Promise<Response> {
   if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
     return new Response("expected websocket upgrade", { status: 400 });
   }
   if (!isAllowedOrigin(req)) {
+    debug.record("origin.rejected", "WS接続を拒否: Origin がこのサーバーと一致しません", {
+      path: "/ws",
+      origin: req.headers.get("origin") ?? "",
+    });
     return new Response("forbidden origin", { status: 403 });
   }
   // アップグレード時の Cookie でログイン状態を確定する（§3.0: createRoom の認証判定に使う）
@@ -300,7 +313,12 @@ async function handleWebSocket(
     // 1003（受理できない種類のデータ）/ 1009（サイズ超過）と区別し、送信ポリシー違反を示す
     // 1008 で閉じる。切断後は onclose → manager.disconnect が走るため、§3.2 の60秒猶予で
     // そのまま再接続できる。
-    const disconnect = (max: number) => {
+    const disconnect = (max: number, bucket: string) => {
+      debug.record(
+        "ws.rateLimited",
+        `WS切断: ${bucket}枠のレート制限（${windowSec}秒に${max}件）を超えたため切断しました`,
+        { bucket, max },
+      );
       link.send({
         t: "error",
         code: "RATE_LIMITED",
@@ -313,15 +331,22 @@ async function handleWebSocket(
       const withinSoft = signalLimiter.accept();
       const withinHard = signalHardLimiter.accept();
       if (!withinHard) {
-        disconnect(WS_SIGNAL_HARD_MAX);
+        disconnect(WS_SIGNAL_HARD_MAX, "rtcSignal-hard");
         return;
       }
       if (!withinSoft) {
         // ソフト上限の超過は当該メッセージを破棄するだけで切断しない（§3.6 / §3.8）。
         // 通知は判定窓につき1回に絞り、超過分の件数だけ返信が増えるのを防ぐ。
+        // デバッグ記録も同じタイミングに絞る（そうしないと連投のたびにリングバッファを
+        // 消費し、他の有用なイベントを押し出してしまうため）。
         const at = Date.now();
         if (signalNoticeAt === null || at - signalNoticeAt >= WS_RATE_WINDOW_MS) {
           signalNoticeAt = at;
+          debug.record(
+            "ws.rateLimited",
+            `WS破棄: rtcSignal枠のソフト上限（${windowSec}秒に${WS_SIGNAL_RATE_MAX}件）を超えたため以降のメッセージを破棄します`,
+            { bucket: "rtcSignal-soft", max: WS_SIGNAL_RATE_MAX },
+          );
           link.send({
             t: "error",
             code: "RATE_LIMITED",
@@ -336,7 +361,7 @@ async function handleWebSocket(
       const withinSoft = sandboxLimiter.accept();
       const withinHard = sandboxHardLimiter.accept();
       if (!withinHard) {
-        disconnect(WS_SANDBOX_HARD_MAX);
+        disconnect(WS_SANDBOX_HARD_MAX, "sandboxSignal-hard");
         return;
       }
       if (!withinSoft) {
@@ -345,6 +370,11 @@ async function handleWebSocket(
         const at = Date.now();
         if (sandboxNoticeAt === null || at - sandboxNoticeAt >= WS_RATE_WINDOW_MS) {
           sandboxNoticeAt = at;
+          debug.record(
+            "ws.rateLimited",
+            `WS破棄: sandboxSignal枠のソフト上限（${windowSec}秒に${WS_SANDBOX_RATE_MAX}件）を超えたため以降のメッセージを破棄します`,
+            { bucket: "sandboxSignal-soft", max: WS_SANDBOX_RATE_MAX },
+          );
           link.send({
             t: "error",
             code: "RATE_LIMITED",
@@ -355,7 +385,7 @@ async function handleWebSocket(
         return;
       }
     } else if (!generalLimiter.accept()) {
-      disconnect(WS_RATE_MAX);
+      disconnect(WS_RATE_MAX, "general");
       return;
     }
     if (parseFailed) {
@@ -363,6 +393,11 @@ async function handleWebSocket(
       return;
     }
     if (msg === null) {
+      debug.record("ws.unknownType", "WS受信: 未知または不正な形式のメッセージを拒否しました", {
+        t: typeof (parsed as { t?: unknown } | null)?.t === "string"
+          ? (parsed as { t: string }).t
+          : "",
+      });
       link.send({
         t: "error",
         code: "INVALID_INPUT",
@@ -385,8 +420,23 @@ async function handleWebSocket(
  * public/ を配信する。serveDir が fsRoot の外へ出ないためパストラバーサルは起きない。
  * トップページはログイン済みなら index.html、未ログインなら login.html を返す。
  */
-async function handleStatic(req: Request, kv: Deno.Kv | null): Promise<Response> {
+async function handleStatic(
+  req: Request,
+  kv: Deno.Kv | null,
+  debugApi: DebugApi,
+): Promise<Response> {
   const url = new URL(req.url);
+  // デバッグ画面（public/debug.html・public/debug.js の2ファイル）は EN_DEBUG_TOKEN が
+  // 未設定のときだけ「存在しない」ように404を返す（無効を示す応答にしない）。
+  //
+  // ここは x-debug-token の一致を **あえて** 要求しない（DebugApi.isEnabled 参照）。
+  // ブラウザは URL を直接開く（トップレベルのナビゲーション）ときにカスタムヘッダを
+  // 送れないため、ここでトークン一致まで要求すると /debug.html に到達する手段が無くなり
+  // デバッグ画面そのものが開けなくなる。実質的な防御は /api/debug/* 側のトークン一致で行う
+  // （画面が開けても、トークンを知らなければ API が404を返すので中身は見えない）。
+  if (DEBUG_STATIC_PATHS.has(url.pathname) && !debugApi.isEnabled()) {
+    return new Response("not found", { status: 404 });
+  }
   let path = url.pathname;
   if (/^\/r\/[0-9]{6}\/?$/.test(url.pathname)) {
     // 招待 URL（/r/{code}）は同じ画面を返す（§2）
@@ -628,6 +678,39 @@ function loadSandboxManifestGames(path: string): SandboxManifestGame[] {
 }
 
 // ---------------------------------------------------------------------------
+// デバッグ機能: GET /api/debug/summary の中身
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/debug/summary の中身を組み立てる。
+ * RoomManager の**既存の公開メソッド**（roomCount / listPublicRooms / getRoom）で取れる
+ * 範囲にとどめる（rooms.ts は変更しないという制約のため）。
+ *
+ * 制約により省いた情報（rooms.ts に手を入れられないため取得手段がない）:
+ *   - 招待制（visibility: "private"）ルームは rooms 一覧に出てこない。全ルームを列挙する
+ *     公開メソッドが無く、公開ルームだけを返す listPublicRooms() 経由でしか一覧を得られない
+ *     ため。roomCount（総ルーム数）は招待制ルームも含むので rooms.length と一致しないことがある。
+ */
+function buildDebugSummary(manager: RoomManager, startedAt: number): Record<string, unknown> {
+  const now = Date.now();
+  const rooms = manager.listPublicRooms().map((summary) => {
+    const room = manager.getRoom(summary.code);
+    return {
+      code: summary.code,
+      playerCount: summary.playerCount,
+      phase: room?.game?.phase ?? "lobby",
+      sandbox: room?.sandbox?.gameId ?? null,
+    };
+  });
+  return {
+    uptimeMs: now - startedAt,
+    serverTime: now,
+    roomCount: manager.roomCount,
+    rooms,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // サーバー起動
 // ---------------------------------------------------------------------------
 
@@ -687,10 +770,21 @@ export function startServer(
   });
   // 環境変数の読込は起動時の1回だけにする
   const iceBody = JSON.stringify({ iceServers: buildIceServers() });
-  const auth = kv !== undefined ? new AuthApi(kv) : null;
+  // デバッグ機能（オーナー困りごと: 「どこでログインがはじかれているのかわからない」への対応）。
+  // EN_DEBUG_TOKEN が設定されているときだけ有効。空文字（未設定 or 空値）は無効扱いにする。
+  const debugToken = (Deno.env.get("EN_DEBUG_TOKEN") ?? "").trim();
+  const debugEnabled = debugToken !== "";
+  const debug = new DebugRecorder(debugEnabled);
+  const startedAt = Date.now();
+  const debugApi = new DebugApi(
+    debugEnabled ? debugToken : null,
+    debug,
+    () => buildDebugSummary(manager, startedAt),
+  );
+  const auth = kv !== undefined ? new AuthApi(kv, debug) : null;
   const server = Deno.serve({ port, hostname, onListen: () => {} }, async (req, info) => {
     const url = new URL(req.url);
-    if (url.pathname === "/ws") return await handleWebSocket(req, manager, kv ?? null);
+    if (url.pathname === "/ws") return await handleWebSocket(req, manager, kv ?? null, debug);
     if (url.pathname === "/api/ice") {
       if (req.method !== "GET") {
         return new Response("method not allowed", { status: 405, headers: { allow: "GET" } });
@@ -717,11 +811,28 @@ export function startServer(
       if (req.method !== "PATCH") {
         return new Response("method not allowed", { status: 405, headers: { allow: "PATCH" } });
       }
-      if (!isAllowedOrigin(req)) return new Response("forbidden origin", { status: 403 });
+      if (!isAllowedOrigin(req)) {
+        debug.record(
+          "origin.rejected",
+          "APIリクエストを拒否: Origin がこのサーバーと一致しません",
+          {
+            path: url.pathname,
+            origin: req.headers.get("origin") ?? "",
+          },
+        );
+        return new Response("forbidden origin", { status: 403 });
+      }
       if (kv === undefined) return new Response("auth not configured", { status: 501 });
       const token = getCookies(req.headers)[SESSION_COOKIE_NAME];
       const userId = await verifySession(kv, token);
-      if (userId === null) return jsonError(401, "ログインしていません");
+      if (userId === null) {
+        debug.record(
+          "session.invalid",
+          "セッションが無効です（未ログイン・期限切れ・不正なCookie）",
+          { path: url.pathname },
+        );
+        return jsonError(401, "ログインしていません");
+      }
 
       let body: unknown;
       try {
@@ -763,15 +874,30 @@ export function startServer(
       }
       return jsonResponse(sandboxGamesBody);
     }
+    // デバッグ用API（§ オーナー困りごと対応）。Origin検証より前に判定する。無効時・トークン
+    // 不一致時は常に404（debug.ts 参照。存在自体を伏せるため、Origin不一致の403とは分けない）
+    if (url.pathname === DEBUG_EVENTS_PATH || url.pathname === DEBUG_SUMMARY_PATH) {
+      return debugApi.handle(req, url) ?? new Response("not found", { status: 404 });
+    }
     if (url.pathname.startsWith("/api/")) {
-      if (!isAllowedOrigin(req)) return new Response("forbidden origin", { status: 403 });
+      if (!isAllowedOrigin(req)) {
+        debug.record(
+          "origin.rejected",
+          "APIリクエストを拒否: Origin がこのサーバーと一致しません",
+          {
+            path: url.pathname,
+            origin: req.headers.get("origin") ?? "",
+          },
+        );
+        return new Response("forbidden origin", { status: 403 });
+      }
       if (auth === null) return new Response("auth not configured", { status: 501 });
       const res = await auth.handle(req, url, clientIp(req, info.remoteAddr.hostname));
       if (res !== null) return res;
       return new Response("not found", { status: 404 });
     }
     // TODO(チーム分担): §4.0 HTTP API（/api/rooms 以外の未実装分）
-    return handleStatic(req, kv ?? null);
+    return handleStatic(req, kv ?? null, debugApi);
   });
   return {
     port: (server.addr as Deno.NetAddr).port,
