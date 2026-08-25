@@ -126,6 +126,11 @@
         margin: 0;
       }
 
+      #login-error:not(:empty),
+      #register-error:not(:empty) {
+        margin-bottom: 14px;
+      }
+
       .fineprint {
         display: block;
         margin: -4px 0 16px;
@@ -211,7 +216,6 @@
         </p>
 
         <div class="messages">
-          <p id="error" class="alert" role="alert"></p>
           <p id="status" role="status"></p>
           <p id="me-result" class="dim"></p>
         </div>
@@ -237,6 +241,7 @@
               maxlength="64"
             />
           </div>
+          <p id="login-error" class="alert" role="alert"></p>
           <button id="login" class="btn btn-gold btn-block btn-lg btn-noren" type="button">
             のれんをくぐる
           </button>
@@ -264,6 +269,7 @@
                 maxlength="64"
               />
             </div>
+            <p id="register-error" class="alert" role="alert"></p>
             <button id="register" class="btn btn-block" type="button">登録して暖簾をくぐる</button>
           </div>
         </details>

@@ -12,14 +12,22 @@ function $(id) {
   return document.getElementById(id);
 }
 
-function showError(message) {
-  $("error").textContent = message;
+function showLoginError(message) {
+  $("login-error").textContent = message;
+  $("register-error").textContent = "";
+  $("status").textContent = "";
+}
+
+function showRegisterError(message) {
+  $("register-error").textContent = message;
+  $("login-error").textContent = "";
   $("status").textContent = "";
 }
 
 function showStatus(message) {
   $("status").textContent = message;
-  $("error").textContent = "";
+  $("login-error").textContent = "";
+  $("register-error").textContent = "";
 }
 
 async function callApi(path, options) {
@@ -58,7 +66,7 @@ $("register").addEventListener("click", async () => {
     showStatus(`登録・ログインしました（userId: ${body.userId}）`);
     location.href = "/index.html";
   } else {
-    showError(`登録に失敗しました (${status}): ${body?.error ?? "unknown error"}`);
+    showRegisterError(`登録に失敗しました (${status}): ${body?.error ?? "unknown error"}`);
   }
 });
 
@@ -74,7 +82,7 @@ $("login").addEventListener("click", async () => {
     showStatus(`ログインしました（userId: ${body.userId}）`);
     location.href = "/index.html";
   } else {
-    showError(`ログインに失敗しました (${status}): ${body?.error ?? "unknown error"}`);
+    showLoginError(`ログインに失敗しました (${status}): ${body?.error ?? "unknown error"}`);
   }
 });
 
