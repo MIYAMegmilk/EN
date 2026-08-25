@@ -455,3 +455,200 @@ Deno.test("PUT /api/profile はタグを6個以上指定すると400（§3.11: �
     kv.close();
   }
 });
+
+Deno.test("register: 不正なJSONを3回送っても枠を消費せず4回目の正しい登録が成功する（§3.8）", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+
+    for (let i = 0; i < 3; i++) {
+      const res = await fetch(`${base}/api/auth/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{not valid json",
+      });
+      assertEquals(res.status, 400);
+    }
+
+    const ok = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId: randomUserId(), password: "correcthorse" }),
+    });
+    assertEquals(ok.status, 200);
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("register: 形式不正なuserIdを3回送っても枠を消費せず4回目の正しい登録が成功する（§3.8）", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+
+    for (let i = 0; i < 3; i++) {
+      const res = await fetch(`${base}/api/auth/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ userId: "ab", password: "correcthorse" }),
+      });
+      assertEquals(res.status, 400);
+    }
+
+    const ok = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId: randomUserId(), password: "correcthorse" }),
+    });
+    assertEquals(ok.status, 200);
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("register: 形式不正なpasswordを3回送っても枠を消費せず4回目の正しい登録が成功する（§3.8）", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+
+    for (let i = 0; i < 3; i++) {
+      const res = await fetch(`${base}/api/auth/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ userId: randomUserId(), password: "short" }),
+      });
+      assertEquals(res.status, 400);
+    }
+
+    const ok = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId: randomUserId(), password: "correcthorse" }),
+    });
+    assertEquals(ok.status, 200);
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("register: 登録成功3件のあと4件目は429（§3.8、成功は数える）", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+
+    for (let i = 0; i < 3; i++) {
+      const res = await fetch(`${base}/api/auth/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ userId: randomUserId(), password: "correcthorse" }),
+      });
+      assertEquals(res.status, 200);
+    }
+
+    const limited = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId: randomUserId(), password: "correcthorse" }),
+    });
+    assertEquals(limited.status, 429);
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("register: userId重複を3回試したあと4件目は429（§3.8、重複は数える）", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const userId = randomUserId();
+    const payload = JSON.stringify({ userId, password: "correcthorse" });
+
+    // 対象のuserIdを作るのは別IPで行い、テスト対象IPの枠を消費しないようにする
+    const setup = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-forwarded-for": "10.1.0.1",
+      },
+      body: payload,
+    });
+    assertEquals(setup.status, 200);
+
+    const dupHeaders = {
+      "content-type": "application/json",
+      "x-forwarded-for": "10.1.0.2",
+    };
+
+    for (let i = 0; i < 3; i++) {
+      const dup = await fetch(`${base}/api/auth/register`, {
+        method: "POST",
+        headers: dupHeaders,
+        body: payload,
+      });
+      assertEquals(dup.status, 409);
+    }
+
+    // 重複3回で10.1.0.2の枠を使い切っているので、新規userIdでも429になる
+    const limited = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: dupHeaders,
+      body: JSON.stringify({ userId: randomUserId(), password: "correcthorse" }),
+    });
+    assertEquals(limited.status, 429);
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("register: 別IPの枠は独立している（§3.8、回帰）", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+
+    for (let i = 0; i < 3; i++) {
+      const res = await fetch(`${base}/api/auth/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "10.0.0.1",
+        },
+        body: JSON.stringify({ userId: randomUserId(), password: "correcthorse" }),
+      });
+      assertEquals(res.status, 200);
+    }
+
+    const sameIpLimited = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-forwarded-for": "10.0.0.1",
+      },
+      body: JSON.stringify({ userId: randomUserId(), password: "correcthorse" }),
+    });
+    assertEquals(sameIpLimited.status, 429);
+
+    const otherIpOk = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-forwarded-for": "10.0.0.2",
+      },
+      body: JSON.stringify({ userId: randomUserId(), password: "correcthorse" }),
+    });
+    assertEquals(otherIpOk.status, 200);
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
