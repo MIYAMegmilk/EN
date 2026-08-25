@@ -8,7 +8,6 @@
     <style>
       body {
         --noren-h: clamp(280px, 58vh, 500px);
-        --login-top: 100px;
         height: 100vh;
         height: 100svh;
         overflow: hidden;
@@ -86,19 +85,17 @@
         color: #4a2b16;
       }
 
-      /* ログインの箱。上端を固定し、エラー文などで中身が増えたときは
-         下方向に伸びる。画面が低い場合は後続の media query で余白を詰め、
-         スクロールなしで画面内に収める */
+      /* ログインの箱。上端を画面上から10vhの位置に固定するので、スクロール
+         せずに常に見える位置に出る。中身が伸びても上端は動かず、bottomは
+         指定しないので下方向にだけ伸びる（暖簾に被さってよい） */
       main {
         position: fixed;
-        top: var(--login-top);
+        top: 10vh;
         left: 0;
         right: 0;
-        bottom: 16px;
         z-index: 1;
         display: flex;
         justify-content: center;
-        align-items: flex-start;
         padding: 0 20px;
       }
 
