@@ -212,6 +212,11 @@ function connect() {
     Bot.handleServerMessage(msg);
     // サンドボックスゲーム（docs/design/game-sandbox.md）
     Sandbox.handleServerMessage(msg);
+    // ボットの VC タイル（見た目のみ）。Bot モジュールの状態確定後に描き直す
+    renderVcBotTiles();
+    if (msg.t === "chat" && msg.message !== undefined && msg.message.bot === true) {
+      glowBotVcTile(msg.message.botId);
+    }
   };
 }
 
@@ -316,6 +321,7 @@ function renderAll() {
   $("phase").classList.toggle("hidden", snapshot === null);
   $("sandbox").classList.toggle("hidden", snapshot === null);
   renderVc();
+  renderVcBotTiles();
   if (snapshot === null) return;
 
   $("room-code").textContent = snapshot.code;
@@ -479,6 +485,98 @@ const VC_QUALITY_MODE_LABELS = {
   fallback: "代替指標",
   unknown: "判定不可",
 };
+
+/**
+ * VC 卓（#vc-media）にボットを「参加している風」に見せるための表示専用データ。
+ * 音声合成・音声認識・WebRTC のピア接続は一切行わない（見た目だけ。VC_CAPACITY も消費しない）。
+ * bot.js の BOTS（id/name/role）は非公開のため、表示専用の情報としてここに複製する。
+ */
+const BOT_VC_INFO = [
+  { id: "shunpi", name: "しゅんぴ", role: "あだ名をつける" },
+  { id: "seri", name: "せり", role: "川柳を見つける" },
+  { id: "gucchi", name: "ぐっちー", role: "場を回す" },
+];
+
+/** botId → 自分が #vc-media に足したタイル一式（root 要素と発言演出のタイマー） */
+const botVcTiles = new Map();
+
+/** ボットの VC タイルを1つ組み立てる（画像は使わず CSS のみ。中身は固定文言のみなので textContent で十分） */
+function createBotVcTile(info) {
+  const root = document.createElement("div");
+  root.className = "vc-peer vc-peer-bot";
+  root.dataset.botId = info.id;
+
+  const mark = document.createElement("span");
+  mark.className = "vc-bot-mark";
+  mark.textContent = "BOT";
+  root.appendChild(mark);
+
+  const face = document.createElement("div");
+  face.className = "vc-bot-face";
+  face.dataset.botId = info.id;
+  root.appendChild(face);
+
+  const label = document.createElement("p");
+  label.className = "vc-peer-label vc-bot-label";
+  label.textContent = info.name;
+  root.appendChild(label);
+
+  const role = document.createElement("p");
+  role.className = "vc-bot-role";
+  role.textContent = info.role;
+  root.appendChild(role);
+
+  return { root, glowTimer: null };
+}
+
+/**
+ * 有効なボットだけを #vc-media に出す／無効・退室なら消す。
+ * vc.js が管理する人のタイルには触れず、botVcTiles に控えた自分ぶんのタイルだけを
+ * 個別に追加・削除する（コンテナ全体を clear しない。vc.js のタイルと共存する）。
+ * VC に参加していなくても表示する（ボットは音声を扱わず、部屋にいる間ずっと
+ * 「その場にいる」演出のため。ホストの ON/OFF だけに従う）。
+ */
+function renderVcBotTiles() {
+  const container = $("vc-media");
+  if (container === null) return;
+  if (state.snapshot === null) {
+    for (const tile of botVcTiles.values()) {
+      if (tile.glowTimer !== null) clearTimeout(tile.glowTimer);
+      tile.root.remove();
+    }
+    botVcTiles.clear();
+    return;
+  }
+  const bots = Bot.getState().bots;
+  for (const info of BOT_VC_INFO) {
+    const enabled = bots[info.id] !== false;
+    const existing = botVcTiles.get(info.id);
+    if (enabled && existing === undefined) {
+      const tile = createBotVcTile(info);
+      container.appendChild(tile.root);
+      botVcTiles.set(info.id, tile);
+    } else if (!enabled && existing !== undefined) {
+      if (existing.glowTimer !== null) clearTimeout(existing.glowTimer);
+      existing.root.remove();
+      botVcTiles.delete(info.id);
+    }
+  }
+}
+
+/**
+ * ボットがチャットで発言したとき、そのボットのタイルを短時間だけ光らせる（演出のみ・任意）。
+ * prefers-reduced-motion のときは en.css 側でアニメーションを止める。
+ */
+function glowBotVcTile(botId) {
+  const tile = botVcTiles.get(botId);
+  if (tile === undefined) return;
+  if (tile.glowTimer !== null) clearTimeout(tile.glowTimer);
+  tile.root.classList.add("vc-bot-speaking");
+  tile.glowTimer = setTimeout(() => {
+    tile.root.classList.remove("vc-bot-speaking");
+    tile.glowTimer = null;
+  }, 1600);
+}
 
 /** VC の操作ボタンと状態表示を更新する */
 function renderVc() {
