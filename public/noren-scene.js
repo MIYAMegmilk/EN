@@ -14,8 +14,8 @@
  * false を受け取ったら既存のCSSフォールバック演出を使うこと。
  */
 
-import * as THREE from "/assets/vendor/three/three.module.js";
-import { GLTFLoader } from "/assets/vendor/three/addons/loaders/GLTFLoader.js";
+import * as THREE from "/vendor/three/three.module.min.js";
+import { GLTFLoader } from "/vendor/three/GLTFLoader.js";
 
 const MODEL_URL = "/assets/noren.glb";
 const MIN_PLAY_MS = 1500;
