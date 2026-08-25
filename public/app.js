@@ -144,6 +144,8 @@ const state = {
   reconnectAttempts: 0,
   // 再接続待ちの setTimeout ハンドル。多重に予約しないための番人でもある
   reconnectTimer: null,
+  // ログイン済みか（/api/me の結果）。「お会計」の出し入れに使う
+  loggedIn: false,
 };
 
 /**
@@ -248,10 +250,11 @@ async function refreshAccount() {
     body = null;
   }
   const loggedIn = res.ok && body !== null && typeof body.userId === "string";
+  state.loggedIn = loggedIn;
   $("account-status").textContent = loggedIn ? `ログイン中: ${body.userId}` : "未ログイン";
-  $("logout").classList.toggle("hidden", !loggedIn);
   $("login-link").classList.toggle("hidden", loggedIn);
   $("profile-link").classList.toggle("hidden", !loggedIn);
+  renderLogout();
 
   // 保存済みのあだ名があれば入室欄に自動入力する（§3.0）。ユーザーが既に入力していたら上書きしない
   if (loggedIn && typeof body.nickname === "string" && $("nickname").value === "") {
@@ -473,9 +476,22 @@ function removePlayer(playerId) {
   state.snapshot.players = state.snapshot.players.filter((p) => p.id !== playerId);
 }
 
+/**
+ * 「お会計」の出し入れ。
+ *
+ * お座敷一覧にいるときだけ出す。卓に着いている間は、抜ける道は
+ * 「お先に失礼」の一本にしたい（帯からいきなり店を出られると、
+ * 同席者への挨拶も VC の後始末も飛ばすことになる）。
+ */
+function renderLogout() {
+  const inRoom = state.snapshot !== null;
+  $("logout").classList.toggle("hidden", !state.loggedIn || inRoom);
+}
+
 /** 画面全体を描き直す */
 function renderAll() {
   const snapshot = state.snapshot;
+  renderLogout();
   $("entry").classList.toggle("hidden", snapshot !== null);
   $("room").classList.toggle("hidden", snapshot === null);
   $("vc").classList.toggle("hidden", snapshot === null);
