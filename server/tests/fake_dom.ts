@@ -71,12 +71,40 @@ export class FakeElement {
 
   addEventListener(): void {}
 
+  /** 表示に関わる呼び出しは受け流す。テストで見るのは textContent と class */
+  focus(): void {}
+
+  readonly style = {
+    setProperty: (name: string, value: string) => {
+      this.styles.set(name, value);
+    },
+    getPropertyValue: (name: string) => this.styles.get(name) ?? "",
+  };
+
+  readonly styles = new Map<string, string>();
+
   setAttribute(name: string, value: string): void {
     this.attributes.set(name, value);
   }
 
   querySelectorAll(): FakeElement[] {
     return [];
+  }
+
+  /**
+   * クラス名1つぶんだけを引く簡易版。app.js が絵と文字を分けたボタンの
+   * 文字だけを差し替えるのに使う（.vc-ctl-label / .vc-bot-label など）。
+   * 本物のセレクタは解さない。子孫を先行順にたどって最初の一致を返す。
+   */
+  querySelector(selector: string): FakeElement | null {
+    if (!selector.startsWith(".")) return null;
+    const name = selector.slice(1);
+    for (const child of this.children) {
+      if (child.className.split(" ").includes(name)) return child;
+      const found = child.querySelector(selector);
+      if (found !== null) return found;
+    }
+    return null;
   }
 
   /** 自動再生の試行。本物と同じく undefined を返してよい（呼び出し側が見ている） */
@@ -87,6 +115,8 @@ export class FakeElement {
 
 /** getElementById が id ごとに同じ要素を返す偽 document */
 export function createFakeDocument(elements = new Map<string, FakeElement>()) {
+  /** document に直接付けられたハンドラ。型ごとに束ねる */
+  const listeners = new Map<string, ((event: unknown) => void)[]>();
   const getElementById = (id: string): FakeElement => {
     const found = elements.get(id);
     if (found !== undefined) return found;
@@ -96,17 +126,43 @@ export function createFakeDocument(elements = new Map<string, FakeElement>()) {
     elements.set(id, created);
     return created;
   };
+  // app.js は body の data 属性で「ロビー中か」を持つ
+  const body = new FakeElement("body", "body");
   return {
     elements,
     document: {
+      body,
       getElementById,
       createElement: (tag: string) => new FakeElement(tag),
+      // app.js は bot の絵と手元の操作の絵を inline SVG で組む。
+      // 名前空間は再現しないので、要素だけ返せば足りる
+      createElementNS: (_ns: string, tag: string) => new FakeElement(tag),
       createTextNode: (text: string) => {
         const node = new FakeElement("#text");
         node.textContent = text;
         return node;
       },
       querySelectorAll: () => [] as FakeElement[],
+      /*
+       * app.js は document にも直接ハンドラを付ける（品書きを Esc で閉じる）。
+       * 受け口が無いと読み込みの時点で落ちるので、記録だけしておく。
+       * dispatch で呼び出せるようにしてあるのは、後からキー操作を試せるように。
+       */
+      listeners,
+      addEventListener: (type: string, handler: (event: unknown) => void) => {
+        const bucket = listeners.get(type) ?? [];
+        bucket.push(handler);
+        listeners.set(type, bucket);
+      },
+      removeEventListener: (type: string, handler: (event: unknown) => void) => {
+        const bucket = listeners.get(type);
+        if (bucket === undefined) return;
+        const index = bucket.indexOf(handler);
+        if (index >= 0) bucket.splice(index, 1);
+      },
+      dispatch: (type: string, event: unknown) => {
+        for (const handler of listeners.get(type) ?? []) handler(event);
+      },
     },
   };
 }
