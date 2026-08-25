@@ -1144,12 +1144,45 @@
     return true;
   }
 
-  /** VC から抜ける。ピアもマイク・カメラもすべて止める */
+  /**
+   * VC から抜ける。ピアもマイク・カメラもすべて止める。
+   * 退室・キックはサーバーが生きているので、各ピアへ離脱を知らせてから畳む
+   */
   function leave() {
+    shutdownVc({ notifyPeers: true, message: "VC から退出しました" });
+  }
+
+  /**
+   * ピアに知らせずに VC を畳む。サーバーが落ちている・繋ぎ直した直後に使う
+   * （サーバー再起動で卓が解散したときなど）。
+   *
+   * bye を送らないのは、送っても落ちたサーバー経由では相手に届かないうえ、
+   * 繋ぎ直した先の新しいサーバーへ宛先不明の rtcSignal を投げることになり、
+   * その拒否応答で呼び出し側の案内（「サーバーが再起動したため…」）を
+   * 上書きしてしまうため。
+   *
+   * 送るか送らないかに関わらず、マイク・カメラのトラックは必ず止める。
+   * ここを止め損ねるとカメラのランプが点いたままになる（§3.6 のプライバシー配慮）
+   */
+  function teardown() {
+    // 呼び出し側が状況を説明しているので、こちらからは状態通知を出さない
+    shutdownVc({ notifyPeers: false, message: null });
+  }
+
+  /**
+   * VC の後始末。leave() と teardown() の違いはピアへの通知の有無だけなので、
+   * 取りこぼしが起きないよう本体は1つにまとめてある。
+   *   notifyPeers … 各ピアへ bye を送るか。サーバーが生きているときだけ true
+   *   message     … notify("vcState", …) に流す文言。null なら通知しない
+   * VC に参加していないときは何もしない（トラックも接続も持っていないため）
+   */
+  function shutdownVc(options) {
     if (!state.active) return;
     // タイマーを残さないよう、ピアを畳む前に監視を止める
     resetQuality();
-    for (const id of state.peers.keys()) signal(id, { kind: "bye" });
+    if (options.notifyPeers) {
+      for (const id of state.peers.keys()) signal(id, { kind: "bye" });
+    }
     closeAllPeers();
     stopStream(state.micStream);
     state.micStream = null;
@@ -1159,7 +1192,7 @@
     state.active = false;
     state.muted = false;
     state.session = null;
-    notify("vcState", "VC から退出しました");
+    if (options.message !== null) notify("vcState", options.message);
   }
 
   /** MediaStream のトラックをすべて停止する */
@@ -1310,6 +1343,7 @@
     handleServerMessage,
     join,
     leave,
+    teardown,
     toggleMute,
     setMuted,
     toggleCamera,

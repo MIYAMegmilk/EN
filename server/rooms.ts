@@ -147,9 +147,32 @@ export interface ClientLink {
   readonly userId: string | null;
   /** S2C メッセージを送る */
   send(msg: S2C): void;
-  /** 接続を閉じる */
-  close(): void;
+  /**
+   * 接続を閉じる。code / reason を省略した場合は実装側の既定（1000 = 正常終了）に倒す。
+   * 引数を任意にしてあるのは、サーバー停止時だけ 1001（going away）で閉じ分けたいため
+   * （SHUTDOWN_CLOSE_CODE 参照）。引数を取らない既存の実装・モックもそのまま使える
+   */
+  close(code?: number, reason?: string): void;
 }
+
+/**
+ * サーバー停止時にソケットを閉じるクローズコード。1001 = going away は
+ * 「サーバーが停止する／離脱する」ための標準コード（RFC 6455 §7.4.1）。
+ * 退室・キックの 1000（正常終了）と分けておかないと、クライアント側で
+ * 「再起動なので自動で繋ぎ直してよい」と判断できない
+ */
+export const SHUTDOWN_CLOSE_CODE = 1001;
+
+/**
+ * サーバー停止時のクローズ理由。
+ * RFC 6455 §5.5.1 によりクローズ理由は UTF-8 で 123 バイト以内でなければならず、
+ * 超えると close() が例外を投げる。日本語は1文字3バイトで簡単に膨らむので ASCII で短く保つ
+ * （この文字列は画面には出さない。利用者への案内はクライアントがコードを見て出す）
+ */
+export const SHUTDOWN_CLOSE_REASON = "server going away";
+
+/** クローズ理由の上限バイト数（RFC 6455 §5.5.1） */
+export const CLOSE_REASON_MAX_BYTES = 123;
 
 /** 時刻・タイマーを差し替えるための設定（テスト用） */
 export type RoomManagerOptions = {
@@ -455,13 +478,44 @@ export class RoomManager {
     });
   }
 
-  /** すべてのタイマーを解除してルームを破棄する（サーバー停止時・テスト後始末） */
+  /**
+   * すべてのタイマーを解除し、接続中のソケットを閉じてルームを破棄する
+   * （サーバー停止時・テスト後始末）。
+   *
+   * ソケットを閉じずにプロセスが死ぬと、繋いでいる人には理由の分からない異常切断
+   * （1006）として届く。1001 を明示して閉じることで、クライアントは「再起動だから
+   * 少し待って繋ぎ直す」と判断できる。
+   * 2回呼んでも安全（2回目は rooms / links とも空なので何もしない）
+   */
   dispose(): void {
+    for (const link of this.connectedLinks()) {
+      // 1本の close() が失敗しても残りの切断を止めない。
+      // 既に閉じかけのソケットや、閉じたソケットへの close() は例外になり得る
+      try {
+        link.close(SHUTDOWN_CLOSE_CODE, SHUTDOWN_CLOSE_REASON);
+      } catch {
+        // 閉じられなくてもこの後プロセスごと終了するので、ここでは何もしない
+      }
+    }
     for (const entry of [...this.rooms.values()]) {
       this.clearRoomTimers(entry);
     }
     this.rooms.clear();
     this.links.clear();
+  }
+
+  /**
+   * 現在つながっている接続を重複なく列挙する。
+   * this.links（接続ID → 状態）と entry.links（playerId → 接続）は通常は同期している
+   * が、片方にしか残っていない接続を取りこぼさないよう両方から集めて id で重複を除く
+   */
+  private connectedLinks(): ClientLink[] {
+    const found = new Map<string, ClientLink>();
+    for (const state of this.links.values()) found.set(state.link.id, state.link);
+    for (const entry of this.rooms.values()) {
+      for (const link of entry.links.values()) found.set(link.id, link);
+    }
+    return [...found.values()];
   }
 
   // -------------------------------------------------------------------------

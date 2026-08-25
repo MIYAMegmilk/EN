@@ -90,6 +90,28 @@ async function loadRoomTags() {
   }
 }
 
+/**
+ * サーバーが停止・再起動するときに返るクローズコード（1001 = going away）。
+ * 退室・キックの 1000（正常終了）と区別するために使う。
+ * サーバー側の定義は server/rooms.ts の SHUTDOWN_CLOSE_CODE（ビルド無しのため値を二重に持つ）
+ */
+const SERVER_SHUTDOWN_CLOSE_CODE = 1001;
+
+/**
+ * 自動再接続の待ち時間。1秒から倍々にして 30 秒で頭打ちにする。
+ * 待たずに繋ぎ直すと、まだ起動していないサーバーに対して高速なループを回すことになり、
+ * 実質的に自分たちへの DoS になる
+ */
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 30000;
+
+/**
+ * 諦めるまでの試行回数。1+2+4+8+16+30+30+30 = 約2分。
+ * systemd の restart は普通10秒もかからないので十分待てて、
+ * サーバーが本当に落ちたままのときは無限に試し続けない
+ */
+const RECONNECT_MAX_ATTEMPTS = 8;
+
 /** ページ内の状態 */
 const state = {
   ws: null,
@@ -99,7 +121,63 @@ const state = {
   deadline: null,
   // 自分から退室した直後の切断かどうか（true の間は onclose のエラー表示を抑制する）
   leaving: false,
+  // サーバー再起動による自動再接続の途中かどうか（onopen で false に戻す）
+  reconnecting: false,
+  // 次に繋がったら「再起動からの復帰」であることを onopen へ伝える受け渡し用
+  restartRecovery: false,
+  // 再起動からの復帰として join を送り、その返事を待っている最中かどうか。
+  // ルームはサーバーのメモリ上にしかないため再起動で必ず消えており、この join は
+  // ROOM_NOT_FOUND で失敗する。打ち間違いの ROOM_NOT_FOUND と区別するために持つ
+  rejoinAfterRestart: false,
+  // これまでの自動再接続の試行回数。待ち時間の指数と、諦める判定に使う
+  reconnectAttempts: 0,
+  // 再接続待ちの setTimeout ハンドル。多重に予約しないための番人でもある
+  reconnectTimer: null,
 };
+
+/**
+ * サーバー再起動による切断から、待ち時間を伸ばしつつ繋ぎ直す。
+ *
+ * 2回目以降の試行が失敗したときのクローズコードは 1001 ではなく 1006（異常終了）に
+ * なるため、コードだけで判定すると1回で再試行が止まってしまう。そこで
+ * state.reconnecting を立てて「再接続モードに入っている間は再試行する」形にしている
+ */
+function scheduleReconnect() {
+  // 既に次の試行を予約済みなら何もしない（onerror と onclose の二重発火よけ）
+  if (state.reconnectTimer !== null) return;
+  if (state.reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
+    state.reconnecting = false;
+    // ここまで来たらサーバーが戻る見込みはない。畳まずに放置すると、通話相手も
+    // 同じ理由で消えているのにマイク・カメラだけが動き続け、カメラのランプが
+    // 永久に点いたままになる（ROOM_NOT_FOUND の経路と違い、ここは復帰しない）
+    const wasInCall = VC.getState().active;
+    VC.teardown();
+    // 通話が切れたことは利用者から見える変化なので、黙って切らずに理由まで伝える
+    showError(
+      wasInCall
+        ? "サーバーに繋がりません。通話を終了しました。サーバーが戻ってから再読み込みしてください"
+        : "サーバーに繋がりません。サーバーが戻ってから再読み込みしてください",
+    );
+    // 通話を畳んだので VC のボタン表示（参加中のまま）を実態に合わせ直す
+    renderAll();
+    return;
+  }
+  state.reconnecting = true;
+  // 繋がった先で送る復帰 join が「再起動起因」だと分かるようにしておく
+  state.restartRecovery = true;
+  const delay = Math.min(RECONNECT_BASE_MS * 2 ** state.reconnectAttempts, RECONNECT_MAX_MS);
+  state.reconnectAttempts += 1;
+  // 待っているあいだも利用者に落ち度はないので、赤い警告ではなく通知として出す。
+  // 諦めたときだけは、利用者に操作（再読み込み）を求めるのでエラー表示に戻す
+  showNotice(
+    `サーバーを再起動しています。${Math.round(delay / 1000)}秒後に自動で繋ぎ直します` +
+      `（${state.reconnectAttempts}/${RECONNECT_MAX_ATTEMPTS}回目）`,
+  );
+  state.reconnectTimer = setTimeout(() => {
+    state.reconnectTimer = null;
+    connect();
+  }, delay);
+}
 
 /** ルームごとのセッショントークン（再接続用）。タブ単位で保持する */
 const store = {
@@ -130,7 +208,23 @@ function log(direction, msg) {
 
 /** エラー表示を更新する */
 function showError(text) {
-  $("error").textContent = text ?? "";
+  const box = $("error");
+  // 直前に showNotice で出していた場合に備えて、警告の見た目へ戻す
+  box.className = "alert";
+  box.setAttribute("role", "alert");
+  box.textContent = text ?? "";
+}
+
+/**
+ * 利用者に落ち度のない事実（サーバーの再起動など）を伝える。
+ * 同じ場所を使うが、赤い警告（.alert）ではなく落ち着いた .notice で出す。
+ * 読み上げの割り込みも要らないので role は alert ではなく status にする
+ */
+function showNotice(text) {
+  const box = $("error");
+  box.className = "notice";
+  box.setAttribute("role", "status");
+  box.textContent = text ?? "";
 }
 
 /** ログイン状態を確認して表示する（§3.0） */
@@ -173,6 +267,12 @@ function connect() {
     showError("");
     // ここまで来たら接続済みなので、直前の退室フラグが残っていても持ち越さない
     state.leaving = false;
+    // 繋がったので待ち時間はリセットする（次の再起動もまた1秒から始められる）
+    state.reconnecting = false;
+    state.reconnectAttempts = 0;
+    // 「再起動からの復帰か」はここで受け取って、この後の join の返事まで持ち越す
+    const afterRestart = state.restartRecovery;
+    state.restartRecovery = false;
     const saved = store.load();
     if (saved !== null) {
       // 再接続を試す（60秒以内なら復帰できる）。session が生きていればサーバーは
@@ -182,14 +282,30 @@ function connect() {
       const msg = { t: "join", roomCode: saved.code, session: saved.session };
       const nickname = $("nickname").value.trim();
       if (nickname.length > 0) msg.nickname = nickname;
+      state.rejoinAfterRestart = afterRestart;
       send(msg);
     }
   };
-  ws.onclose = () => {
+  ws.onclose = (event) => {
     if (state.leaving) {
       state.leaving = false;
       // 退室によるサーバー側切断なので、一覧に戻れるようソケットを張り直す
       connect();
+      return;
+    }
+    // 1001（going away）はサーバーの停止・再起動。少し待てば同じ URL に戻ってくるので、
+    // 再読み込みを促すのではなく案内を出して自動で張り直す。
+    // 再接続モードに入っている間は、繋がらなかった試行（1006）もここで扱う。
+    //
+    // ここで VC.teardown() を呼ばないのは意図的（早く畳んだ方が良さそうに見えるが、
+    // それは改悪になる）。VC は P2P で、メディアはブラウザ同士が直接やり取りしており
+    // サーバーを経由していない（サーバーが担うのはシグナリングだけ・§3.6）。
+    // つまりサーバーが再起動している数秒のあいだ、通話そのものは生きたまま繋がり続けて
+    // いる。ここで畳むと「まだ正常に機能している通話を、こちらから壊す」ことになる。
+    // 復帰できないと確定してから畳む（receive の ROOM_NOT_FOUND と scheduleReconnect
+    // の諦めた側の分岐、その2か所だけ）
+    if (event.code === SERVER_SHUTDOWN_CLOSE_CODE || state.reconnecting) {
+      scheduleReconnect();
       return;
     }
     showError("接続が切れました。再読み込みしてください");
@@ -220,6 +336,23 @@ function connect() {
   };
 }
 
+/**
+ * 卓から離れた状態に戻し、一覧の見える画面を描き直す。
+ * #entry の hidden が外れると rooms.js が MutationObserver で一覧を取り直すので、
+ * ここでは一覧の更新を明示的に呼ばなくてよい。
+ * 画面に出す文言は状況ごとに違うので、呼び出し側が描画のあとに出す
+ */
+function resetToEntry() {
+  store.drop();
+  state.snapshot = null;
+  state.rejoinAfterRestart = false;
+  Chat.reset();
+  Voice.reset();
+  Bot.reset();
+  Sandbox.reset();
+  renderAll();
+}
+
 /** S2C メッセージを処理する */
 function receive(msg) {
   switch (msg.t) {
@@ -234,6 +367,8 @@ function receive(msg) {
       Chat.setSelfId(msg.snapshot.youId);
       Voice.setSelfId(msg.snapshot.youId);
       Bot.setSelfId(msg.snapshot.youId);
+      // 復帰 join の返事が来たので、再起動起因かどうかの記憶はここで捨てる
+      state.rejoinAfterRestart = false;
       showError("");
       if (pendingRoomMeta !== null) {
         const meta = pendingRoomMeta;
@@ -277,17 +412,27 @@ function receive(msg) {
       renderScores("最終結果", msg.scores);
       break;
     case "kicked":
-      store.drop();
-      state.snapshot = null;
-      Chat.reset();
-      Voice.reset();
-      Bot.reset();
-      Sandbox.reset();
+      resetToEntry();
       showError("ルームから退出しました");
-      renderAll();
       break;
     case "error":
       pendingRoomMeta = null;
+      // 再起動からの復帰 join が失敗したときだけ、事実の通知として扱う。
+      // ルームはサーバーのメモリ上にしかないので、再起動すれば必ずこうなる。
+      // 利用者は何も間違えていないので、赤い警告ではなく .notice で伝え、
+      // 次に取れる行動（別の卓に入る・作り直す）へ繋がる一覧の見える画面に戻す。
+      // 参加コードの打ち間違いなど、通常の ROOM_NOT_FOUND の文言は変えない
+      if (msg.code === "ROOM_NOT_FOUND" && state.rejoinAfterRestart) {
+        // ピアに bye は送らずに VC を畳む。相手も同じ再起動で切れているので通知は届かず、
+        // 繋ぎ直した先の新しいサーバーへ宛先不明の rtcSignal を投げるだけになる。
+        // それでもマイク・カメラのトラックは必ず止める（カメラのランプが残らないように）
+        VC.teardown();
+        // 保存済みセッションを捨てないと、次に開いたときも消えた卓へ復帰しようとする
+        resetToEntry();
+        showNotice("サーバーが再起動したため、卓は解散しました。一覧から入り直してください");
+        break;
+      }
+      state.rejoinAfterRestart = false;
       showError(`${msg.code}: ${msg.message}`);
       break;
     default:
@@ -716,6 +861,7 @@ function bind() {
     location.href = "/login.html";
   });
   $("create").addEventListener("click", () => {
+    state.rejoinAfterRestart = false;
     // 公開ルームはルーム名必須（§3.1）。一覧（rooms.js）に載るのはこちらだけ
     const visibility = $("visibility").value === "public" ? "public" : "private";
     const msg = { t: "createRoom", nickname: $("nickname").value, visibility };
@@ -732,6 +878,8 @@ function bind() {
   });
   $("join").addEventListener("click", () => {
     pendingRoomMeta = null;
+    // 自分で入り直す操作。以降の ROOM_NOT_FOUND は打ち間違いなので通常の文言に戻す
+    state.rejoinAfterRestart = false;
     // 空欄なら nickname を積まない。省略するとしゅんぴが二つ名を付ける（§3.10）。
     // 空文字は「入力し忘れ」と区別できないのでサーバーが弾く（types.ts の join 参照）
     const msg = { t: "join", roomCode: $("code").value };
@@ -748,13 +896,7 @@ function bind() {
     state.leaving = true;
     VC.leave();
     send({ t: "leave" });
-    store.drop();
-    state.snapshot = null;
-    Chat.reset();
-    Voice.reset();
-    Bot.reset();
-    Sandbox.reset();
-    renderAll();
+    resetToEntry();
   });
   bindVoice();
   Bot.init({
