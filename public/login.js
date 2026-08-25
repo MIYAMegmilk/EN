@@ -72,6 +72,12 @@ function showPanel(panelId) {
 $("show-register").addEventListener("click", () => showPanel("register-panel"));
 $("show-login").addEventListener("click", () => showPanel("login-panel"));
 
+$("guest-link").addEventListener("click", async (e) => {
+  e.preventDefault();
+  await playEnterAnimation();
+  location.href = "/index.html";
+});
+
 function showLoginError(message) {
   $("login-error").textContent = message;
   $("register-error").textContent = "";
