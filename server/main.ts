@@ -17,7 +17,13 @@ import { serveDir } from "@std/http/file-server";
 import { fromFileUrl } from "@std/path";
 import { getCookies } from "@std/http/cookie";
 import { AuthApi, SESSION_COOKIE_NAME, verifySession } from "./auth.ts";
-import { DEBUG_EVENTS_PATH, DEBUG_SUMMARY_PATH, DebugApi, DebugRecorder } from "./debug.ts";
+import {
+  DEBUG_EVENTS_PATH,
+  DEBUG_RESET_LIMITS_PATH,
+  DEBUG_SUMMARY_PATH,
+  DebugApi,
+  DebugRecorder,
+} from "./debug.ts";
 import { type ClientLink, RoomManager, validateRoomDescription } from "./rooms.ts";
 import { isValidRoomTagId, ROOM_TAGS, type RoomTagId } from "./room_tags.ts";
 import { createSenryuDetector } from "./senryu.ts";
@@ -776,12 +782,13 @@ export function startServer(
   const debugEnabled = debugToken !== "";
   const debug = new DebugRecorder(debugEnabled);
   const startedAt = Date.now();
+  const auth = kv !== undefined ? new AuthApi(kv, debug) : null;
   const debugApi = new DebugApi(
     debugEnabled ? debugToken : null,
     debug,
     () => buildDebugSummary(manager, startedAt),
+    auth !== null ? (ip?: string) => auth.resetRateLimits(ip) : null,
   );
-  const auth = kv !== undefined ? new AuthApi(kv, debug) : null;
   const server = Deno.serve({ port, hostname, onListen: () => {} }, async (req, info) => {
     const url = new URL(req.url);
     if (url.pathname === "/ws") return await handleWebSocket(req, manager, kv ?? null, debug);
@@ -875,9 +882,15 @@ export function startServer(
       return jsonResponse(sandboxGamesBody);
     }
     // デバッグ用API（§ オーナー困りごと対応）。Origin検証より前に判定する。無効時・トークン
-    // 不一致時は常に404（debug.ts 参照。存在自体を伏せるため、Origin不一致の403とは分けない）
-    if (url.pathname === DEBUG_EVENTS_PATH || url.pathname === DEBUG_SUMMARY_PATH) {
-      return debugApi.handle(req, url) ?? new Response("not found", { status: 404 });
+    // 不一致時は常に404（debug.ts 参照。存在自体を伏せるため、Origin不一致の403とは分けない）。
+    // reset-limits だけは POST 限定・Origin検証ありだが、その判定も debug.ts 側で行う
+    // （トークン一致より前に Origin 不一致を理由にパスの存在を漏らさないため）。
+    if (
+      url.pathname === DEBUG_EVENTS_PATH ||
+      url.pathname === DEBUG_SUMMARY_PATH ||
+      url.pathname === DEBUG_RESET_LIMITS_PATH
+    ) {
+      return (await debugApi.handle(req, url)) ?? new Response("not found", { status: 404 });
     }
     if (url.pathname.startsWith("/api/")) {
       if (!isAllowedOrigin(req)) {

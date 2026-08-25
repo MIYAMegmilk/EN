@@ -142,6 +142,24 @@ class RateLimiter {
   dispose(): void {
     clearInterval(this.#sweepTimer);
   }
+
+  /**
+   * デバッグ用途: 指定した key の記録だけを消す（server/debug.ts の
+   * POST /api/debug/reset-limits から呼ばれる。開発中にレート制限で詰まったときに
+   * 待たずに解除するため）。記録があれば true、無ければ false を返す。
+   */
+  resetKey(key: string): boolean {
+    return this.#hits.delete(key);
+  }
+
+  /**
+   * デバッグ用途: 全 key の記録を消す。消した key（＝IP）の件数を返す。
+   */
+  resetAll(): number {
+    const count = this.#hits.size;
+    this.#hits.clear();
+    return count;
+  }
 }
 
 /**
@@ -186,6 +204,30 @@ export class AuthApi {
   dispose(): void {
     this.#loginLimiter.dispose();
     this.#registerLimiter.dispose();
+  }
+
+  /**
+   * デバッグ用途: ログイン・登録のレート制限の記録を消す（server/debug.ts の
+   * POST /api/debug/reset-limits から呼ばれる。開発中にレート制限で詰まったときに
+   * 待たずに解除するため）。
+   *
+   * ip を指定すればそのIPの枠だけ、省略すれば全IPの枠を消す。ログイン・登録は
+   * 常にまとめて消す（対象を個別に選べるようにすると呼び出し側の作りが複雑になるため。
+   * 詰まった開発者は大抵どちらの枠か覚えていない）。
+   *
+   * 戻り値は消えた枠（IP）の件数。ip指定時は「そのIPに記録が有ったか」を0/1で返す。
+   */
+  resetRateLimits(ip?: string): { login: number; register: number } {
+    if (ip !== undefined) {
+      return {
+        login: this.#loginLimiter.resetKey(ip) ? 1 : 0,
+        register: this.#registerLimiter.resetKey(ip) ? 1 : 0,
+      };
+    }
+    return {
+      login: this.#loginLimiter.resetAll(),
+      register: this.#registerLimiter.resetAll(),
+    };
   }
 
   /** このモジュールが担当するパスなら処理して Response を返す。担当外なら null */

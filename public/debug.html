@@ -68,6 +68,16 @@
         min-width: 200px;
       }
 
+      /* ── レート制限の解除 ── */
+      #reset-limits-form .input {
+        flex: 1;
+        min-width: 220px;
+      }
+
+      #reset-limits-result:empty {
+        display: none;
+      }
+
       /* ── サーバーの状況 ── */
       .summary-body {
         display: flex;
@@ -332,6 +342,28 @@
           <p id="summary-body" class="summary-body">読み込んでいます…</p>
           <h3>ルーム</h3>
           <div id="rooms-table"></div>
+        </section>
+
+        <section id="reset-limits" class="card block">
+          <h2>レート制限の解除</h2>
+          <p class="lead">
+            開発中にログイン・登録のレート制限で詰まったとき、待たずに解除します。IPを指定するとそのIPの枠だけ、空欄なら全部を消します。実行前に確認が入ります。
+          </p>
+          <form id="reset-limits-form" class="row">
+            <label for="reset-limits-ip">対象IP（空欄なら全部）</label>
+            <input
+              id="reset-limits-ip"
+              class="input"
+              type="text"
+              autocomplete="off"
+              placeholder="例: 203.0.113.1（空欄で全部）"
+            />
+            <button id="reset-limits-submit" class="btn btn-gold" type="submit">
+              レート制限を解除
+            </button>
+          </form>
+          <p id="reset-limits-result" class="dim"></p>
+          <p id="reset-limits-error" class="alert" role="alert"></p>
         </section>
 
         <section class="card block">
