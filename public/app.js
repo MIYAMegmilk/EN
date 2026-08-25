@@ -147,7 +147,19 @@ function scheduleReconnect() {
   if (state.reconnectTimer !== null) return;
   if (state.reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
     state.reconnecting = false;
-    showError("サーバーに繋ぎ直せませんでした。再読み込みしてください");
+    // ここまで来たらサーバーが戻る見込みはない。畳まずに放置すると、通話相手も
+    // 同じ理由で消えているのにマイク・カメラだけが動き続け、カメラのランプが
+    // 永久に点いたままになる（ROOM_NOT_FOUND の経路と違い、ここは復帰しない）
+    const wasInCall = VC.getState().active;
+    VC.teardown();
+    // 通話が切れたことは利用者から見える変化なので、黙って切らずに理由まで伝える
+    showError(
+      wasInCall
+        ? "サーバーに繋がりません。通話を終了しました。サーバーが戻ってから再読み込みしてください"
+        : "サーバーに繋がりません。サーバーが戻ってから再読み込みしてください",
+    );
+    // 通話を畳んだので VC のボタン表示（参加中のまま）を実態に合わせ直す
+    renderAll();
     return;
   }
   state.reconnecting = true;
@@ -283,7 +295,15 @@ function connect() {
     }
     // 1001（going away）はサーバーの停止・再起動。少し待てば同じ URL に戻ってくるので、
     // 再読み込みを促すのではなく案内を出して自動で張り直す。
-    // 再接続モードに入っている間は、繋がらなかった試行（1006）もここで扱う
+    // 再接続モードに入っている間は、繋がらなかった試行（1006）もここで扱う。
+    //
+    // ここで VC.teardown() を呼ばないのは意図的（早く畳んだ方が良さそうに見えるが、
+    // それは改悪になる）。VC は P2P で、メディアはブラウザ同士が直接やり取りしており
+    // サーバーを経由していない（サーバーが担うのはシグナリングだけ・§3.6）。
+    // つまりサーバーが再起動している数秒のあいだ、通話そのものは生きたまま繋がり続けて
+    // いる。ここで畳むと「まだ正常に機能している通話を、こちらから壊す」ことになる。
+    // 復帰できないと確定してから畳む（receive の ROOM_NOT_FOUND と scheduleReconnect
+    // の諦めた側の分岐、その2か所だけ）
     if (event.code === SERVER_SHUTDOWN_CLOSE_CODE || state.reconnecting) {
       scheduleReconnect();
       return;

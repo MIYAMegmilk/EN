@@ -83,6 +83,10 @@ type Harness = {
   storage: Map<string, string>;
   /** VC / Chat などのモジュールで呼ばれた関数（"VC.teardown" 形式） */
   calls: string[];
+  /** VC に参加している状態にする */
+  setVcActive(active: boolean): void;
+  /** VC に参加したままか（teardown で false になる） */
+  vcActive(): boolean;
   /** 予約されたタイマーを、待たずに全部発火する */
   runTimers(): void;
   /** 予約されているタイマーの遅延（ミリ秒、予約順） */
@@ -116,6 +120,8 @@ async function load(): Promise<Harness> {
   const storage = new Map<string, string>();
   const timers: Array<{ id: number; fn: () => void; ms: number }> = [];
   const calls: string[] = [];
+  // VC に参加しているかどうか。テストから setVcActive(true) で通話中にできる
+  let vcActive = false;
   let timerSeq = 1;
 
   // 起動時に叩く API はすべて「使えない」応答にする（app.js は握りつぶして続行する）
@@ -163,13 +169,18 @@ async function load(): Promise<Harness> {
     },
     stubModule("VC", calls, {
       getState: () => ({
-        active: false,
+        active: vcActive,
         muted: false,
         camera: false,
         eligible: true,
         peers: [],
         quality: null,
       }),
+      // 実物は畳んだら active が false になる（vc_teardown_test.ts で検証済み）
+      teardown: () => {
+        calls.push("VC.teardown");
+        vcActive = false;
+      },
     }),
     stubModule("Voice", calls, { getState: () => ({ enabled: false }), isSupported: () => false }),
     stubModule("Chat", calls),
@@ -185,6 +196,10 @@ async function load(): Promise<Harness> {
     elements,
     storage,
     calls,
+    setVcActive: (active: boolean) => {
+      vcActive = active;
+    },
+    vcActive: () => vcActive,
     runTimers: () => {
       const pending = timers.splice(0, timers.length);
       for (const timer of pending) timer.fn();
@@ -261,6 +276,57 @@ Deno.test("app.js: 繋がらないあいだは待ち時間を倍にし、上限�
   assertEquals(h.timerDelays(), [], "諦めたあとは再試行を予約しない");
   assert(h.errorBox().textContent.includes("再読み込み"));
   assertEquals(h.errorBox().className, "alert");
+});
+
+Deno.test("app.js: 再接続を諦めたら VC を畳んでマイク・カメラを止める", async () => {
+  const h = await load();
+  enterRoom(h);
+  h.setVcActive(true); // 通話に参加している状態
+  h.socket().closeFromServer(SHUTDOWN_CLOSE_CODE);
+
+  // 上限まで失敗させて諦めさせる
+  for (let i = 0; i < 8; i++) {
+    h.runTimers();
+    h.socket().closeFromServer(1006);
+  }
+
+  // 畳まないとサーバーは戻ってこないのにマイク・カメラだけが動き続ける
+  // （teardown が実際にトラックを止めることは vc_teardown_test.ts で検証している）
+  assert(h.calls.includes("VC.teardown"), `VC.teardown が呼ばれていない: ${h.calls.join(", ")}`);
+  assertFalse(h.vcActive(), "VC が畳まれていない");
+  // 通話が切れたことは利用者から見える変化なので、理由まで伝える
+  const text = h.errorBox().textContent;
+  assert(text.includes("繋がりません"), `サーバーに繋がらないことが分からない: ${text}`);
+  assert(text.includes("通話を終了"), `通話が切れたことが分からない: ${text}`);
+  assert(text.includes("再読み込み"), `戻り方が分からない: ${text}`);
+});
+
+Deno.test("app.js: 通話していないのに諦めたときは、通話の話をしない", async () => {
+  const h = await load();
+  enterRoom(h);
+  h.socket().closeFromServer(SHUTDOWN_CLOSE_CODE);
+
+  for (let i = 0; i < 8; i++) {
+    h.runTimers();
+    h.socket().closeFromServer(1006);
+  }
+
+  const text = h.errorBox().textContent;
+  assertFalse(text.includes("通話"), `通話していないのに通話の話が出ている: ${text}`);
+  assert(text.includes("再読み込み"));
+});
+
+Deno.test("app.js: 再起動を受けただけでは VC を畳まない（P2P の通話は生きている）", async () => {
+  const h = await load();
+  enterRoom(h);
+  h.setVcActive(true);
+
+  h.socket().closeFromServer(SHUTDOWN_CLOSE_CODE);
+
+  // メディアは P2P で流れており、サーバーが落ちても通話自体は生きている。
+  // ここで畳むと、まだ機能している通話をこちらから壊すことになる
+  assertFalse(h.calls.includes("VC.teardown"), "復帰できるかもしれない段階で畳んでいる");
+  assert(h.vcActive(), "通話は続いていなければならない");
 });
 
 Deno.test("app.js: 繋がったら待ち時間はリセットされる", async () => {
