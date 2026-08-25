@@ -131,6 +131,74 @@
         margin-bottom: 14px;
       }
 
+      @keyframes noren-split-left {
+        to {
+          transform: translate(-60px, -40px) rotate(-4deg);
+          opacity: 0;
+        }
+      }
+
+      @keyframes noren-split-center {
+        to {
+          transform: translateY(-60px) scale(0.9);
+          opacity: 0;
+        }
+      }
+
+      @keyframes noren-split-right {
+        to {
+          transform: translate(60px, -40px) rotate(4deg);
+          opacity: 0;
+        }
+      }
+
+      @keyframes zoom-forward {
+        to {
+          transform: scale(1.18);
+          opacity: 0.85;
+        }
+      }
+
+      #enter-overlay {
+        position: fixed;
+        inset: 0;
+        background: linear-gradient(180deg, rgba(44, 32, 22, 0.98), rgba(20, 14, 9, 0.98));
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 400ms ease-in;
+        z-index: 50;
+      }
+
+      body.entering .noren span {
+        animation-duration: 500ms;
+        animation-timing-function: ease-in;
+        animation-fill-mode: forwards;
+      }
+
+      body.entering .noren span:nth-child(1),
+      body.entering .noren span:nth-child(2) {
+        animation-name: noren-split-left;
+      }
+
+      body.entering .noren span:nth-child(3) {
+        animation-name: noren-split-center;
+      }
+
+      body.entering .noren span:nth-child(4),
+      body.entering .noren span:nth-child(5) {
+        animation-name: noren-split-right;
+      }
+
+      body.entering main {
+        animation: zoom-forward 1300ms ease-in forwards;
+      }
+
+      body.entering #enter-overlay {
+        opacity: 1;
+        pointer-events: auto;
+        transition-delay: 900ms;
+      }
+
       .fineprint {
         display: block;
         margin: -4px 0 16px;
@@ -275,6 +343,8 @@
         </details>
       </div>
     </main>
+
+    <div id="enter-overlay" aria-hidden="true"></div>
 
     <footer>OPEN 18:00 — LAST ORDER 02:00</footer>
 
