@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>宴 -EN- デバッグ</title>
+    <link rel="stylesheet" href="./assets/en.css" />
+    <style>
+      /*
+       * 開発チーム専用のデバッグ画面（単独ページ）。
+       * index.html / app.js とは完全に独立しており、DOM・CSS共に本ファイル内で完結する。
+       * 配色は assets/en.css のトークン（--gold-* / --panel-* 等）に揃える。
+       */
+      main {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 22px 22px 60px;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
+
+      .block {
+        padding: 16px 18px 18px;
+      }
+
+      .block h1,
+      .block h2 {
+        font-family: var(--serif);
+        font-weight: 400;
+        margin: 0 0 10px;
+        color: var(--cream);
+        font-size: 18px;
+      }
+
+      .block h3 {
+        font-size: 12px;
+        letter-spacing: 0.05em;
+        color: var(--muted);
+        margin: 16px 0 8px;
+        font-weight: 400;
+      }
+
+      .lead {
+        margin: 0 0 14px;
+        font-size: 12.5px;
+        color: var(--muted);
+      }
+
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .row > label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      #gate-form {
+        max-width: 460px;
+      }
+
+      #gate-form .input {
+        flex: 1;
+        min-width: 200px;
+      }
+
+      /* ── サーバーの状況 ── */
+      .summary-body {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 28px;
+        font-size: 12.5px;
+        color: var(--muted);
+        margin: 0;
+      }
+
+      .summary-item strong {
+        color: var(--cream);
+        font-weight: 700;
+        margin-left: 4px;
+      }
+
+      .rooms-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12.5px;
+      }
+
+      .rooms-table th,
+      .rooms-table td {
+        text-align: left;
+        padding: 6px 10px;
+        border-bottom: 1px solid var(--line-soft);
+        color: var(--muted);
+      }
+
+      .rooms-table th {
+        color: var(--dim);
+        font-weight: 400;
+        font-size: 11px;
+        letter-spacing: 0.05em;
+      }
+
+      .rooms-table td:first-child {
+        color: var(--gold-2);
+        font-family: var(--serif);
+        letter-spacing: 0.1em;
+      }
+
+      /* ── 出来事の一覧 ── */
+      .block-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+
+      #filter-form {
+        margin-bottom: 12px;
+      }
+
+      #filter-form .input {
+        flex: 1;
+        min-width: 160px;
+      }
+
+      #auto-refresh-label {
+        font-size: 11.5px;
+        white-space: nowrap;
+      }
+
+      .btn.is-active {
+        border-color: var(--gold-3);
+        background: #3b2c1d;
+      }
+
+      .events-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        max-height: 65vh;
+        overflow-y: auto;
+      }
+
+      .event-item {
+        border: 1px solid var(--line-soft);
+        border-left: 4px solid var(--line);
+        border-radius: var(--r-md);
+        background: rgba(255, 255, 255, 0.015);
+        padding: 10px 12px;
+        font-size: 12.5px;
+      }
+
+      .event-item.kind-ok {
+        border-left-color: var(--green);
+      }
+
+      .event-item.kind-warn {
+        border-left-color: var(--gold);
+      }
+
+      .event-item.kind-fail {
+        border-left-color: var(--red);
+      }
+
+      /* login.userNotFound / login.passwordMismatch は色に加えて背景も変えて見分けやすくする */
+      .event-item.login-notfound {
+        border-left-color: var(--gold-3);
+        background: rgba(230, 166, 63, 0.07);
+      }
+
+      .event-item.login-mismatch {
+        border-left-color: var(--red-2);
+        background: rgba(176, 42, 36, 0.1);
+      }
+
+      .event-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 8px 10px;
+      }
+
+      .event-time {
+        font-variant-numeric: tabular-nums;
+        color: var(--dim);
+        font-size: 11.5px;
+        white-space: nowrap;
+      }
+
+      .event-elapsed {
+        color: var(--dim);
+        font-size: 11px;
+        white-space: nowrap;
+      }
+
+      .event-kind {
+        font-family: var(--serif);
+        letter-spacing: 0.02em;
+        padding: 2px 8px;
+        border-radius: var(--r-sm);
+        border: 1px solid var(--line);
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+
+      .event-kind.kind-ok {
+        color: var(--green);
+        border-color: var(--green);
+      }
+
+      .event-kind.kind-warn {
+        color: var(--gold);
+        border-color: var(--gold-3);
+      }
+
+      .event-kind.kind-fail {
+        color: #f0bbb6;
+        border-color: var(--red);
+        background: rgba(176, 42, 36, 0.12);
+      }
+
+      .login-badge {
+        font-size: 10.5px;
+        padding: 2px 8px;
+        border-radius: var(--r-pill);
+        border: 1px solid var(--line);
+      }
+
+      .login-badge.notfound {
+        color: var(--gold-2);
+        border-color: var(--gold-3);
+      }
+
+      .login-badge.mismatch {
+        color: #f0bbb6;
+        border-color: var(--red);
+      }
+
+      .event-message {
+        flex-basis: 100%;
+        color: var(--text);
+        line-height: 1.6;
+        overflow-wrap: anywhere;
+      }
+
+      .event-detail {
+        margin-top: 6px;
+      }
+
+      .event-detail summary {
+        cursor: pointer;
+        color: var(--dim);
+        font-size: 11.5px;
+        list-style: none;
+      }
+
+      .event-detail summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .event-detail summary::before {
+        content: "▶ ";
+      }
+
+      .event-detail[open] summary::before {
+        content: "▼ ";
+      }
+
+      .event-detail pre {
+        margin: 6px 0 0;
+        padding: 8px 10px;
+        background: #150e08;
+        border: 1px solid var(--line-soft);
+        border-radius: var(--r-sm);
+        font-size: 11px;
+        line-height: 1.5;
+        overflow-x: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        color: var(--muted);
+      }
+
+      .events-empty {
+        margin: 0;
+        padding: 30px 0;
+        text-align: center;
+        font-size: 12.5px;
+        color: var(--dim);
+      }
+    </style>
+  </head>
+  <body>
+    <header class="appbar">
+      <span class="brand">宴 -EN- デバッグ</span>
+      <span class="spacer"></span>
+      <span id="conn-status" class="dim"></span>
+      <button id="token-change" type="button" class="btn hidden">トークンを変更</button>
+    </header>
+
+    <main>
+      <section id="gate" class="card block">
+        <h1>デバッグトークン</h1>
+        <p class="lead">
+          サーバーのデバッグ機能に接続するトークンを入力してください。トークンは<b>このタブを閉じるまで</b>保持されます（URLには含めません）。
+        </p>
+        <form id="gate-form" class="row">
+          <label for="gate-token" class="sr-only">デバッグトークン</label>
+          <input
+            id="gate-token"
+            class="input"
+            type="password"
+            autocomplete="off"
+            placeholder="デバッグトークン"
+          />
+          <button id="gate-submit" class="btn btn-gold" type="submit">接続</button>
+        </form>
+        <p id="gate-error" class="alert" role="alert"></p>
+      </section>
+
+      <section id="dashboard" class="hidden">
+        <section id="summary" class="card block">
+          <h2>サーバーの状況</h2>
+          <p id="summary-body" class="summary-body">読み込んでいます…</p>
+          <h3>ルーム</h3>
+          <div id="rooms-table"></div>
+        </section>
+
+        <section class="card block">
+          <div class="block-head">
+            <h2>出来事</h2>
+            <span class="spacer"></span>
+            <button id="filter-login" class="btn btn-gold" type="button">ログインだけ表示</button>
+            <button id="refresh-now" class="btn" type="button">今すぐ更新</button>
+            <button
+              id="auto-refresh"
+              class="toggle"
+              type="button"
+              aria-pressed="true"
+            ><span class="sr-only">自動更新の切り替え</span></button>
+            <span id="auto-refresh-label" class="dim"></span>
+          </div>
+
+          <form id="filter-form" class="row">
+            <label for="kind-filter">種別（前方一致）</label>
+            <input
+              id="kind-filter"
+              class="input"
+              type="text"
+              autocomplete="off"
+              placeholder="例: login. / ws.rateLimited"
+            />
+            <button id="filter-apply" class="btn" type="submit">絞り込む</button>
+            <button id="filter-clear" class="btn" type="button">クリア</button>
+          </form>
+
+          <p id="events-error" class="alert" role="alert"></p>
+          <p id="events-empty" class="events-empty hidden">出来事はまだありません</p>
+          <ul id="events-list" class="events-list"></ul>
+        </section>
+      </section>
+    </main>
+
+    <script src="./debug.js"></script>
+  </body>
+</html>

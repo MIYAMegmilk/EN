@@ -17,6 +17,7 @@ import { deleteCookie, getCookies, setCookie } from "@std/http/cookie";
 import { HOBBY_TAGS, type HobbyTagId, isValidHobbyTagId } from "./hobby_tags.ts";
 import { validateNickname } from "./validation.ts";
 import type { AuthSession, User } from "./types.ts";
+import type { DebugRecorder } from "./debug.ts";
 
 /** userId の文字数制約（§3.0） */
 export const USER_ID_MIN = 4;
@@ -171,11 +172,14 @@ function errorResponse(status: number, message: string): Response {
 /** 認証 API のハンドラ一式。Deno KV への読み書きをカプセル化する */
 export class AuthApi {
   #kv: Deno.Kv;
+  #debug: DebugRecorder | null;
   #loginLimiter = new RateLimiter(LOGIN_LIMIT, LOGIN_WINDOW_MS);
   #registerLimiter = new RateLimiter(REGISTER_LIMIT, REGISTER_WINDOW_MS);
 
-  constructor(kv: Deno.Kv) {
+  /** debug はデバッグ機能用のイベント記録先。渡さなければ記録しない（本番の任意設定は main.ts 側） */
+  constructor(kv: Deno.Kv, debug: DebugRecorder | null = null) {
     this.#kv = kv;
+    this.#debug = debug;
   }
 
   /** レート制限の定期掃除タイマーを止める。サーバー停止時に呼ぶ */
@@ -212,13 +216,26 @@ export class AuthApi {
     try {
       body = await req.json();
     } catch {
+      this.#debug?.record("register.badJson", "登録失敗: リクエストのJSONが壊れています", {
+        ip: clientIp,
+      });
       return errorResponse(400, "リクエストの形式が正しくありません");
     }
     const { userId, password } = (body ?? {}) as { userId?: unknown; password?: unknown };
     if (!isValidUserId(userId)) {
+      this.#debug?.record(
+        "register.badUserId",
+        "登録失敗: ユーザーIDが半角英数4〜20文字の形式を満たしていません",
+        { ip: clientIp },
+      );
       return errorResponse(400, "ユーザーIDは半角英数4〜20文字で入力してください");
     }
     if (!isValidPassword(password)) {
+      this.#debug?.record(
+        "register.badPassword",
+        `登録失敗: ユーザーID '${userId}' のパスワードが8〜64文字の形式を満たしていません`,
+        { userId, ip: clientIp },
+      );
       return errorResponse(400, "パスワードは8〜64文字で入力してください");
     }
 
@@ -226,6 +243,11 @@ export class AuthApi {
     // JSON不正・形式不正の入力ミスは枠を消費しない（§3.8 の趣旨は大量アカウント作成の防止であり、
     // 入力ミスを数えると同一IP内の他ユーザーまで巻き添えで登録できなくなるため）。
     if (!this.#registerLimiter.tryConsume(clientIp, Date.now())) {
+      this.#debug?.record(
+        "register.rateLimited",
+        `登録失敗: IP ${clientIp} が登録のレート制限（${REGISTER_LIMIT}件/時）に達しました`,
+        { ip: clientIp },
+      );
       return errorResponse(
         429,
         "登録の試行回数が上限を超えました。しばらくしてから再度お試しください",
@@ -242,14 +264,28 @@ export class AuthApi {
       user,
     ).commit();
     if (!commit.ok) {
+      this.#debug?.record(
+        "register.duplicate",
+        `登録失敗: ユーザーID '${userId}' は既に使用されています`,
+        { userId, ip: clientIp },
+      );
       return errorResponse(409, "このユーザーIDは既に使用されています");
     }
 
+    this.#debug?.record("register.ok", `登録成功: ユーザーID '${userId}'`, {
+      userId,
+      ip: clientIp,
+    });
     return await this.#issueSession(userId);
   }
 
   private async login(req: Request, clientIp: string): Promise<Response> {
     if (!this.#loginLimiter.tryConsume(clientIp, Date.now())) {
+      this.#debug?.record(
+        "login.rateLimited",
+        `ログイン失敗: IP ${clientIp} がログインのレート制限（${LOGIN_LIMIT}回/分）に達しました`,
+        { ip: clientIp },
+      );
       return errorResponse(
         429,
         "ログイン試行回数が上限を超えました。しばらくしてから再度お試しください",
@@ -259,22 +295,46 @@ export class AuthApi {
     try {
       body = await req.json();
     } catch {
+      this.#debug?.record("login.badJson", "ログイン失敗: リクエストのJSONが壊れています", {
+        ip: clientIp,
+      });
       return errorResponse(400, "リクエストの形式が正しくありません");
     }
     const { userId, password } = (body ?? {}) as { userId?: unknown; password?: unknown };
     if (typeof userId !== "string" || typeof password !== "string") {
+      this.#debug?.record(
+        "login.badFields",
+        "ログイン失敗: userId またはパスワードが文字列ではありません",
+        { ip: clientIp },
+      );
       return errorResponse(400, "ユーザーIDとパスワードを入力してください");
     }
 
     const entry = await this.#kv.get<User>(["user", userId]);
     if (entry.value === null) {
+      // ユーザー不在。応答は次のパスワード不一致と同じ401・同じ文言のまま変えない（§3.0）。
+      // 区別はこの内部記録だけで行う（オーナーの困りごと: 「どこでログインがはじかれているか」）。
+      this.#debug?.record(
+        "login.userNotFound",
+        `ログイン失敗: ユーザーID '${userId}' は存在しません（応答は401で理由を伏せています）`,
+        { userId, ip: clientIp },
+      );
       return errorResponse(401, "ユーザーIDまたはパスワードが正しくありません");
     }
     const computed = await hashPassword(password, entry.value.salt);
     if (!timingSafeEqual(computed, entry.value.passwordHash)) {
+      this.#debug?.record(
+        "login.passwordMismatch",
+        `ログイン失敗: ユーザーID '${userId}' はパスワードが一致しません（応答は401で理由を伏せています）`,
+        { userId, ip: clientIp },
+      );
       return errorResponse(401, "ユーザーIDまたはパスワードが正しくありません");
     }
 
+    this.#debug?.record("login.ok", `ログイン成功: ユーザーID '${userId}'`, {
+      userId,
+      ip: clientIp,
+    });
     return await this.#issueSession(userId);
   }
 
@@ -283,6 +343,7 @@ export class AuthApi {
     if (token !== undefined) {
       await this.#kv.delete(["authSession", token]);
     }
+    this.#debug?.record("logout.ok", "ログアウトしました");
     const res = jsonResponse({ ok: true });
     deleteCookie(res.headers, SESSION_COOKIE_NAME, { path: "/" });
     return res;
@@ -298,6 +359,11 @@ export class AuthApi {
     const token = getCookies(req.headers)[SESSION_COOKIE_NAME];
     const userId = await verifySession(this.#kv, token);
     if (userId === null) {
+      this.#debug?.record(
+        "session.invalid",
+        "セッションが無効です（未ログイン・期限切れ・不正なCookie）",
+        { path: "/api/profile" },
+      );
       return errorResponse(401, "ログインしていません");
     }
 
@@ -336,6 +402,11 @@ export class AuthApi {
     const token = getCookies(req.headers)[SESSION_COOKIE_NAME];
     const userId = await verifySession(this.#kv, token);
     if (userId === null) {
+      this.#debug?.record(
+        "session.invalid",
+        "セッションが無効です（未ログイン・期限切れ・不正なCookie）",
+        { path: "/api/me" },
+      );
       return errorResponse(401, "ログインしていません");
     }
     const entry = await this.#kv.get<User>(["user", userId]);
