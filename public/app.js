@@ -29,6 +29,9 @@ function el(tag, text) {
 /** プリセット部屋タグの一覧（/api/room-tags の結果）。作成フォームの描画に使う */
 let presetRoomTags = [];
 
+/** VC への自動参加が進行中か（マイクの許可を待っている間だけ true） */
+let vcJoining = false;
+
 /** 作成直後に PATCH で反映する説明文・タグ。作成ボタン押下時にセットし、roomState 受信後にクリアする */
 let pendingRoomMeta = null;
 
@@ -205,6 +208,9 @@ function connect() {
     receive(msg);
     // VC は参加者の増減とシグナリングを同じ WS で受け取る（§3.2 / §3.6）
     VC.handleServerMessage(msg);
+    // 卓に着いたら VC にも自動で参加する（VC.handleServerMessage が selfId を
+    // 入れた後でないと join() が弾かれるので、この順で呼ぶ）
+    autoJoinVc(msg);
     // 通話の文字起こし（docs/design/bot-voice.md §5.4）
     Voice.handleServerMessage(msg);
     Chat.handleServerMessage(msg);
@@ -326,7 +332,7 @@ function renderAll() {
 
   $("room-code").textContent = snapshot.code;
   $("room-meta").textContent =
-    `${snapshot.players.length} / ${snapshot.capacity}人・フェーズ: ${state.phase}` +
+    `${snapshot.players.length} / ${snapshot.capacity}人・${phaseLabel(state.phase)}` +
     (snapshot.youAreHost ? "・あなたはホストです" : "");
 
   const players = $("players");
@@ -367,7 +373,7 @@ function renderPhase() {
   const view = state.view;
   const body = $("phase-body");
   clear(body);
-  $("phase-title").textContent = `フェーズ: ${state.phase}`;
+  $("phase-title").textContent = phaseLabel(state.phase);
   $("phase-deadline").textContent = state.deadline === null
     ? ""
     : `期限まで約 ${Math.max(0, Math.round((state.deadline - Date.now()) / 1000))} 秒`;
@@ -480,6 +486,28 @@ function renderScores(title, scores) {
 }
 
 /** 品質判定モード（§3.6）の表示名。iOS Safari 実機で画面から確認できるようにする */
+/**
+ * フェーズの日本語名（server/types.ts の Phase と1対1）。
+ * 画面には必ずこちらを出す。"lobby" のような内部の名前は開発者以外に読めない。
+ * 未知の値が来たらそのまま出す（サーバーが増やしたときに空欄にしない）。
+ */
+const PHASE_LABELS = {
+  lobby: "待機中",
+  intro: "ゲーム説明",
+  prompt: "お題",
+  input: "回答中",
+  reveal: "答え合わせ",
+  judge: "投票中",
+  roundResult: "ラウンド結果",
+  finalResult: "最終結果",
+};
+
+/** フェーズの表示名を返す */
+function phaseLabel(phase) {
+  const label = PHASE_LABELS[phase];
+  return label === undefined ? phase : label;
+}
+
 const VC_QUALITY_MODE_LABELS = {
   primary: "主指標",
   fallback: "代替指標",
@@ -492,11 +520,74 @@ const VC_QUALITY_MODE_LABELS = {
  * bot.js の BOTS（id/name/role）は非公開のため、表示専用の情報としてここに複製する。
  */
 const BOT_VC_INFO = [
-  { id: "shunpi", name: "しゅんぴ", role: "あだ名をつける" },
-  { id: "seri", name: "せり", role: "川柳を見つける" },
-  { id: "gucchi", name: "ぐっちー", role: "場を温める" },
-  { id: "nabe", name: "なべ", role: "進行を仕切る" },
+  {
+    id: "shunpi",
+    name: "しゅんぴ",
+    role: "あだ名をつける",
+    // 荷札。名前を付けて回る役
+    glyph: [
+      "M3.4 11.6 11.6 3.4H19a1.6 1.6 0 0 1 1.6 1.6v7.4l-8.2 8.2a1.6 1.6 0 0 1-2.26 0L3.4 13.86a1.6 1.6 0 0 1 0-2.26Z",
+      "M17.4 7.4a1.3 1.3 0 1 1-2.6 0 1.3 1.3 0 0 1 2.6 0Z",
+    ],
+  },
+  {
+    id: "seri",
+    name: "せり",
+    role: "川柳を見つける",
+    // 短冊。中の3本は上から五・七・五のつもりで長さを変えてある
+    glyph: [
+      "M7 2.6h10a1 1 0 0 1 1 1v16.8a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V3.6a1 1 0 0 1 1-1Z",
+      "M14.6 6.2v5M12 6.2v10.6M9.4 6.2v5",
+    ],
+  },
+  {
+    id: "gucchi",
+    name: "ぐっちー",
+    role: "場を温める",
+    // お猪口と湯気。燗をつけて場を温める役
+    glyph: [
+      "M6.6 11.4h10.8l-1.5 6.1a2.2 2.2 0 0 1-2.14 1.7h-3.52a2.2 2.2 0 0 1-2.14-1.7Z",
+      "M5 21.2h14",
+      "M10.2 8.4c0-1.4 1.3-1.4 1.3-2.8M14.2 8.4c0-1.4-1.3-1.4-1.3-2.8",
+    ],
+  },
+  {
+    id: "nabe",
+    name: "なべ",
+    role: "進行を仕切る",
+    // 土鍋。名前そのまま。蓋を取り仕切る役でもある
+    glyph: [
+      "M3.4 9.6h17.2",
+      "M12 6.2v3.4",
+      "M5.2 9.6v4.6a4.4 4.4 0 0 0 4.4 4.4h4.8a4.4 4.4 0 0 0 4.4-4.4V9.6",
+      "M5.2 11.8H3M18.8 11.8H21",
+    ],
+  },
 ];
+
+/** inline SVG は名前空間付きで作らないと描画されない */
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/**
+ * ボットの絵を作る。
+ *
+ * 4体を金の濃淡だけで見分けるのは無理があったので、形と色の両方を変えてある
+ * （形＝役どころ、色＝個体）。名前と役の文字は絵の下に別で出ている。
+ * 外部の画像・アイコンフォントは読み込めない（§3.8 CSP）ので inline SVG。
+ */
+function createBotGlyph(info) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "vc-bot-glyph");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  for (const d of info.glyph) {
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", d);
+    svg.appendChild(path);
+  }
+  return svg;
+}
 
 /** botId → 自分が #vc-media に足したタイル一式（root 要素と発言演出のタイマー） */
 const botVcTiles = new Map();
@@ -515,6 +606,7 @@ function createBotVcTile(info) {
   const face = document.createElement("div");
   face.className = "vc-bot-face";
   face.dataset.botId = info.id;
+  face.appendChild(createBotGlyph(info));
   root.appendChild(face);
 
   const label = document.createElement("p");
@@ -579,19 +671,41 @@ function glowBotVcTile(botId) {
   }, 1600);
 }
 
+/**
+ * 手元の操作ボタン（ミュート／カメラ／文字起こし）の見た目を更新する。
+ *
+ * ボタン自身に textContent を入れると中の <svg> ごと消えてしまうので、
+ * 文字は .vc-ctl-label にだけ入れる。入／切は data-state で持ち、
+ * 斜線入りの絵への差し替えと色は index.html の CSS が受け持つ。
+ *
+ * aria-pressed は付けない。文言そのものが「ミュート」→「ミュート解除」と
+ * 入れ替わる作りなので、押下状態を別に持つと読み上げが二重になる。
+ */
+function setVcControl(button, on, label) {
+  if (button === null) return;
+  button.dataset.state = on ? "on" : "off";
+  const labelEl = button.querySelector(".vc-ctl-label");
+  if (labelEl !== null) labelEl.textContent = label;
+}
+
 /** VC の操作ボタンと状態表示を更新する */
 function renderVc() {
   const vc = VC.getState();
-  $("vc-join").disabled = vc.active;
-  $("vc-leave").disabled = !vc.active;
   $("vc-mute").disabled = !vc.active;
   $("vc-camera").disabled = !vc.active;
-  $("vc-mute").textContent = vc.muted ? "ミュート解除" : "ミュート";
-  $("vc-camera").textContent = vc.camera ? "カメラOFF" : "カメラON";
+  // 文言は「押すとどうなるか」、絵は「いまどうなっているか」を出す（Zoom と同じ流儀）
+  setVcControl($("vc-mute"), !vc.muted, vc.muted ? "ミュート解除" : "ミュート");
+  setVcControl($("vc-camera"), vc.camera, vc.camera ? "カメラOFF" : "カメラON");
   const peers = vc.peers
     .map((p) => `${p.nickname}: ${p.connectionState}${p.degraded === true ? "（品質低下）" : ""}`)
     .join(" / ");
-  const head = vc.active ? "参加中" : vc.eligible ? "未参加" : "未参加（VC枠外）";
+  const head = vc.active
+    ? "参加中"
+    : vcJoining
+    ? "マイクの許可を待っています…"
+    : vc.eligible
+    ? "音声なし"
+    : "音声なし（VC枠外）";
   $("vc-status").textContent = peers.length > 0 ? `${head} — ${peers}` : head;
   renderVcQuality(vc);
 }
@@ -636,6 +750,30 @@ async function fetchIceServers() {
   }
 }
 
+/**
+ * 卓に着いたら VC にも自動で参加する。
+ *
+ * 「VCに参加」「VC退出」のボタンは置いていない。入店＝着席＝声の輪に入る、
+ * とひとつながりにするため。抜けるときは卓ごと（「お先に失礼」→ VC.leave）。
+ *
+ * VC.join() はマイク拒否・枠外（先着6人）・非対応ブラウザをすべて自分で
+ * 通知して false を返すので、失敗しても卓そのものは続く（音声なしで居られる）。
+ * roomState は再接続でも飛んでくるが、参加中なら join() が早期 return する。
+ */
+function autoJoinVc(msg) {
+  if (msg.t !== "roomState") return;
+  if (VC.getState().active) return;
+  // 先に一度描き直す。renderAll() は VC.handleServerMessage より前に走るので、
+  // ここで描き直さないと「VC枠外」（selfId 未設定のときの既定）が残ってしまう
+  vcJoining = true;
+  renderVc();
+  const done = () => {
+    vcJoining = false;
+    renderVc();
+  };
+  VC.join().then(done, done);
+}
+
 /** VC モジュールを組み込む。iceServers が null なら VC 側の既定を使う */
 function bindVc(iceServers) {
   VC.init({
@@ -650,14 +788,6 @@ function bindVc(iceServers) {
       log("VC", event.message);
       renderVc();
     },
-  });
-  $("vc-join").addEventListener("click", () => {
-    // 自動再生制限（iOS Safari）を避けるため、マイク取得はこの操作の直後に行う
-    VC.join().then(renderVc);
-  });
-  $("vc-leave").addEventListener("click", () => {
-    VC.leave();
-    renderVc();
   });
   $("vc-mute").addEventListener("click", () => {
     VC.toggleMute();
@@ -687,7 +817,8 @@ function bindVoice() {
   // ボタン文言は常に Voice.getState().enabled から導く（vc-camera / vc-mute と同じ流儀）。
   // 権限拒否や5回連続失敗など、クリック以外の理由で OFF に倒れたときも表示がずれない
   const syncTranscribeLabel = () => {
-    transcribeBtn.textContent = Voice.getState().enabled ? "文字起こしOFF" : "文字起こしON";
+    const on = Voice.getState().enabled;
+    setVcControl(transcribeBtn, on, on ? "文字起こしOFF" : "文字起こしON");
   };
   Voice.init({
     send,

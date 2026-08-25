@@ -637,59 +637,52 @@ select {
   background: rgba(0, 0, 0, 0.4);
 }
 
-/* 顔アイコン。画像は使わず、CSS の疑似要素だけで目・口を出す */
+/*
+ * ボットの絵。役どころが分かる線画（app.js の createBotGlyph）を丸に収める。
+ * 以前は4体とも同じ笑顔で、違いは金の濃淡だけだった。並べると見分けがつかず、
+ * 顔そのものも何を表しているのか読み取れなかったので、形と色の両方を変えた。
+ */
 .vc-bot-face {
   position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 56px;
   height: 56px;
   border-radius: 50%;
-  border: 2px solid var(--gold-3);
+  border: 2px solid currentColor;
   background: radial-gradient(circle at 35% 30%, var(--panel-3), var(--wood));
 }
 
-.vc-bot-face::before {
-  content: "";
-  position: absolute;
-  top: 40%;
-  left: 50%;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--gold-2);
-  box-shadow: -13px 0 0 var(--gold-2), 13px 0 0 var(--gold-2);
-  transform: translateX(-50%);
+.vc-bot-glyph {
+  width: 29px;
+  height: 29px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
-.vc-bot-face::after {
-  content: "";
-  position: absolute;
-  bottom: 30%;
-  left: 50%;
-  width: 20px;
-  height: 10px;
-  border: 2px solid var(--gold-2);
-  border-top: none;
-  border-radius: 0 0 20px 20px;
-  transform: translateX(-50%);
-}
-
-/* しゅんぴ / せり / ぐっちー / なべで縁の色味を変え、どの役割か見分けやすくする */
+/*
+ * 個体の色。しゅんぴ＝暖簾の藍、せり＝青菜、ぐっちー＝燗の橙、なべ＝土鍋の火。
+ * 縁も線画も currentColor なので、ここ一行で両方に効く。
+ * 金の濃淡で4つ並べると隣同士が見分けられないため、色相ごと離してある。
+ */
 .vc-bot-face[data-bot-id="shunpi"] {
-  border-color: var(--gold);
+  color: #7fb0d8;
 }
 
 .vc-bot-face[data-bot-id="seri"] {
-  border-color: var(--gold-2);
+  color: #8fbf68;
 }
 
 .vc-bot-face[data-bot-id="gucchi"] {
-  border-color: var(--gold-3);
+  color: #e6a63f;
 }
 
-/* なべだけ金系から外す。4体を金の濃淡だけで見分けるのは苦しく、
-   既存パレットの --green なら浮かずに区別がつく（鍋の薬味の連想も兼ねる） */
 .vc-bot-face[data-bot-id="nabe"] {
-  border-color: var(--green);
+  color: #d1685f;
 }
 
 .vc-peer-label.vc-bot-label {
@@ -711,19 +704,20 @@ select {
   animation: vc-bot-pulse 1.6s ease-out;
 }
 
+/* 光る色は個体の色に合わせる（.vc-bot-face の color が currentColor で届く） */
 @keyframes vc-bot-pulse {
   0% {
-    box-shadow: 0 0 0 0 rgba(230, 166, 63, 0.55);
+    box-shadow: 0 0 0 0 currentColor;
   }
   100% {
-    box-shadow: 0 0 0 14px rgba(230, 166, 63, 0);
+    box-shadow: 0 0 0 14px transparent;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .vc-bot-speaking .vc-bot-face {
     animation: none;
-    box-shadow: 0 0 0 3px rgba(230, 166, 63, 0.7);
+    box-shadow: 0 0 0 3px currentColor;
   }
 }
 

@@ -332,7 +332,7 @@
       }
 
       /* ══ 入店後 ══════════════════════════════════════════════════
-       * 3列に組む。左＝卓の情報と進行の操作、中央＝テロップ・座興・卓上、
+       * 3列に組む。左＝卓の情報と進行の操作、中央＝卓上・テロップ・座興、
        * 右＝やりとり。全体の高さはビューポートに固定し、溢れた分は
        * 各パネルの内側（#players / #vc-media / #chat-log …）だけで流す。
        * ページ自体は決してスクロールさせない。
@@ -540,8 +540,8 @@
         margin-left: 0;
       }
 
-      /* ── 中央：テロップ・座興・卓上 ───────────────────────────── */
-      /* しゅんぴたちのテロップ。中央のいちばん上に細い帯で置く */
+      /* ── 中央：卓上・テロップ・座興 ───────────────────────────── */
+      /* しゅんぴたちのテロップ。卓上と座興のあいだに細い帯で挟む */
       #bot {
         flex: 0 0 auto;
         min-height: 0;
@@ -840,6 +840,25 @@
         color: #4a3c2c;
       }
 
+      /*
+       * 並び順。人が先、ボットが後。
+       * ボットの枠（app.js の renderVcBotTiles）は入店した時点で並び、人の枠は
+       * VC がつながってから vc.js が足すので、DOM の順に任せるとボットが
+       * 先頭に来てしまう。呑み手の顔を先に見せたいので order で追い越す。
+       */
+      #vc-media > .vc-peer {
+        order: 0;
+      }
+
+      #vc-media > .vc-peer-bot {
+        order: 1;
+      }
+
+      /* 自分の枠はいちばん端に置く（Zoom と同じで、探さなくても目に入る） */
+      #vc-media > .vc-self {
+        order: -1;
+      }
+
       .vc-self {
         border-color: var(--gold-3);
       }
@@ -885,8 +904,9 @@
       }
 
       /*
-       * 手元の操作。卓上の足元に敷いて画面のいちばん下に置く
-       * （Zoom / Meet / Discord と同じ位置。探さずに手が届く）。
+       * 手元の操作。卓上の札の足元に敷いて、映像のすぐ下に置く。
+       * 卓上が中央の先頭なので画面のいちばん下ではないが、「自分の映像の
+       * 真下が手元の操作」という並びは Zoom / Meet と同じで、迷わない。
        */
       .vc-bar {
         display: flex;
@@ -903,6 +923,88 @@
         padding: 7px 12px;
         font-size: 12.5px;
         white-space: nowrap;
+      }
+
+      /*
+       * 手元の操作ボタン（Zoom / Meet と同じ、絵が上・文字が下の形）。
+       * .btn は使わない。ふだんは地を敷かず、切のときだけ色が乗る作りにしたい。
+       */
+      .vc-ctl {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: flex-start;
+        gap: 4px;
+        min-width: 58px;
+        padding: 5px 9px 6px;
+        border: 1px solid transparent;
+        border-radius: var(--r-md);
+        background: none;
+        color: var(--text);
+        font-size: 10px;
+        line-height: 1.2;
+        letter-spacing: 0.02em;
+        white-space: nowrap;
+        cursor: pointer;
+        transition: background 0.15s, color 0.15s, border-color 0.15s;
+      }
+
+      .vc-ctl:hover:not(:disabled) {
+        background: rgba(255, 255, 255, 0.07);
+        border-color: var(--line);
+      }
+
+      .vc-ctl:disabled {
+        opacity: 0.35;
+        cursor: not-allowed;
+      }
+
+      /* 絵はすべて線画。21px でも潰れないよう塗りは使わない */
+      .vc-ctl-ico {
+        width: 21px;
+        height: 21px;
+        flex: none;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.7;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      /* 入／切で絵を差し替える。斜線は「切」の側の <g> にだけ入っている */
+      .vc-ctl-ico-off {
+        display: none;
+      }
+
+      .vc-ctl[data-state="off"] .vc-ctl-ico-on {
+        display: none;
+      }
+
+      .vc-ctl[data-state="off"] .vc-ctl-ico-off {
+        display: inline;
+      }
+
+      /*
+       * 切のときの色。赤にするのはマイクだけにする（Discord と同じ）。
+       * カメラと文字起こしは切が既定の状態で、赤くすると卓に着いた直後から
+       * 警告が2つ並んでいるように見えてしまう。斜線だけで足りる。
+       */
+      .vc-ctl[data-state="off"] {
+        color: var(--muted);
+      }
+
+      #vc-mute[data-state="off"]:not(:disabled) {
+        color: #e79c93;
+        background: rgba(176, 42, 36, 0.16);
+        border-color: #6d2420;
+      }
+
+      #vc-mute[data-state="off"]:not(:disabled):hover {
+        background: rgba(176, 42, 36, 0.28);
+      }
+
+      .vc-ctl-label {
+        display: block;
       }
 
       /* 判定モードの表示。iOS Safari 実機ではコンソールを見られないため画面に出す */
@@ -1227,7 +1329,7 @@
       </section>
 
       <!--
-        入店後の画面。左＝卓の札と進行の操作、中央＝テロップ・座興・卓上、
+        入店後の画面。左＝卓の札と進行の操作、中央＝卓上・テロップ・座興、
         右＝やりとり。要素の ID は app.js / vc.js / chat.js / bot.js /
         sandbox.js が参照しているので、並べ替えても ID とクラス名は変えない。
       -->
@@ -1257,6 +1359,80 @@
         </aside>
 
         <div class="stage-main">
+          <section id="vc" class="card block hidden">
+            <div class="vc-head">
+              <h2>卓上</h2>
+              <p id="vc-status">未参加</p>
+            </div>
+            <div id="vc-media"></div>
+            <!-- 通話の文字起こし（自分の声のみ・既定OFF）。docs/design/bot-voice.md §5.4 -->
+            <p id="voice-caption" class="dim voice-caption" aria-live="polite"></p>
+            <!-- 受信した文字起こし（同室の他人・自分）。最新1〜2行のみ。チャット欄には混ぜない -->
+            <ul id="voice-lines" class="voice-lines" aria-live="polite"></ul>
+            <!-- 品質劣化時の映像自動停止（§3.6）。通知文言 -->
+            <p id="vc-quality" role="status"></p>
+            <!--
+              「VCに参加」「VC退出」は置かない。入店した時点で VC にも参加する
+              （app.js の autoJoinVc）。抜けるのは卓ごと＝「お先に失礼」。
+            -->
+            <!--
+              手元の操作（Zoom / Meet の操作バーと同じ形）。
+              絵は上、文字は下。切のときは data-state="off" が付き、CSS が
+              斜線入りの絵に差し替えて赤みを乗せる（app.js の setVcControl）。
+              文字は .vc-ctl-label にだけ入れる。ボタン自身に textContent を
+              入れると中の <svg> ごと消えるので、app.js もそちらを触っている。
+              外部アイコンは読み込めない（§3.8 CSP）ので絵は inline SVG。
+            -->
+            <div class="vc-bar">
+              <button id="vc-mute" class="vc-ctl" type="button" data-state="on">
+                <svg class="vc-ctl-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <g class="vc-ctl-ico-on">
+                    <path d="M12 4a2.5 2.5 0 0 1 2.5 2.5v5a2.5 2.5 0 0 1-5 0v-5A2.5 2.5 0 0 1 12 4Z" />
+                    <path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7" />
+                  </g>
+                  <g class="vc-ctl-ico-off">
+                    <path d="M12 4a2.5 2.5 0 0 1 2.5 2.5v5a2.5 2.5 0 0 1-5 0v-5A2.5 2.5 0 0 1 12 4Z" />
+                    <path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7" />
+                    <path d="M4 3.5 20 20.5" />
+                  </g>
+                </svg>
+                <span class="vc-ctl-label">ミュート</span>
+              </button>
+              <button id="vc-camera" class="vc-ctl" type="button" data-state="off">
+                <svg class="vc-ctl-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <g class="vc-ctl-ico-on">
+                    <rect x="3" y="6.5" width="12" height="11" rx="2.5" />
+                    <path d="M15 11.2 20.5 8v8L15 12.8Z" />
+                  </g>
+                  <g class="vc-ctl-ico-off">
+                    <rect x="3" y="6.5" width="12" height="11" rx="2.5" />
+                    <path d="M15 11.2 20.5 8v8L15 12.8Z" />
+                    <path d="M4 3.5 20 20.5" />
+                  </g>
+                </svg>
+                <span class="vc-ctl-label">カメラON</span>
+              </button>
+              <button id="vc-transcribe" class="vc-ctl" type="button" data-state="off">
+                <svg class="vc-ctl-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <g class="vc-ctl-ico-on">
+                    <rect x="2.5" y="5" width="19" height="14" rx="2.5" />
+                    <path d="M10 10.8a2.6 2.6 0 1 0 0 2.4M17.5 10.8a2.6 2.6 0 1 0 0 2.4" />
+                  </g>
+                  <g class="vc-ctl-ico-off">
+                    <rect x="2.5" y="5" width="19" height="14" rx="2.5" />
+                    <path d="M10 10.8a2.6 2.6 0 1 0 0 2.4M17.5 10.8a2.6 2.6 0 1 0 0 2.4" />
+                    <path d="M4 3.5 20 20.5" />
+                  </g>
+                </svg>
+                <span class="vc-ctl-label">文字起こしON</span>
+              </button>
+              <span class="spacer"></span>
+              <!-- 判定モードの表示。iOS Safari 実機ではコンソールを見られないため画面に出す -->
+              <span id="vc-quality-mode" class="dim"></span>
+              <button id="vc-resume" type="button" class="btn hidden">カメラを再開</button>
+            </div>
+          </section>
+
           <section id="bot" class="card block hidden"></section>
 
           <!--
@@ -1278,31 +1454,6 @@
               <ul id="result-list"></ul>
             </section>
           </div>
-
-          <section id="vc" class="card block hidden">
-            <div class="vc-head">
-              <h2>卓上</h2>
-              <p id="vc-status">未参加</p>
-            </div>
-            <div id="vc-media"></div>
-            <!-- 通話の文字起こし（自分の声のみ・既定OFF）。docs/design/bot-voice.md §5.4 -->
-            <p id="voice-caption" class="dim voice-caption" aria-live="polite"></p>
-            <!-- 受信した文字起こし（同室の他人・自分）。最新1〜2行のみ。チャット欄には混ぜない -->
-            <ul id="voice-lines" class="voice-lines" aria-live="polite"></ul>
-            <!-- 品質劣化時の映像自動停止（§3.6）。通知文言 -->
-            <p id="vc-quality" role="status"></p>
-            <div class="vc-bar">
-              <button id="vc-join" class="btn" type="button">VCに参加</button>
-              <button id="vc-mute" class="btn" type="button">ミュート</button>
-              <button id="vc-camera" class="btn" type="button">カメラON</button>
-              <button id="vc-transcribe" class="btn" type="button">文字起こしON</button>
-              <span class="spacer"></span>
-              <!-- 判定モードの表示。iOS Safari 実機ではコンソールを見られないため画面に出す -->
-              <span id="vc-quality-mode" class="dim"></span>
-              <button id="vc-resume" type="button" class="btn hidden">カメラを再開</button>
-              <button id="vc-leave" class="btn" type="button">VC退出</button>
-            </div>
-          </section>
         </div>
 
         <aside class="stage-side">
