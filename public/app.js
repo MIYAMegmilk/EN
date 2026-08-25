@@ -19,10 +19,11 @@ function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
 }
 
-/** テキストだけを持つ要素を作る */
-function el(tag, text) {
+/** テキストだけを持つ要素を作る（className は任意。chat.js / bot.js と同じ形） */
+function el(tag, text, className) {
   const node = document.createElement(tag);
   if (text !== undefined) node.textContent = String(text);
+  if (className !== undefined) node.className = className;
   return node;
 }
 
@@ -31,6 +32,13 @@ let presetRoomTags = [];
 
 /** VC への自動参加が進行中か（マイクの許可を待っている間だけ true） */
 let vcJoining = false;
+
+/**
+ * いま選ばれているあそび（"official:<id>" / "sandbox:<id>"）。
+ * 選択欄を品書きに置き換えたので、選択は画面ではなくここが持つ。
+ * serverSelectedGameId は、卓側の選択が変わったことを見分けるための控え。
+ */
+const gameChoiceState = { choice: null, serverSelectedGameId: undefined };
 
 /** 作成直後に PATCH で反映する説明文・タグ。作成ボタン押下時にセットし、roomState 受信後にクリアする */
 let pendingRoomMeta = null;
@@ -348,24 +356,205 @@ function renderAll() {
 
   const inLobby = state.phase === "lobby";
   $("lobby-controls").classList.toggle("hidden", !inLobby);
-  if (inLobby) renderGameSelect(snapshot);
+  syncGameChoice(snapshot);
   $("skip").disabled = !snapshot.youAreHost || inLobby;
   $("start").disabled = !snapshot.youAreHost;
-  $("select-game").disabled = !snapshot.youAreHost;
+  // 選ぶこと自体は誰でもできてよいが、卓に伝わる（selectGame）のはホストだけ。
+  // 見るぶんには全員に開けたほうが、次に何をやるか相談しやすい
+  $("game-open").disabled = false;
 
   renderPhase();
 }
 
-/** ゲーム選択の選択肢を作る */
-function renderGameSelect(snapshot) {
-  const select = $("game");
-  clear(select);
+/** 採点方式の日本語名（server/types.ts の ScoringMode と1対1） */
+const SCORING_LABELS = {
+  vote: "投票で採点",
+  match: "一致で採点",
+  correct: "正解で採点",
+};
+
+/**
+ * サムネの地の色。離れた色相を並べてあり、品書きの並び順に配る。
+ * IDのハッシュから決めると、たまたま同じ色が2枚並ぶ（実際に起きた）。
+ * 並び順は「公式ゲーム→余興」で安定しているので、開くたびに変わることもない。
+ */
+const THUMB_HUES = [28, 202, 96, 330, 44, 268, 168, 8];
+
+/**
+ * 品書きに並べる1本ぶんの情報に均す。
+ *
+ * 公式ゲーム（roomState の availableGames）と余興サンドボックス
+ * （/api/sandboxGames）は形も出どころも違うので、ここで同じ形にしてから
+ * 札を組む。choice が "official:<id>" / "sandbox:<id>"（開始時の出し分け用）。
+ */
+function listGames(snapshot) {
+  const games = [];
+  const withHue = (game) => ({ ...game, hue: THUMB_HUES[games.length % THUMB_HUES.length] });
   for (const game of snapshot.availableGames) {
-    const option = el("option", `${game.title}（${game.rounds}ラウンド）`);
-    option.value = game.id;
-    if (game.id === snapshot.selectedGameId) option.selected = true;
-    select.appendChild(option);
+    const scoring = SCORING_LABELS[game.scoring];
+    games.push(withHue({
+      choice: `official:${game.id}`,
+      id: game.id,
+      title: game.title,
+      description: game.description ?? "",
+      meta: `${game.rounds}ラウンド・${scoring === undefined ? game.scoring : scoring}`,
+      badge: "宴の余興",
+      official: true,
+    }));
   }
+  for (const game of Sandbox.getGames()) {
+    games.push(withHue({
+      choice: `sandbox:${game.id}`,
+      id: game.id,
+      title: game.title,
+      description: game.description ?? "",
+      meta: `${game.minPlayers}〜${game.maxPlayers}人・作: ${game.author}`,
+      badge: "あそび（点は付かない）",
+      official: false,
+    }));
+  }
+  return games;
+}
+
+/** 選択欄の値を { kind, gameId } に解く */
+function parseGameChoice(value) {
+  if (typeof value !== "string") return null;
+  const sep = value.indexOf(":");
+  if (sep < 0) return null;
+  return { kind: value.slice(0, sep), gameId: value.slice(sep + 1) };
+}
+
+/** いま選ばれている1本を返す。無ければ null */
+function currentGame() {
+  if (state.snapshot === null) return null;
+  return listGames(state.snapshot).find((g) => g.choice === gameChoiceState.choice) ?? null;
+}
+
+/**
+ * 品書き（ゲーム一覧）を組み直す。
+ * 余興の一覧は HTTP で後から届く（sandbox.js の onGames）ため、何度も呼ばれる。
+ */
+function renderGamePlatform() {
+  const list = $("game-list");
+  clear(list);
+  if (state.snapshot === null) return;
+
+  const games = listGames(state.snapshot);
+  if (games.length === 0) {
+    list.appendChild(el("p", "あそびがまだありません", "platform-empty"));
+    return;
+  }
+
+  for (const game of games) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "gamecard";
+    card.dataset.choice = game.choice;
+    card.setAttribute("aria-pressed", game.choice === gameChoiceState.choice ? "true" : "false");
+
+    // 絵は用意されていないので、題名の一文字目を明朝で置いた札をサムネにする
+    const thumb = el("span", [...game.title][0] ?? "宴", "gamecard-thumb");
+    thumb.style.setProperty("--thumb-hue", String(game.hue));
+    thumb.setAttribute("aria-hidden", "true");
+    card.appendChild(thumb);
+
+    card.appendChild(el("span", game.title, "gamecard-title"));
+    card.appendChild(el("span", game.meta, "gamecard-meta"));
+    if (game.description.length > 0) {
+      card.appendChild(el("span", game.description, "gamecard-desc"));
+    }
+    card.appendChild(
+      el("span", game.badge, `gamecard-badge${game.official ? " gamecard-badge-official" : ""}`),
+    );
+
+    // 選べるのはホストだけ。非ホストが選んでも卓には伝わらず、次の roomState で
+    // 戻されて食い違うだけなので、押させない（読むぶんには開けておく）
+    card.disabled = !canStartGame();
+    card.addEventListener("click", () => pickGame(game.choice));
+    list.appendChild(card);
+  }
+}
+
+/** 1本を選ぶ。品書きを開いたままでも、選び直しがその場で見える */
+function pickGame(choice) {
+  gameChoiceState.choice = choice;
+  const parsed = parseGameChoice(choice);
+  // 公式ゲームは選んだ時点で卓に伝える。全員に「何が選ばれたか」が見える
+  if (parsed !== null && parsed.kind === "official" && state.snapshot !== null) {
+    if (state.snapshot.selectedGameId !== parsed.gameId) {
+      send({ t: "selectGame", gameId: parsed.gameId });
+    }
+  }
+  for (const card of $("game-list").children) {
+    if (card.dataset === undefined) continue;
+    card.setAttribute("aria-pressed", card.dataset.choice === choice ? "true" : "false");
+  }
+  renderGamePick();
+}
+
+/** いま選ばれている1本の表示（卓の札と品書きの足元）を更新する */
+function renderGamePick() {
+  const game = currentGame();
+  const label = game === null ? "まだ選ばれていません" : `${game.title}（${game.meta}）`;
+  $("game-current").textContent = label;
+  $("platform-pick").textContent = canStartGame()
+    ? (game === null ? "あそびを選んでください" : label)
+    : `${label}（選べるのはホストだけです）`;
+  $("platform-start").disabled = game === null || !canStartGame();
+}
+
+/** ゲームを始められるか（ホストだけ） */
+function canStartGame() {
+  return state.snapshot !== null && state.snapshot.youAreHost;
+}
+
+/**
+ * 卓の選択（selectGame）に画面を追随させ、品書きを組み直す。
+ *
+ * ボットの提案や、ホスト交代後の選び直しも selectGame で流れてくるので、
+ * サーバー側の値が変わったときは、こちらの選択もそれに合わせる。
+ * 余興を選んでいる間は selectedGameId が動かないため、上書きされない。
+ */
+function syncGameChoice(snapshot) {
+  if (snapshot.selectedGameId !== gameChoiceState.serverSelectedGameId) {
+    gameChoiceState.serverSelectedGameId = snapshot.selectedGameId;
+    if (snapshot.selectedGameId !== null) {
+      gameChoiceState.choice = `official:${snapshot.selectedGameId}`;
+    }
+  }
+  const games = listGames(snapshot);
+  // 選んでいたものが消えた（一覧が入れ替わった）ときは先頭に戻す
+  if (!games.some((g) => g.choice === gameChoiceState.choice)) {
+    gameChoiceState.choice = games.length > 0 ? games[0].choice : null;
+  }
+  renderGamePlatform();
+  renderGamePick();
+}
+
+/**
+ * 選ばれているあそびを始める。公式ゲームと余興で出し口が違うので、
+ * 種別を見て selectGame+startGame と sandboxStart を分ける。
+ */
+function startChosenGame() {
+  const choice = parseGameChoice(gameChoiceState.choice);
+  if (choice === null) {
+    showError("あそびを選んでください");
+    return;
+  }
+  if (choice.kind === "sandbox") {
+    Sandbox.start(choice.gameId);
+    return;
+  }
+  // 品書きで選んだ時点で送っているが、卓側とずれていれば始める前に揃える
+  const selected = state.snapshot === null ? null : state.snapshot.selectedGameId;
+  if (selected !== choice.gameId) send({ t: "selectGame", gameId: choice.gameId });
+  send({ t: "startGame" });
+}
+
+/** 品書きの開け閉め */
+function toggleGamePlatform(open) {
+  $("game-platform").classList.toggle("hidden", !open);
+  if (open) $("platform-close").focus();
 }
 
 /** 現在のフェーズを描画する */
@@ -870,10 +1059,20 @@ function bind() {
     if (nickname.length > 0) msg.nickname = nickname;
     send(msg);
   });
-  $("select-game").addEventListener("click", () => {
-    send({ t: "selectGame", gameId: $("game").value });
+  $("game-open").addEventListener("click", () => toggleGamePlatform(true));
+  $("platform-close").addEventListener("click", () => toggleGamePlatform(false));
+  // 覆いの余白を押したら閉じる（札そのものを押したときは閉じない）
+  $("game-platform").addEventListener("click", (event) => {
+    if (event.target === $("game-platform")) toggleGamePlatform(false);
   });
-  $("start").addEventListener("click", () => send({ t: "startGame" }));
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") toggleGamePlatform(false);
+  });
+  $("platform-start").addEventListener("click", () => {
+    toggleGamePlatform(false);
+    startChosenGame();
+  });
+  $("start").addEventListener("click", startChosenGame);
   $("skip").addEventListener("click", () => send({ t: "skipPhase" }));
   $("leave").addEventListener("click", () => {
     state.leaving = true;
@@ -903,6 +1102,10 @@ function bind() {
   Sandbox.init({
     send,
     container: $("sandbox"),
+    // 余興の一覧は HTTP で後から届く。揃ったら品書きを組み直す
+    onGames: () => {
+      if (state.snapshot !== null) syncGameChoice(state.snapshot);
+    },
     onStatus: (event) => {
       if (event.kind === "error") showError(event.message);
       log("Sandbox", event.message);

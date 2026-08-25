@@ -62,7 +62,7 @@
   const LOG_LINES_MAX = 50;
 
   /** init で注入される依存 */
-  const deps = { send: null, container: null, onStatus: null };
+  const deps = { send: null, container: null, onStatus: null, onGames: null };
 
   /** モジュール内の状態 */
   const state = {
@@ -82,7 +82,6 @@
     gamesError: null,
 
     // ホストの選択欄
-    selectedGameId: null,
 
     // 稼働中のサンドボックスゲーム。null なら非稼働（SandboxGameState 相当）
     running: null,
@@ -103,7 +102,6 @@
     el: {
       controlsRow: null,
       select: null,
-      startBtn: null,
       endBtn: null,
       hostHint: null,
       statusEl: null,
@@ -167,6 +165,8 @@
     } finally {
       state.gamesLoading = false;
       renderControls();
+      // 選択欄は公式ゲームと1つにまとめてあるので、揃ったことを外へ知らせる
+      if (typeof deps.onGames === "function") deps.onGames(getGames());
     }
   }
 
@@ -218,24 +218,12 @@
     );
     container.appendChild(head);
 
+    /*
+     * 選ぶ・はじめるはこのパネルには置かない。公式ゲームと1つの選択欄に
+     * まとめてあり（index.html の #lobby-controls）、そこから start() が
+     * 呼ばれる。ここに残すのは、動いているゲームを止める操作だけ。
+     */
     const controls = el("div", undefined, "sandbox-controls");
-    const select = document.createElement("select");
-    select.className = "input sandbox-select";
-    select.addEventListener("change", () => {
-      state.selectedGameId = select.value.length > 0 ? select.value : null;
-    });
-    controls.appendChild(select);
-
-    const startBtn = el("button", "はじめる", "btn btn-gold");
-    startBtn.type = "button";
-    startBtn.addEventListener("click", () => {
-      if (state.selectedGameId === null) {
-        notify("error", "ゲームを選んでください");
-        return;
-      }
-      send({ t: "sandboxStart", gameId: state.selectedGameId });
-    });
-    controls.appendChild(startBtn);
 
     const endBtn = el("button", "終了する（ホスト）", "btn btn-red");
     endBtn.type = "button";
@@ -269,8 +257,6 @@
     container.appendChild(logDetails);
 
     state.el.controlsRow = controls;
-    state.el.select = select;
-    state.el.startBtn = startBtn;
     state.el.endBtn = endBtn;
     state.el.hostHint = hostHint;
     state.el.statusEl = status;
@@ -281,35 +267,12 @@
 
   /** 選択欄・開始終了ボタンを描き直す */
   function renderControls() {
-    const select = state.el.select;
-    if (select === null) return;
-
-    clear(select);
-    if (state.games.length === 0) {
-      const placeholder = el("option", state.gamesLoading ? "読み込み中…" : "（ゲームが無い）");
-      placeholder.value = "";
-      select.appendChild(placeholder);
-    } else {
-      for (const game of state.games) {
-        const label = `${game.title}（${game.minPlayers}〜${game.maxPlayers}人）`;
-        const option = el("option", label);
-        option.value = game.id;
-        select.appendChild(option);
-      }
-      if (state.selectedGameId === null || !state.games.some((g) => g.id === state.selectedGameId)) {
-        state.selectedGameId = state.games[0].id;
-      }
-      select.value = state.selectedGameId;
-    }
+    if (state.el.controlsRow === null) return;
 
     const running = state.running !== null;
-    const canOperate = state.isHost && state.games.length > 0;
-    // 開始・終了の操作はホストにだけ見せる（設計書 §5.1・タスク指示）。非ホストは
+    // 終了の操作はホストにだけ見せる（設計書 §5.1・タスク指示）。非ホストは
     // 単に disabled にするだけでは「見えるが押せない」ままになるため、行ごと隠す
     state.el.controlsRow.classList.toggle("hidden", !state.isHost);
-    select.disabled = !canOperate || running;
-    state.el.startBtn.disabled = !canOperate || running;
-    state.el.startBtn.classList.toggle("hidden", running);
     state.el.endBtn.disabled = !state.isHost || !running;
     state.el.endBtn.classList.toggle("hidden", !running);
     state.el.hostHint.classList.toggle("hidden", state.isHost);
@@ -635,6 +598,7 @@
     deps.send = options.send;
     deps.container = options.container;
     deps.onStatus = options.onStatus;
+    deps.onGames = options.onGames ?? null;
     buildPanel(deps.container);
     renderControls();
     loadGamesList();
@@ -647,7 +611,6 @@
     state.isHost = false;
     state.hostId = null;
     state.players = [];
-    state.selectedGameId = null;
     state.loadError = null;
     state.statusText = "";
     state.logLines = [];
@@ -666,5 +629,22 @@
     };
   }
 
-  global.Sandbox = { init, handleServerMessage, reset, getState };
+  /**
+   * 遊べる余興の一覧を返す（検証済みのものだけ。呼び出し側では書き換えない）。
+   * 選択欄は公式ゲームと1つにまとまっており、そちらが中身を必要とする。
+   */
+  function getGames() {
+    return state.games.map((g) => ({ ...g }));
+  }
+
+  /** 余興を始める。ホストかどうかはサーバーが見る */
+  function start(gameId) {
+    if (typeof gameId !== "string" || gameId.length === 0) {
+      notify("error", "ゲームを選んでください");
+      return;
+    }
+    send({ t: "sandboxStart", gameId });
+  }
+
+  global.Sandbox = { init, handleServerMessage, reset, getState, getGames, start };
 })(window);

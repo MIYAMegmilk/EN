@@ -332,7 +332,7 @@
       }
 
       /* ══ 入店後 ══════════════════════════════════════════════════
-       * 3列に組む。左＝卓の情報と進行の操作、中央＝卓上・テロップ・座興、
+       * 3列に組む。左＝卓の情報と進行の操作、中央＝卓上・テロップ・あそび、
        * 右＝やりとり。全体の高さはビューポートに固定し、溢れた分は
        * 各パネルの内側（#players / #vc-media / #chat-log …）だけで流す。
        * ページ自体は決してスクロールさせない。
@@ -504,30 +504,6 @@
         background: rgba(0, 0, 0, 0.18);
       }
 
-      /* ラベルと選択欄を1行ずつ、操作ボタンを2つ横並びにする */
-      #lobby-controls {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 6px;
-        margin: 0;
-      }
-
-      #lobby-controls > label {
-        grid-column: 1 / -1;
-        font-size: 11px;
-        letter-spacing: 0.14em;
-        color: var(--dim);
-      }
-
-      #lobby-controls .input {
-        grid-column: 1 / -1;
-        width: 100%;
-        min-width: 0;
-        flex: none;
-        padding: 7px 10px;
-        font-size: 12.5px;
-      }
-
       .rail-foot .btn {
         flex: 1 1 0;
         padding: 8px 10px;
@@ -540,12 +516,12 @@
         margin-left: 0;
       }
 
-      /* ── 中央：卓上・テロップ・座興 ───────────────────────────── */
-      /* しゅんぴたちのテロップ。卓上と座興のあいだに細い帯で挟む */
+      /* ── 中央：卓上・テロップ・あそび ───────────────────────────── */
+      /* しゅんぴたちのテロップ。卓上とあそびのあいだに細い帯で挟む */
       #bot {
         flex: 0 0 auto;
         min-height: 0;
-        max-height: 32%;
+        max-height: 26%;
         overflow-y: auto;
         overscroll-behavior: contain;
         display: flex;
@@ -568,8 +544,8 @@
       }
 
       /*
-       * 座興の面。本編・余興・順位表をこの一枠にまとめ、伸びたらここだけを流す。
-       * 座興が出ていない（＝ロビー）あいだは中身のぶんしか場所を取らないので、
+       * あそびの面。本編・余興・順位表をこの一枠にまとめ、伸びたらここだけを流す。
+       * あそびが出ていない（＝ロビー）あいだは中身のぶんしか場所を取らないので、
        * 余った高さはそのまま卓上（#vc）が受け取る。
        */
       .stage-board {
@@ -584,6 +560,276 @@
 
       .stage-board > .card {
         flex: none;
+      }
+
+      /*
+       * 動いている余興をあそびの面のいちばん上に出す。始めた当人が
+       * スクロールしないと見えないのでは意味がない。
+       */
+      #sandbox {
+        order: -1;
+      }
+
+      /*
+       * あそびが始まったら、余った高さの行き先を卓上からあそびの面へ移す。
+       * ロビーの間は卓上が主役でよいが、始まった後まで卓上が場所を抱えて
+       * いると、肝心のゲームが枠からこぼれて見えない。
+       * 公式ゲームは入口（#lobby-controls）が畳まれていること、余興は
+       * iframe が挿さっていることで見分ける。
+       */
+      .stage-main:has(#lobby-controls.hidden) #vc,
+      .stage-main:has(.sandbox-frame-slot > *) #vc {
+        flex: 0 0 276px;
+      }
+
+      .stage-main:has(#lobby-controls.hidden) .stage-board,
+      .stage-main:has(.sandbox-frame-slot > *) .stage-board {
+        flex: 1 1 0;
+      }
+
+      /* テロップも同じ理由で細める。始まった後のゲーム提案は用済み */
+      .stage-main:has(#lobby-controls.hidden) #bot,
+      .stage-main:has(.sandbox-frame-slot > *) #bot {
+        max-height: 116px;
+      }
+
+      /*
+       * 余興が動いているあいだは、ゲームの入口を引っ込める。
+       * 遊んでいる最中に「はじめる」が出ていると、何が始まるのか分からない。
+       * 止めれば（iframe が抜ければ）また出る。
+       */
+      .stage-board:has(.sandbox-frame-slot > *) #lobby-controls {
+        display: none;
+      }
+
+      /*
+       * ロビーの間は「待機中／ホストが選ぶのを待っています」の札を畳む。
+       * すぐ上のあそびの入口と左の卓の札が同じことを言っており、その90pxを
+       * 卓上に回したほうが顔が大きく見える。始まれば（入口が畳まれれば）出る。
+       */
+      .stage-board:has(#lobby-controls:not(.hidden)) #phase {
+        display: none;
+      }
+
+      /* ゲームの入口。いま何が選ばれているかと、えらぶ／はじめるを1行に */
+      .gamepick {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .gamepick-label {
+        flex: none;
+        font-size: 12px;
+        letter-spacing: 0.14em;
+        color: var(--dim);
+      }
+
+      .gamepick-current {
+        flex: 1;
+        min-width: 0;
+        font-family: var(--serif);
+        font-size: 14.5px;
+        color: var(--cream);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .gamepick .btn {
+        flex: none;
+      }
+
+      /* ── あそびの品書き（ゲーム一覧の覆い） ─────────────────────── */
+      .platform {
+        position: fixed;
+        inset: 0;
+        z-index: 40;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+        background: rgba(8, 5, 3, 0.74);
+        backdrop-filter: blur(3px);
+      }
+
+      .platform-sheet {
+        display: flex;
+        flex-direction: column;
+        width: min(1000px, 100%);
+        max-height: 100%;
+        min-height: 0;
+      }
+
+      .platform-head,
+      .platform-foot {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex: none;
+        padding: 12px 16px;
+      }
+
+      .platform-head {
+        border-bottom: 1px solid var(--line-soft);
+      }
+
+      .platform-head h2 {
+        margin: 0;
+        font-family: var(--serif);
+        font-size: 17px;
+        font-weight: 400;
+        color: var(--cream);
+        letter-spacing: 0.08em;
+      }
+
+      .platform-foot {
+        border-top: 1px solid var(--line-soft);
+        background: rgba(0, 0, 0, 0.18);
+      }
+
+      #platform-pick {
+        margin: 0;
+        min-width: 0;
+        font-size: 12.5px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      /* 札の並び。数が増えてもここだけが流れる */
+      .platform-grid {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-width: thin;
+        scrollbar-color: var(--line) transparent;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(212px, 1fr));
+        align-content: start;
+        gap: 12px;
+        padding: 14px 16px;
+      }
+
+      /* ゲーム1本の札 */
+      .gamecard {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 10px;
+        text-align: left;
+        border: 1px solid var(--line);
+        border-radius: var(--r-lg);
+        background: linear-gradient(180deg, var(--panel-2), var(--panel));
+        color: var(--text);
+        cursor: pointer;
+        transition: border-color 0.15s, transform 0.06s;
+      }
+
+      .gamecard:hover {
+        border-color: var(--gold-3);
+      }
+
+      .gamecard:active {
+        transform: translateY(1px);
+      }
+
+      .gamecard[aria-pressed="true"] {
+        border-color: var(--gold-2);
+        box-shadow: 0 0 0 1px var(--gold-2) inset;
+      }
+
+      /*
+       * サムネ。絵は用意されていない（マニフェストにも GameSummary にも
+       * 画像の項目が無い）ので、題名の一文字目を明朝で置いた札を作る。
+       * 地の色はゲームIDから決まるので、ゲームが増えても手を入れずに済む。
+       */
+      .gamecard-thumb {
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        aspect-ratio: 16 / 9;
+        border-radius: var(--r-md);
+        border: 1px solid rgba(0, 0, 0, 0.45);
+        background:
+          radial-gradient(
+            115% 90% at 28% 18%,
+            hsl(var(--thumb-hue) 42% 30%),
+            hsl(var(--thumb-hue) 45% 13%)
+          );
+        font-family: var(--serif);
+        font-size: 38px;
+        line-height: 1;
+        color: hsl(var(--thumb-hue) 55% 84%);
+        text-shadow: 0 2px 6px rgba(0, 0, 0, 0.6);
+        overflow: hidden;
+      }
+
+      /* 暖簾の縦縞をうっすら重ねて、のっぺりした色面にしない */
+      .gamecard-thumb::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: repeating-linear-gradient(
+          90deg,
+          rgba(0, 0, 0, 0.22) 0 1px,
+          rgba(255, 255, 255, 0.02) 1px 3px,
+          rgba(0, 0, 0, 0) 3px 26px
+        );
+      }
+
+      .gamecard-title {
+        font-family: var(--serif);
+        font-size: 15px;
+        color: var(--cream);
+        overflow-wrap: anywhere;
+      }
+
+      .gamecard-meta {
+        font-size: 11.5px;
+        color: var(--gold-2);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .gamecard-desc {
+        font-size: 11.5px;
+        line-height: 1.6;
+        color: var(--muted);
+        overflow-wrap: anywhere;
+      }
+
+      .gamecard-badge {
+        align-self: flex-start;
+        padding: 1px 8px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-pill);
+        font-size: 10px;
+        color: var(--muted);
+      }
+
+      .gamecard-badge-official {
+        border-color: var(--gold-3);
+        color: var(--gold-2);
+      }
+
+      .platform-empty {
+        grid-column: 1 / -1;
+        margin: 0;
+        padding: 40px 20px;
+        text-align: center;
+        font-size: 13px;
+        color: var(--dim);
+      }
+
+      @media (max-width: 640px) {
+        .platform {
+          padding: 10px;
+        }
+        .platform-grid {
+          grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+        }
       }
 
       /* フェーズ表示 */
@@ -683,8 +929,35 @@
         font-variant-numeric: tabular-nums;
       }
 
-      /* 余興（サンドボックス）。en.css の縦積みを、この画面用に詰める */
-      #sandbox .sandbox-head {
+      /*
+       * 余興（サンドボックス）。en.css は縦積みだが、この画面では見出し・
+       * 操作・状態を1行に畳む。ゲームの絵（480x320）に高さを譲るため。
+       *
+       * flex の折り返しではなく grid にしてある。flex だと基準の幅が
+       * max-width: 480px に切り詰められてしまい、flex-basis: 100% を
+       * 指定しても絵が行を独り占めできない（状態表示が横に並んでしまう）。
+       */
+      /*
+       * 余興のパネルは動いている間だけ出す。選ぶ操作は品書きへ移したので、
+       * 止まっているときのこの札には見出しと「未実施」しか残らない。
+       * 動いているかは iframe が挿さっているかで判る
+       * （sandbox.js が .sandbox-frame-slot に iframe を出し入れする）。
+       * 一覧の取得に失敗したときの文言は画面上端の警告帯にも出るので埋もれない。
+       */
+      #sandbox:not(:has(.sandbox-frame-slot > *)) {
+        display: none;
+      }
+
+      #sandbox {
+        display: grid;
+        grid-template-columns: auto auto 1fr;
+        align-items: center;
+        gap: 8px 14px;
+      }
+
+      #sandbox > .sandbox-head {
+        grid-row: 1;
+        grid-column: 1;
         display: flex;
         align-items: baseline;
         flex-wrap: wrap;
@@ -696,54 +969,47 @@
         font-size: 15px;
       }
 
-      #sandbox .sandbox-note {
+      /* 操作の行と、非ホスト向けの断り書きは同じ枡。同時には出ない */
+      #sandbox > .sandbox-controls,
+      #sandbox > .sandbox-note {
+        grid-row: 1;
+        grid-column: 2;
         margin: 0;
       }
 
-      #sandbox .sandbox-controls {
-        margin: 9px 0 0;
+      #sandbox > .sandbox-status {
+        grid-row: 1;
+        grid-column: 3;
+        margin: 0;
+      }
+
+      #sandbox .sandbox-note {
+        margin: 0;
       }
 
       #sandbox .sandbox-status:empty {
         display: none;
       }
 
-      #sandbox .sandbox-status {
-        margin: 7px 0 0;
-      }
-
-      #sandbox .sandbox-error {
-        margin: 7px 0 0;
-      }
-
-      #sandbox .sandbox-frame-slot {
+      /* 画面・警告・ログは行いっぱいを使い、絵は左に寄せる */
+      #sandbox > .sandbox-error,
+      #sandbox > .sandbox-frame-slot,
+      #sandbox > .sandbox-log-details {
+        grid-column: 1 / -1;
+        justify-self: start;
         width: 100%;
-        margin-top: 10px;
-      }
-
-      #sandbox .sandbox-log-details {
-        margin-top: 8px;
-      }
-
-      /*
-       * 余興が動いていないあいだは、見出しと選択欄だけの1枚に畳む。
-       * 動いているかは iframe が挿さっているかで判る
-       * （sandbox.js が .sandbox-frame-slot に iframe を出し入れする）。
-       */
-      #sandbox:not(:has(.sandbox-frame-slot > *)) .sandbox-note,
-      #sandbox:not(:has(.sandbox-frame-slot > *)) .sandbox-log-details {
-        display: none;
+        margin: 0;
       }
 
       /* 卓上（VC / カメラ）。枠は vc.js が .vc-peer として差し込む */
       #vc {
         /*
          * 基準を 0 にして「余った高さ」だけを受け取る。auto にすると枠の
-         * 高さが基準になり、座興の面まで道連れで縮んで無駄に流れてしまう。
-         * min-height は、座興が場所を取っても枠が一列ぶんは残る高さ。
+         * 高さが基準になり、あそびの面まで道連れで縮んで無駄に流れてしまう。
+         * min-height は、あそびが場所を取っても枠が一列ぶんは残る高さ。
          */
         flex: 1 1 0;
-        min-height: 246px;
+        min-height: 300px;
         display: flex;
         flex-direction: column;
         gap: 8px;
@@ -777,26 +1043,34 @@
         text-overflow: ellipsis;
       }
 
+      /*
+       * 枠の並び。grid で列を等分すると、ボット4体が呑み手と同じ幅を取って
+       * 卓上の半分を持っていってしまう。flex にして、人は大きく・ボットは
+       * 小さく配る（ボットは「その場にいる」という演出で、顔を見る相手ではない）。
+       */
       #vc-media {
         flex: 1;
         min-height: 0;
         overflow-y: auto;
         overscroll-behavior: contain;
-        display: grid;
-        /*
-         * auto-fit は空いた列を畳むので、呑み手の数だけ列ができて幅を等分する。
-         * ひとりのときに枠が卓いっぱいへ膨らまないよう .vc-peer 側で頭を打つ。
-         */
-        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-        justify-items: center;
-        /* 人数が少ないうちは上下の真ん中に。溢れたら safe が start に倒す */
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        align-items: center;
+        /* 折り返したときも上下の真ん中に。溢れたら safe が start に倒す */
         align-content: safe center;
         gap: 10px;
       }
 
-      /* 誰も入っていないときは枠を敷かず、真ん中に一言だけ置く */
-      #vc-media:empty {
-        grid-template-columns: 1fr;
+      #vc-media > .vc-peer {
+        flex: 1 1 200px;
+        max-width: 320px;
+      }
+
+      /* ボットは人の枠より小さく、数が増えても場所を食わない大きさに留める */
+      #vc-media > .vc-peer-bot {
+        flex: 0 1 124px;
+        max-width: 124px;
       }
 
       #vc-media:empty::after {
@@ -807,14 +1081,12 @@
       }
 
       /*
-       * 幅は列（＝呑み手の数）で、高さは枠の高さで頭を打つ。座興が場所を
+       * 幅は列（＝呑み手の数）で、高さは枠の高さで頭を打つ。あそびが場所を
        * 取って卓上が薄くなったときは 4:3 を諦めて横長に潰す（Zoom の
        * ストリップと同じ。枠ごと切れて見えるより、潰れたほうが読める）。
        */
       .vc-peer {
         position: relative;
-        width: 100%;
-        max-width: 248px;
         max-height: 100%;
         aspect-ratio: 4 / 3;
         display: flex;
@@ -826,18 +1098,21 @@
         overflow: hidden;
       }
 
-      /* カメラが切のあいだの下敷き。映像が来ると video が上に重なる */
+      /*
+       * カメラが切のあいだの下敷き。黒地に斜線入りのカメラを置いて、
+       * 「映っていない」ことが一目で分かるようにする。映像が来ると
+       * .vc-video が上（z-index: 1）に重なって隠れる。
+       * 絵は data: の inline SVG（CSP の img-src は 'self' data: を許している）。
+       */
       .vc-peer::before {
-        content: "CAMERA";
+        content: "";
         position: absolute;
         inset: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-family: var(--serif);
-        font-size: 11px;
-        letter-spacing: 0.3em;
-        color: #4a3c2c;
+        background-color: #000;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%237a5f3c' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='6.5' width='12' height='11' rx='2.5'/%3E%3Cpath d='M15 11.2 20.5 8v8L15 12.8Z'/%3E%3Cpath d='M4 3.5 20 20.5'/%3E%3C/svg%3E");
+        background-repeat: no-repeat;
+        background-position: center;
+        background-size: 54px;
       }
 
       /*
@@ -1329,7 +1604,7 @@
       </section>
 
       <!--
-        入店後の画面。左＝卓の札と進行の操作、中央＝卓上・テロップ・座興、
+        入店後の画面。左＝卓の札と進行の操作、中央＝卓上・テロップ・あそび、
         右＝やりとり。要素の ID は app.js / vc.js / chat.js / bot.js /
         sandbox.js が参照しているので、並べ替えても ID とクラス名は変えない。
       -->
@@ -1343,13 +1618,11 @@
 
             <ul id="players"></ul>
 
+            <!--
+              ゲームを選んで始める操作はここには置かない。公式ゲームと余興を
+              1つの選択欄にまとめて中央（#lobby-controls）に出している。
+            -->
             <div class="rail-foot">
-              <div class="row" id="lobby-controls">
-                <label for="game">ゲーム</label>
-                <select class="input" id="game"></select>
-                <button id="select-game" class="btn" type="button">選ぶ</button>
-                <button id="start" class="btn btn-gold" type="button">はじめる</button>
-              </div>
               <div class="row">
                 <button id="skip" class="btn" type="button">スキップ（ホスト）</button>
                 <button id="leave" class="btn btn-red" type="button">お先に失礼</button>
@@ -1436,10 +1709,25 @@
           <section id="bot" class="card block hidden"></section>
 
           <!--
-            座興の面。本編・余興・順位表はまとめてこの一枠の中で流す。
+            あそびの面。本編・余興・順位表はまとめてこの一枠の中で流す。
             別々に流すと、どれも中途半端な高さになって卓上まで潰れる。
           -->
           <div class="stage-board">
+            <!--
+              ゲームの入口。公式ゲーム（採点あり）と余興サンドボックス
+              （点は付かない）を1つの選択欄に optgroup で並べ、「はじめる」も
+              1つにする。押した中身で selectGame+startGame / sandboxStart を
+              出し分けるのは app.js。ロビーの間だけ出す（app.js が .hidden）。
+            -->
+            <section id="lobby-controls" class="card block hidden">
+              <div class="gamepick">
+                <span class="gamepick-label">あそび</span>
+                <span id="game-current" class="gamepick-current">まだ選ばれていません</span>
+                <button id="game-open" class="btn" type="button">えらぶ</button>
+                <button id="start" class="btn btn-gold" type="button">はじめる</button>
+              </div>
+            </section>
+
             <section id="phase" class="card block hidden">
               <h2 id="phase-title"></h2>
               <p id="phase-deadline"></p>
@@ -1479,6 +1767,34 @@
         <div id="log"></div>
       </details>
     </main>
+
+    <!--
+      あそびの品書き。札を並べて選ぶ画面で、#game-open で開く。
+      main の外に出してあるのは、画面全体を覆うため（main は高さを
+      ビューポートに固定してあり、その内側では覆いきれない）。
+      札の中身は app.js が組み立てる（サムネはゲームIDから作る）。
+    -->
+    <div
+      id="game-platform"
+      class="platform hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="platform-title"
+    >
+      <div class="platform-sheet card">
+        <div class="platform-head">
+          <h2 id="platform-title">あそびの品書き</h2>
+          <span class="spacer"></span>
+          <button id="platform-close" class="btn" type="button">閉じる</button>
+        </div>
+        <div id="game-list" class="platform-grid"></div>
+        <div class="platform-foot">
+          <p id="platform-pick" class="muted"></p>
+          <span class="spacer"></span>
+          <button id="platform-start" class="btn btn-gold" type="button">これではじめる</button>
+        </div>
+      </div>
+    </div>
 
     <script src="./rooms.js"></script>
     <script src="./room/vc.js"></script>

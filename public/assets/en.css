@@ -608,11 +608,15 @@ select {
  * インライン style）の都合で単純な単一クラスでは負けてしまうため、
  * 上書きしたい箇所は .vc-peer.vc-peer-bot のように複合セレクタで詳細度を上げてある。
  */
+/*
+ * ボットの枠は呑み手の枠より小さい（index.html の #vc-media で幅を分けている）。
+ * 中身もその寸法に合わせて詰める。以前の 56px の丸は、縦に潰れて楕円になった。
+ */
 .vc-peer.vc-peer-bot {
   justify-content: center;
   align-items: center;
-  gap: 6px;
-  padding: 14px 10px;
+  gap: 3px;
+  padding: 7px 5px;
   border-style: dashed;
   background: linear-gradient(180deg, #1c140a, #140e08);
 }
@@ -625,16 +629,16 @@ select {
 /* 実在の参加者と混同させないための印 */
 .vc-bot-mark {
   position: absolute;
-  top: 8px;
-  right: 8px;
+  top: 5px;
+  right: 5px;
   z-index: 2;
-  padding: 2px 8px;
+  padding: 0 5px;
   border: 1px solid var(--gold-3);
   border-radius: var(--r-pill);
-  font-size: 9.5px;
-  letter-spacing: 0.08em;
+  font-size: 8.5px;
+  letter-spacing: 0.06em;
   color: var(--gold-2);
-  background: rgba(0, 0, 0, 0.4);
+  background: rgba(0, 0, 0, 0.55);
 }
 
 /*
@@ -647,16 +651,18 @@ select {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 56px;
-  height: 56px;
+  /* flex: none を付けないと、枠が浅いときに縦だけ縮んで楕円になる */
+  flex: none;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
   border: 2px solid currentColor;
   background: radial-gradient(circle at 35% 30%, var(--panel-3), var(--wood));
 }
 
 .vc-bot-glyph {
-  width: 29px;
-  height: 29px;
+  width: 21px;
+  height: 21px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.6;
@@ -689,14 +695,20 @@ select {
   position: static;
   padding: 0;
   background: none;
+  font-size: 11.5px;
+  /* 既定の 1.7 だと名前の1行だけで枠から溢れる（枠は 93px 前後しかない） */
+  line-height: 1.35;
   text-align: center;
+  overflow-wrap: anywhere;
 }
 
 .vc-bot-role {
   margin: 0;
-  font-size: 10.5px;
+  font-size: 9px;
+  line-height: 1.3;
   color: var(--dim);
   text-align: center;
+  overflow-wrap: anywhere;
 }
 
 /* ボットの発言に合わせて短時間だけ光らせる演出（任意）。§CLAUDE.md: reduced motion に配慮 */
