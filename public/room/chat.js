@@ -30,6 +30,12 @@
     inputEl: null,
     formEl: null,
     onError: null,
+    /**
+     * bot の付加情報（ChatMessage.card）を描く差し込み口。
+     * (message, item) => void。何を出すか・誰が押せるかは呼び出し側が決める
+     * （ホストかどうかを知っているのは app.js 側のため）。
+     */
+    renderCard: null,
   };
 
   /** 表示中の履歴（古い順） */
@@ -95,7 +101,15 @@
       const nickname = el("span", message.nickname);
       nickname.className = "chat-nickname";
       item.appendChild(nickname);
-      item.appendChild(el("span", message.text));
+      const body = el("span", message.text);
+      // 本文であることを class で示す。カードを後ろに足すと :last-child では
+      // 拾えなくなるため（index.html の #chat-log .chat-text）
+      body.className = "chat-text";
+      item.appendChild(body);
+      // bot のカード（川柳の句・ゲームの提案）はこの行の中に続けて描く
+      if (message.card !== undefined && message.card !== null && deps.renderCard !== null) {
+        deps.renderCard(message, item);
+      }
       list.appendChild(item);
     }
     list.scrollTop = list.scrollHeight;
@@ -108,6 +122,7 @@
     deps.inputEl = options.inputEl;
     deps.formEl = options.formEl;
     deps.onError = options.onError;
+    deps.renderCard = options.renderCard ?? null;
 
     // form submit（Enter の暗黙送信を含む）
     deps.formEl.addEventListener("submit", (event) => {
@@ -164,5 +179,5 @@
     return { messages: messages.slice() };
   }
 
-  global.Chat = { init, handleServerMessage, setSelfId, reset, getState };
+  global.Chat = { init, handleServerMessage, setSelfId, refresh: render, reset, getState };
 })(window);

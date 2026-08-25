@@ -608,102 +608,151 @@ select {
  * インライン style）の都合で単純な単一クラスでは負けてしまうため、
  * 上書きしたい箇所は .vc-peer.vc-peer-bot のように複合セレクタで詳細度を上げてある。
  */
+/*
+ * ボットの枠は卓上の右端に縦一列で並ぶ（index.html の #vc-bots）。
+ * 呑み手の枠のような 4:3 の画面ではなく、絵と名前を横に置いた細い行にする。
+ * 4体を 4:3 のまま縦に積むと列だけで 370px を超え、卓上に収まらない。
+ */
 .vc-peer.vc-peer-bot {
-  justify-content: center;
+  flex: none;
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: flex-start;
   align-items: center;
-  gap: 6px;
-  padding: 14px 10px;
+  /* 縦の間を詰めるのは、役の行を名前の下へ折り返して2行に組むため */
+  gap: 4px 7px;
+  width: 100%;
+  /* 4体を縦に積んで卓上の高さに収める。1行あたり数px が効く */
+  padding: 4px 7px;
+  aspect-ratio: auto;
+  max-height: none;
   border-style: dashed;
   background: linear-gradient(180deg, #1c140a, #140e08);
 }
 
-/* 人のタイルにある「CAMERA」の下敷き文字は不要（顔アイコンに置き換える） */
+/* 人のタイルにある黒地＋斜線の下敷きは不要（絵に置き換える） */
 .vc-peer.vc-peer-bot::before {
   content: none;
 }
 
-/* 実在の参加者と混同させないための印 */
+/*
+ * 実在の参加者と混同させないための印。細い行に札を重ねると名前が読めなく
+ * なるので、列の見出し（#vc-bots::before の「bot」）に役目を移した。
+ * 破線の枠と、呑み手とは別の列に分けてあることも同じ役目を果たす。
+ */
 .vc-bot-mark {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 2;
-  padding: 2px 8px;
-  border: 1px solid var(--gold-3);
-  border-radius: var(--r-pill);
-  font-size: 9.5px;
-  letter-spacing: 0.08em;
-  color: var(--gold-2);
-  background: rgba(0, 0, 0, 0.4);
+  display: none;
 }
 
-/* 顔アイコン。画像は使わず、CSS の疑似要素だけで目・口を出す */
+/*
+ * ボットの絵。役どころが分かる線画（app.js の createBotGlyph）を丸に収める。
+ * 以前は4体とも同じ笑顔で、違いは金の濃淡だけだった。並べると見分けがつかず、
+ * 顔そのものも何を表しているのか読み取れなかったので、形と色の両方を変えた。
+ */
 .vc-bot-face {
   position: relative;
-  width: 56px;
-  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* flex: none を付けないと、行が狭いときに横だけ縮んで楕円になる */
+  flex: none;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
-  border: 2px solid var(--gold-3);
+  border: 2px solid currentColor;
   background: radial-gradient(circle at 35% 30%, var(--panel-3), var(--wood));
 }
 
-.vc-bot-face::before {
-  content: "";
-  position: absolute;
-  top: 40%;
-  left: 50%;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--gold-2);
-  box-shadow: -13px 0 0 var(--gold-2), 13px 0 0 var(--gold-2);
-  transform: translateX(-50%);
+.vc-bot-glyph {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
-.vc-bot-face::after {
-  content: "";
-  position: absolute;
-  bottom: 30%;
-  left: 50%;
-  width: 20px;
-  height: 10px;
-  border: 2px solid var(--gold-2);
-  border-top: none;
-  border-radius: 0 0 20px 20px;
-  transform: translateX(-50%);
-}
-
-/* しゅんぴ / せり / ぐっちー / なべで縁の色味を変え、どの役割か見分けやすくする */
+/*
+ * 個体の色。しゅんぴ＝暖簾の藍、せり＝青菜、ぐっちー＝燗の橙、なべ＝土鍋の火。
+ * 縁も線画も currentColor なので、ここ一行で両方に効く。
+ * 金の濃淡で4つ並べると隣同士が見分けられないため、色相ごと離してある。
+ */
 .vc-bot-face[data-bot-id="shunpi"] {
-  border-color: var(--gold);
+  color: #7fb0d8;
 }
 
 .vc-bot-face[data-bot-id="seri"] {
-  border-color: var(--gold-2);
+  color: #8fbf68;
 }
 
 .vc-bot-face[data-bot-id="gucchi"] {
-  border-color: var(--gold-3);
+  color: #e6a63f;
 }
 
-/* なべだけ金系から外す。4体を金の濃淡だけで見分けるのは苦しく、
-   既存パレットの --green なら浮かずに区別がつく（鍋の薬味の連想も兼ねる） */
 .vc-bot-face[data-bot-id="nabe"] {
-  border-color: var(--green);
+  color: #d1685f;
 }
 
+/* 名前と役は絵の右に縦積み。行の高さを決めるので行間は詰めておく */
 .vc-peer-label.vc-bot-label {
   position: static;
+  order: 1;
+  min-width: 0;
   padding: 0;
   background: none;
-  text-align: center;
+  font-size: 11px;
+  line-height: 1.3;
+  text-align: left;
+  overflow-wrap: anywhere;
 }
 
 .vc-bot-role {
-  margin: 0;
-  font-size: 10.5px;
+  order: 2;
+  width: 100%;
+  margin: 0 0 0 37px;
+  font-size: 9px;
+  line-height: 1.3;
   color: var(--dim);
-  text-align: center;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+/*
+ * ON / OFF。見た目は共通の .toggle（つまみ式）で、ここは置き場所と寸法だけ。
+ * 行の右端に寄せる。押せるのはホストだけだが、OFF でも枠は残す ―― いま誰が
+ * 動いているかは全員が知っておきたい情報で、隠すと bot が黙った理由が
+ * 分からなくなる（§3.10）。
+ */
+.vc-bot-toggle {
+  order: 1;
+  margin-left: auto;
+  width: 32px;
+  height: 18px;
+}
+
+.vc-bot-toggle::after {
+  width: 12px;
+  height: 12px;
+}
+
+.vc-bot-toggle[aria-pressed="true"]::after {
+  transform: translateX(14px);
+}
+
+.vc-bot-toggle:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/*
+ * 切られている bot。灯りを落として、動いていないことを見て分かるようにする。
+ * つまみだけは落とさない（そこを押して戻すため）。
+ */
+.vc-bot-off .vc-bot-face,
+.vc-bot-off .vc-bot-label,
+.vc-bot-off .vc-bot-role {
+  opacity: 0.42;
 }
 
 /* ボットの発言に合わせて短時間だけ光らせる演出（任意）。§CLAUDE.md: reduced motion に配慮 */
@@ -711,19 +760,20 @@ select {
   animation: vc-bot-pulse 1.6s ease-out;
 }
 
+/* 光る色は個体の色に合わせる（.vc-bot-face の color が currentColor で届く） */
 @keyframes vc-bot-pulse {
   0% {
-    box-shadow: 0 0 0 0 rgba(230, 166, 63, 0.55);
+    box-shadow: 0 0 0 0 currentColor;
   }
   100% {
-    box-shadow: 0 0 0 14px rgba(230, 166, 63, 0);
+    box-shadow: 0 0 0 14px transparent;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .vc-bot-speaking .vc-bot-face {
     animation: none;
-    box-shadow: 0 0 0 3px rgba(230, 166, 63, 0.7);
+    box-shadow: 0 0 0 3px currentColor;
   }
 }
 

@@ -150,30 +150,36 @@ function senryuMessage(author = "たろう", exact = true) {
   };
 }
 
-Deno.test("bot.js: 4体分のトグルを出す", () => {
-  const { container } = load();
-  const text = container.text();
-  for (const name of ["しゅんぴ", "せり", "ぐっちー", "なべ"]) {
-    assert(text.includes(name), `${name} のトグルがない`);
+Deno.test("bot.js: 4体分の ON/OFF を持つ", () => {
+  const { Bot } = load();
+  const bots = Bot.getState().bots;
+  for (const id of ["shunpi", "seri", "gucchi", "nabe"]) {
+    assertEquals(bots[id], true, `${id} の初期状態がない`);
   }
 });
 
-Deno.test("bot.js: トグルを押せるのはホストだけ（§3.10）", () => {
-  const { Bot, container, sent } = load();
+Deno.test("bot.js: 切り替えられるのはホストだけ（§3.10）", () => {
+  const { Bot, sent } = load();
   Bot.handleServerMessage(roomState({ youAreHost: false }));
-  assertEquals(container.button("せり").disabled, true, "ホスト以外が操作できてしまう");
+  assertEquals(Bot.toggle("seri"), false, "ホスト以外が操作できてしまう");
+  assertEquals(sent, []);
 
   Bot.handleServerMessage(roomState({ youAreHost: true }));
-  const seri = container.button("せり");
-  assertEquals(seri.disabled, false);
-  seri.click();
+  assertEquals(Bot.toggle("seri"), true);
   assertEquals(sent, [{ t: "setBot", botId: "seri", enabled: false }]);
 });
 
-Deno.test("bot.js: ON/OFF はサーバーの botState で反映する（楽観更新しない）", () => {
-  const { Bot, container } = load();
+Deno.test("bot.js: 知らない botId は切り替えない", () => {
+  const { Bot, sent } = load();
   Bot.handleServerMessage(roomState({ youAreHost: true }));
-  container.button("せり").click();
+  assertEquals(Bot.toggle("dareka"), false);
+  assertEquals(sent, []);
+});
+
+Deno.test("bot.js: ON/OFF はサーバーの botState で反映する（楽観更新しない）", () => {
+  const { Bot } = load();
+  Bot.handleServerMessage(roomState({ youAreHost: true }));
+  Bot.toggle("seri");
   // 送っただけでは変わらない
   assertEquals(Bot.getState().bots.seri, true);
 
@@ -182,37 +188,29 @@ Deno.test("bot.js: ON/OFF はサーバーの botState で反映する（楽観�
     bots: { shunpi: true, seri: false, gucchi: true, nabe: true },
   });
   assertEquals(Bot.getState().bots.seri, false);
-  assert(container.text().includes("せり（OFF）"), "OFF が表示に出ていない");
-});
-
-Deno.test("bot.js: 川柳テロップに三句・モーラ数・詠み手を出す", () => {
-  const { Bot, container } = load();
-  Bot.handleServerMessage(senryuMessage());
-  const text = container.text();
-  for (const line of ["ふるいけや", "かわずとびこむ", "みずのおと"]) {
-    assert(text.includes(line), `句が出ていない: ${line}`);
-  }
-  assert(text.includes("五七五"));
-  assert(text.includes("たろう さんの一句"));
+  // 2度目は「入れる」側を送る
+  Bot.toggle("seri");
+  assertEquals(Bot.getState().bots.seri, false);
 });
 
 Deno.test("bot.js: 字余り・字足らずはラベルを出し分ける", () => {
-  const { Bot, container } = load();
-  const message = senryuMessage("たろう", false);
-  message.message.card.morae = [5, 8, 5];
-  Bot.handleServerMessage(message);
-  assert(container.text().includes("字余り"));
+  const { Bot } = load();
+  assertEquals(Bot.shapeLabel([5, 8, 5]), "字余り");
   assertEquals(Bot.shapeLabel([4, 7, 5]), "字足らず");
   assertEquals(Bot.shapeLabel([4, 8, 5]), "字余り字足らず");
   assertEquals(Bot.shapeLabel([5, 7, 5]), "五七五");
 });
 
-Deno.test("bot.js: あだ名は textContent で入れる（innerHTML を使わない・§3.8）", () => {
+Deno.test("bot.js: 川柳とゲーム提案には手を出さない（表示はチャットの行）", () => {
   const { Bot, container } = load();
-  const evil = '<img src=x onerror="alert(1)">';
-  Bot.handleServerMessage(senryuMessage(evil));
-  // 生の文字列がそのままテキストとして入っていること（＝HTML として解釈していない）
-  assert(container.text().includes(evil));
+  Bot.handleServerMessage(senryuMessage());
+  // 句も詠み手もこのモジュールは描かない（app.js の renderChatCard が描く）
+  const text = container.text();
+  assert(!text.includes("ふるいけや"), "bot.js が川柳を描いている");
+  assert(!text.includes("たろう"), "bot.js が詠み手を描いている");
+});
+
+Deno.test("bot.js: innerHTML を使わない（§3.8）", () => {
   // コメントでは「使わない」と書いてあるので、コードだけを見る
   const code = source
     .replace(/\/\*[\s\S]*?\*\//g, "")
@@ -220,9 +218,10 @@ Deno.test("bot.js: あだ名は textContent で入れる（innerHTML を使わ�
   assert(!code.includes("innerHTML"), "bot.js が innerHTML を使っている");
 });
 
-Deno.test("bot.js: ゲーム提案カードからゲームを選べる（ホストのみ）", () => {
+Deno.test("bot.js: ゲーム提案にも手を出さない（押す口はチャットの行）", () => {
   const { Bot, container, sent } = load();
-  const suggest = {
+  Bot.handleServerMessage(roomState({ youAreHost: true }));
+  Bot.handleServerMessage({
     t: "chat",
     message: {
       bot: true,
@@ -230,16 +229,9 @@ Deno.test("bot.js: ゲーム提案カードからゲームを選べる（ホス�
       botKind: "gameSuggest",
       card: { c: "gameSuggest", gameId: "official-ogiri", gameTitle: "大喜利" },
     },
-  };
-  Bot.handleServerMessage(roomState({ youAreHost: false }));
-  Bot.handleServerMessage(suggest);
-  assert(container.text().includes("大喜利"));
-  assertEquals(container.button("これで遊ぶ").disabled, true, "ホスト以外が選べてしまう");
-
-  Bot.handleServerMessage(roomState({ youAreHost: true }));
-  Bot.handleServerMessage(suggest);
-  container.button("これで遊ぶ").click();
-  assertEquals(sent.at(-1), { t: "selectGame", gameId: "official-ogiri" });
+  });
+  assert(!container.text().includes("これで遊ぶ"), "bot.js が提案を描いている");
+  assertEquals(sent, []);
 });
 
 Deno.test("bot.js: 終了アンケートに投票できる", () => {
@@ -292,7 +284,7 @@ Deno.test("bot.js: 別のアンケートの結果は無視する（遅延した�
   assert(Bot.getState().poll !== null, "集計中のアンケートが消えている");
 });
 
-Deno.test("bot.js: 再接続すると集計中のアンケートと直近のカードが戻る（§3.2）", () => {
+Deno.test("bot.js: 再接続すると集計中のアンケートが戻る（§3.2）", () => {
   const { Bot, container } = load();
   const deadline = Date.now() + 30_000;
   Bot.handleServerMessage(roomState({
@@ -306,27 +298,27 @@ Deno.test("bot.js: 再接続すると集計中のアンケートと直近のカ�
     ],
   }));
   assertEquals(Bot.getState().poll, { pollId: "poll-9", deadline });
-  assertEquals(Bot.getState().card?.c, "senryu");
   assert(container.text().includes("そろそろお開きにしますか？"));
+  // カードの復元は要らない（チャット履歴ごと chat.js が描き直す）
+  assert(!container.text().includes("あ"), "bot.js がカードを復元している");
 });
 
 Deno.test("bot.js: bot 以外の発言や card なしの発話には反応しない", () => {
   const { Bot } = load();
   Bot.handleServerMessage({ t: "chat", message: { bot: false, text: "こんばんは" } });
   Bot.handleServerMessage({ t: "chat", message: { bot: true, text: "いらっしゃい" } });
-  assertEquals(Bot.getState().card, null);
   assertEquals(Bot.getState().poll, null);
 });
 
 Deno.test("bot.js: ホストが変わったら操作権も移る", () => {
-  const { Bot, container } = load();
+  const { Bot } = load();
   Bot.setSelfId("p1");
   Bot.handleServerMessage(roomState({ youAreHost: false }));
-  assertEquals(container.button("せり").disabled, true);
+  assertEquals(Bot.toggle("seri"), false);
 
   Bot.handleServerMessage({ t: "hostChanged", playerId: "p1" });
   assertEquals(Bot.getState().isHost, true);
-  assertEquals(container.button("せり").disabled, false);
+  assertEquals(Bot.toggle("seri"), true);
 });
 
 Deno.test("bot.js: キックされたら表示と状態を捨てる", () => {

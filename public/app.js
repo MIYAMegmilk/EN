@@ -19,15 +19,26 @@ function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
 }
 
-/** テキストだけを持つ要素を作る */
-function el(tag, text) {
+/** テキストだけを持つ要素を作る（className は任意。chat.js / bot.js と同じ形） */
+function el(tag, text, className) {
   const node = document.createElement(tag);
   if (text !== undefined) node.textContent = String(text);
+  if (className !== undefined) node.className = className;
   return node;
 }
 
 /** プリセット部屋タグの一覧（/api/room-tags の結果）。作成フォームの描画に使う */
 let presetRoomTags = [];
+
+/** VC への自動参加が進行中か（マイクの許可を待っている間だけ true） */
+let vcJoining = false;
+
+/**
+ * いま選ばれているあそび（"official:<id>" / "sandbox:<id>"）。
+ * 選択欄を品書きに置き換えたので、選択は画面ではなくここが持つ。
+ * serverSelectedGameId は、卓側の選択が変わったことを見分けるための控え。
+ */
+const gameChoiceState = { choice: null, serverSelectedGameId: undefined };
 
 /** 作成直後に PATCH で反映する説明文・タグ。作成ボタン押下時にセットし、roomState 受信後にクリアする */
 let pendingRoomMeta = null;
@@ -321,8 +332,12 @@ function connect() {
     receive(msg);
     // VC は参加者の増減とシグナリングを同じ WS で受け取る（§3.2 / §3.6）
     VC.handleServerMessage(msg);
+    // 卓に着いたら VC にも自動で参加する（VC.handleServerMessage が selfId を
+    // 入れた後でないと join() が弾かれるので、この順で呼ぶ）
+    autoJoinVc(msg);
     // 通話の文字起こし（docs/design/bot-voice.md §5.4）
     Voice.handleServerMessage(msg);
+    autoStartVoice(msg);
     Chat.handleServerMessage(msg);
     // bot の演出面（docs/design/bot.md §4）
     Bot.handleServerMessage(msg);
@@ -394,6 +409,9 @@ function receive(msg) {
         state.snapshot.hostId = msg.playerId;
         state.snapshot.youAreHost = msg.playerId === state.snapshot.youId;
       }
+      // チャットに流れている提案ボタンの可否はホストかどうかで変わる。
+      // chat.js は chat / roomState でしか描き直さないので、ここで促す
+      Chat.refresh();
       renderAll();
       break;
     case "phase":
@@ -471,7 +489,7 @@ function renderAll() {
 
   $("room-code").textContent = snapshot.code;
   $("room-meta").textContent =
-    `${snapshot.players.length} / ${snapshot.capacity}人・フェーズ: ${state.phase}` +
+    `${snapshot.players.length} / ${snapshot.capacity}人・${phaseLabel(state.phase)}` +
     (snapshot.youAreHost ? "・あなたはホストです" : "");
 
   const players = $("players");
@@ -487,24 +505,251 @@ function renderAll() {
 
   const inLobby = state.phase === "lobby";
   $("lobby-controls").classList.toggle("hidden", !inLobby);
-  if (inLobby) renderGameSelect(snapshot);
+  // ロビー中かは CSS からも要る（卓上と座の面で高さの配り方を変える）。
+  // 入口の .hidden を :has() で見ていたが、入口を左レールへ移して列をまたいだ
+  // ので、列に依らない body の属性で持つ
+  document.body.dataset.roomPhase = inLobby ? "lobby" : "playing";
+  syncGameChoice(snapshot);
   $("skip").disabled = !snapshot.youAreHost || inLobby;
   $("start").disabled = !snapshot.youAreHost;
-  $("select-game").disabled = !snapshot.youAreHost;
+  // 選ぶこと自体は誰でもできてよいが、卓に伝わる（selectGame）のはホストだけ。
+  // 見るぶんには全員に開けたほうが、次に何をやるか相談しやすい
+  $("game-open").disabled = false;
 
   renderPhase();
 }
 
-/** ゲーム選択の選択肢を作る */
-function renderGameSelect(snapshot) {
-  const select = $("game");
-  clear(select);
+/** 採点方式の日本語名（server/types.ts の ScoringMode と1対1） */
+const SCORING_LABELS = {
+  vote: "投票で採点",
+  match: "一致で採点",
+  correct: "正解で採点",
+};
+
+/**
+ * サムネの地の色。離れた色相を並べてあり、品書きの並び順に配る。
+ * IDのハッシュから決めると、たまたま同じ色が2枚並ぶ（実際に起きた）。
+ * 並び順は「公式ゲーム→余興」で安定しているので、開くたびに変わることもない。
+ */
+const THUMB_HUES = [28, 202, 96, 330, 44, 268, 168, 8];
+
+/**
+ * 品書きに並べる1本ぶんの情報に均す。
+ *
+ * 公式ゲーム（roomState の availableGames）と余興サンドボックス
+ * （/api/sandboxGames）は形も出どころも違うので、ここで同じ形にしてから
+ * 札を組む。choice が "official:<id>" / "sandbox:<id>"（開始時の出し分け用）。
+ */
+function listGames(snapshot) {
+  const games = [];
+  const withHue = (game) => ({ ...game, hue: THUMB_HUES[games.length % THUMB_HUES.length] });
   for (const game of snapshot.availableGames) {
-    const option = el("option", `${game.title}（${game.rounds}ラウンド）`);
-    option.value = game.id;
-    if (game.id === snapshot.selectedGameId) option.selected = true;
-    select.appendChild(option);
+    const scoring = SCORING_LABELS[game.scoring];
+    games.push(withHue({
+      choice: `official:${game.id}`,
+      id: game.id,
+      title: game.title,
+      description: game.description ?? "",
+      meta: `${game.rounds}ラウンド・${scoring === undefined ? game.scoring : scoring}`,
+      badge: "宴の余興",
+      official: true,
+    }));
   }
+  for (const game of Sandbox.getGames()) {
+    games.push(withHue({
+      choice: `sandbox:${game.id}`,
+      id: game.id,
+      title: game.title,
+      description: game.description ?? "",
+      meta: `${game.minPlayers}〜${game.maxPlayers}人・作: ${game.author}`,
+      badge: "あそび（点は付かない）",
+      official: false,
+    }));
+  }
+  return games;
+}
+
+/** 選択欄の値を { kind, gameId } に解く */
+function parseGameChoice(value) {
+  if (typeof value !== "string") return null;
+  const sep = value.indexOf(":");
+  if (sep < 0) return null;
+  return { kind: value.slice(0, sep), gameId: value.slice(sep + 1) };
+}
+
+/** いま選ばれている1本を返す。無ければ null */
+function currentGame() {
+  if (state.snapshot === null) return null;
+  return listGames(state.snapshot).find((g) => g.choice === gameChoiceState.choice) ?? null;
+}
+
+/**
+ * 品書き（ゲーム一覧）を組み直す。
+ * 余興の一覧は HTTP で後から届く（sandbox.js の onGames）ため、何度も呼ばれる。
+ */
+function renderGamePlatform() {
+  const list = $("game-list");
+  clear(list);
+  if (state.snapshot === null) return;
+
+  const games = listGames(state.snapshot);
+  if (games.length === 0) {
+    list.appendChild(el("p", "あそびがまだありません", "platform-empty"));
+    return;
+  }
+
+  for (const game of games) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "gamecard";
+    card.dataset.choice = game.choice;
+    card.setAttribute("aria-pressed", game.choice === gameChoiceState.choice ? "true" : "false");
+
+    // 絵は用意されていないので、題名の一文字目を明朝で置いた札をサムネにする
+    const thumb = el("span", [...game.title][0] ?? "宴", "gamecard-thumb");
+    thumb.style.setProperty("--thumb-hue", String(game.hue));
+    thumb.setAttribute("aria-hidden", "true");
+    card.appendChild(thumb);
+
+    card.appendChild(el("span", game.title, "gamecard-title"));
+    card.appendChild(el("span", game.meta, "gamecard-meta"));
+    if (game.description.length > 0) {
+      card.appendChild(el("span", game.description, "gamecard-desc"));
+    }
+    card.appendChild(
+      el("span", game.badge, `gamecard-badge${game.official ? " gamecard-badge-official" : ""}`),
+    );
+
+    // 選べるのはホストだけ。非ホストが選んでも卓には伝わらず、次の roomState で
+    // 戻されて食い違うだけなので、押させない（読むぶんには開けておく）
+    card.disabled = !canStartGame();
+    card.addEventListener("click", () => pickGame(game.choice));
+    list.appendChild(card);
+  }
+}
+
+/** 1本を選ぶ。品書きを開いたままでも、選び直しがその場で見える */
+function pickGame(choice) {
+  gameChoiceState.choice = choice;
+  const parsed = parseGameChoice(choice);
+  // 公式ゲームは選んだ時点で卓に伝える。全員に「何が選ばれたか」が見える
+  if (parsed !== null && parsed.kind === "official" && state.snapshot !== null) {
+    if (state.snapshot.selectedGameId !== parsed.gameId) {
+      send({ t: "selectGame", gameId: parsed.gameId });
+    }
+  }
+  for (const card of $("game-list").children) {
+    if (card.dataset === undefined) continue;
+    card.setAttribute("aria-pressed", card.dataset.choice === choice ? "true" : "false");
+  }
+  renderGamePick();
+}
+
+/** いま選ばれている1本の表示（卓の札と品書きの足元）を更新する */
+function renderGamePick() {
+  const game = currentGame();
+  const label = game === null ? "まだ選ばれていません" : `${game.title}（${game.meta}）`;
+  $("game-current").textContent = label;
+  $("platform-pick").textContent = canStartGame()
+    ? (game === null ? "あそびを選んでください" : label)
+    : `${label}（選べるのはホストだけです）`;
+  $("platform-start").disabled = game === null || !canStartGame();
+}
+
+/** ゲームを始められるか（ホストだけ） */
+function canStartGame() {
+  return state.snapshot !== null && state.snapshot.youAreHost;
+}
+
+/**
+ * 卓の選択（selectGame）に画面を追随させ、品書きを組み直す。
+ *
+ * ボットの提案や、ホスト交代後の選び直しも selectGame で流れてくるので、
+ * サーバー側の値が変わったときは、こちらの選択もそれに合わせる。
+ * 余興を選んでいる間は selectedGameId が動かないため、上書きされない。
+ */
+function syncGameChoice(snapshot) {
+  if (snapshot.selectedGameId !== gameChoiceState.serverSelectedGameId) {
+    gameChoiceState.serverSelectedGameId = snapshot.selectedGameId;
+    if (snapshot.selectedGameId !== null) {
+      gameChoiceState.choice = `official:${snapshot.selectedGameId}`;
+    }
+  }
+  const games = listGames(snapshot);
+  // 選んでいたものが消えた（一覧が入れ替わった）ときは先頭に戻す
+  if (!games.some((g) => g.choice === gameChoiceState.choice)) {
+    gameChoiceState.choice = games.length > 0 ? games[0].choice : null;
+  }
+  renderGamePlatform();
+  renderGamePick();
+}
+
+/**
+ * 選ばれているあそびを始める。公式ゲームと余興で出し口が違うので、
+ * 種別を見て selectGame+startGame と sandboxStart を分ける。
+ */
+function startChosenGame() {
+  const choice = parseGameChoice(gameChoiceState.choice);
+  if (choice === null) {
+    showError("あそびを選んでください");
+    return;
+  }
+  if (choice.kind === "sandbox") {
+    Sandbox.start(choice.gameId);
+    return;
+  }
+  // 品書きで選んだ時点で送っているが、卓側とずれていれば始める前に揃える
+  const selected = state.snapshot === null ? null : state.snapshot.selectedGameId;
+  if (selected !== choice.gameId) send({ t: "selectGame", gameId: choice.gameId });
+  send({ t: "startGame" });
+}
+
+/**
+ * bot の発言に付く付加情報（ChatMessage.card）を、その発言の行の中に描く。
+ *
+ * 卓上に浮かべていたテロップの札は廃止した。提案はチャットの流れに押せる形で
+ * 置いたほうが、見逃さず、後からさかのぼっても押せる。
+ * 句や詠み手はユーザー由来なので必ず textContent で入れる（§3.8）。
+ */
+function renderChatCard(message, item) {
+  const card = message.card;
+  if (card.c === "senryu") {
+    const box = el("div", undefined, "chat-card bot-card");
+    const lines = el("div", undefined, "bot-senryu-lines");
+    const morae = Array.isArray(card.morae) ? card.morae : [0, 0, 0];
+    for (const [i, line] of (card.lines ?? []).entries()) {
+      const row = el("p", undefined, "bot-senryu-line");
+      row.appendChild(el("span", line, "bot-senryu-text"));
+      row.appendChild(el("span", morae[i], "bot-senryu-mora"));
+      lines.appendChild(row);
+    }
+    box.appendChild(lines);
+    const foot = el("p", undefined, "bot-card-foot");
+    const shape = card.exact === true ? "五七五" : Bot.shapeLabel(morae);
+    foot.appendChild(el("span", shape, "bot-badge"));
+    foot.appendChild(el("span", `${card.author} さんの一句`, "bot-senryu-author"));
+    box.appendChild(foot);
+    item.appendChild(box);
+    return;
+  }
+  if (card.c === "gameSuggest") {
+    const box = el("div", undefined, "chat-card");
+    // 何で遊ぶことになるのかを押す口自体に出す（本文を読み返さずに済む）
+    const title = typeof card.gameTitle === "string" ? card.gameTitle : "これ";
+    const button = el("button", `${title}で遊ぶ`, "btn chat-card-action");
+    button.type = "button";
+    button.disabled = !canStartGame();
+    if (!canStartGame()) button.title = "あそびを選べるのはホストだけです";
+    button.addEventListener("click", () => pickGame(`official:${card.gameId}`));
+    box.appendChild(button);
+    item.appendChild(box);
+  }
+}
+
+/** 品書きの開け閉め */
+function toggleGamePlatform(open) {
+  $("game-platform").classList.toggle("hidden", !open);
+  if (open) $("platform-close").focus();
 }
 
 /** 現在のフェーズを描画する */
@@ -512,7 +757,7 @@ function renderPhase() {
   const view = state.view;
   const body = $("phase-body");
   clear(body);
-  $("phase-title").textContent = `フェーズ: ${state.phase}`;
+  $("phase-title").textContent = phaseLabel(state.phase);
   $("phase-deadline").textContent = state.deadline === null
     ? ""
     : `期限まで約 ${Math.max(0, Math.round((state.deadline - Date.now()) / 1000))} 秒`;
@@ -625,6 +870,28 @@ function renderScores(title, scores) {
 }
 
 /** 品質判定モード（§3.6）の表示名。iOS Safari 実機で画面から確認できるようにする */
+/**
+ * フェーズの日本語名（server/types.ts の Phase と1対1）。
+ * 画面には必ずこちらを出す。"lobby" のような内部の名前は開発者以外に読めない。
+ * 未知の値が来たらそのまま出す（サーバーが増やしたときに空欄にしない）。
+ */
+const PHASE_LABELS = {
+  lobby: "待機中",
+  intro: "ゲーム説明",
+  prompt: "お題",
+  input: "回答中",
+  reveal: "答え合わせ",
+  judge: "投票中",
+  roundResult: "ラウンド結果",
+  finalResult: "最終結果",
+};
+
+/** フェーズの表示名を返す */
+function phaseLabel(phase) {
+  const label = PHASE_LABELS[phase];
+  return label === undefined ? phase : label;
+}
+
 const VC_QUALITY_MODE_LABELS = {
   primary: "主指標",
   fallback: "代替指標",
@@ -637,11 +904,74 @@ const VC_QUALITY_MODE_LABELS = {
  * bot.js の BOTS（id/name/role）は非公開のため、表示専用の情報としてここに複製する。
  */
 const BOT_VC_INFO = [
-  { id: "shunpi", name: "しゅんぴ", role: "あだ名をつける" },
-  { id: "seri", name: "せり", role: "川柳を見つける" },
-  { id: "gucchi", name: "ぐっちー", role: "場を温める" },
-  { id: "nabe", name: "なべ", role: "進行を仕切る" },
+  {
+    id: "shunpi",
+    name: "しゅんぴ",
+    role: "あだ名をつける",
+    // 荷札。名前を付けて回る役
+    glyph: [
+      "M3.4 11.6 11.6 3.4H19a1.6 1.6 0 0 1 1.6 1.6v7.4l-8.2 8.2a1.6 1.6 0 0 1-2.26 0L3.4 13.86a1.6 1.6 0 0 1 0-2.26Z",
+      "M17.4 7.4a1.3 1.3 0 1 1-2.6 0 1.3 1.3 0 0 1 2.6 0Z",
+    ],
+  },
+  {
+    id: "seri",
+    name: "せり",
+    role: "川柳を見つける",
+    // 短冊。中の3本は上から五・七・五のつもりで長さを変えてある
+    glyph: [
+      "M7 2.6h10a1 1 0 0 1 1 1v16.8a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V3.6a1 1 0 0 1 1-1Z",
+      "M14.6 6.2v5M12 6.2v10.6M9.4 6.2v5",
+    ],
+  },
+  {
+    id: "gucchi",
+    name: "ぐっちー",
+    role: "場を温める",
+    // お猪口と湯気。燗をつけて場を温める役
+    glyph: [
+      "M6.6 11.4h10.8l-1.5 6.1a2.2 2.2 0 0 1-2.14 1.7h-3.52a2.2 2.2 0 0 1-2.14-1.7Z",
+      "M5 21.2h14",
+      "M10.2 8.4c0-1.4 1.3-1.4 1.3-2.8M14.2 8.4c0-1.4-1.3-1.4-1.3-2.8",
+    ],
+  },
+  {
+    id: "nabe",
+    name: "なべ",
+    role: "進行を仕切る",
+    // 土鍋。名前そのまま。蓋を取り仕切る役でもある
+    glyph: [
+      "M3.4 9.6h17.2",
+      "M12 6.2v3.4",
+      "M5.2 9.6v4.6a4.4 4.4 0 0 0 4.4 4.4h4.8a4.4 4.4 0 0 0 4.4-4.4V9.6",
+      "M5.2 11.8H3M18.8 11.8H21",
+    ],
+  },
 ];
+
+/** inline SVG は名前空間付きで作らないと描画されない */
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/**
+ * ボットの絵を作る。
+ *
+ * 4体を金の濃淡だけで見分けるのは無理があったので、形と色の両方を変えてある
+ * （形＝役どころ、色＝個体）。名前と役の文字は絵の下に別で出ている。
+ * 外部の画像・アイコンフォントは読み込めない（§3.8 CSP）ので inline SVG。
+ */
+function createBotGlyph(info) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "vc-bot-glyph");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  for (const d of info.glyph) {
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", d);
+    svg.appendChild(path);
+  }
+  return svg;
+}
 
 /** botId → 自分が #vc-media に足したタイル一式（root 要素と発言演出のタイマー） */
 const botVcTiles = new Map();
@@ -660,6 +990,7 @@ function createBotVcTile(info) {
   const face = document.createElement("div");
   face.className = "vc-bot-face";
   face.dataset.botId = info.id;
+  face.appendChild(createBotGlyph(info));
   root.appendChild(face);
 
   const label = document.createElement("p");
@@ -672,7 +1003,21 @@ function createBotVcTile(info) {
   role.textContent = info.role;
   root.appendChild(role);
 
-  return { root, glowTimer: null };
+  /*
+   * ON / OFF。卓上の bot の行の右端に置く（呑み手のミュートと同じ位置感覚）。
+   * 押せるのはホストだけ。表示は消さない ―― いま誰が動いているかは全員が
+   * 知っておきたい情報で、隠すと bot が黙った理由が分からなくなる（§3.10）。
+   * 反映はサーバーの botState で返る。楽観更新はしない（bot.js の toggle）。
+   */
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "toggle vc-bot-toggle";
+  // 文字を持たないので、読み上げ用の名前は aria-label で付ける
+  toggle.setAttribute("aria-label", info.name);
+  toggle.addEventListener("click", () => Bot.toggle(info.id));
+  root.appendChild(toggle);
+
+  return { root, toggle, glowTimer: null };
 }
 
 /**
@@ -683,7 +1028,7 @@ function createBotVcTile(info) {
  * 「その場にいる」演出のため。ホストの ON/OFF だけに従う）。
  */
 function renderVcBotTiles() {
-  const container = $("vc-media");
+  const container = $("vc-bots");
   if (container === null) return;
   if (state.snapshot === null) {
     for (const tile of botVcTiles.values()) {
@@ -693,19 +1038,22 @@ function renderVcBotTiles() {
     botVcTiles.clear();
     return;
   }
-  const bots = Bot.getState().bots;
+  const botState = Bot.getState();
   for (const info of BOT_VC_INFO) {
-    const enabled = bots[info.id] !== false;
-    const existing = botVcTiles.get(info.id);
-    if (enabled && existing === undefined) {
-      const tile = createBotVcTile(info);
+    let tile = botVcTiles.get(info.id);
+    if (tile === undefined) {
+      tile = createBotVcTile(info);
       container.appendChild(tile.root);
       botVcTiles.set(info.id, tile);
-    } else if (!enabled && existing !== undefined) {
-      if (existing.glowTimer !== null) clearTimeout(existing.glowTimer);
-      existing.root.remove();
-      botVcTiles.delete(info.id);
     }
+    // OFF でも枠は消さない。消すと戻す手がかりが画面から無くなる
+    const enabled = botState.bots[info.id] !== false;
+    tile.root.classList.toggle("vc-bot-off", !enabled);
+    tile.toggle.disabled = !botState.isHost;
+    tile.toggle.setAttribute("aria-pressed", enabled ? "true" : "false");
+    tile.toggle.title = botState.isHost
+      ? `${info.name}を${enabled ? "黙らせる" : "呼び戻す"}`
+      : "bot を切り替えられるのはホストだけです";
   }
 }
 
@@ -724,19 +1072,41 @@ function glowBotVcTile(botId) {
   }, 1600);
 }
 
+/**
+ * 手元の操作ボタン（ミュート／カメラ／文字起こし）の見た目を更新する。
+ *
+ * ボタン自身に textContent を入れると中の <svg> ごと消えてしまうので、
+ * 文字は .vc-ctl-label にだけ入れる。入／切は data-state で持ち、
+ * 斜線入りの絵への差し替えと色は index.html の CSS が受け持つ。
+ *
+ * aria-pressed は付けない。文言そのものが「ミュート」→「ミュート解除」と
+ * 入れ替わる作りなので、押下状態を別に持つと読み上げが二重になる。
+ */
+function setVcControl(button, on, label) {
+  if (button === null) return;
+  button.dataset.state = on ? "on" : "off";
+  const labelEl = button.querySelector(".vc-ctl-label");
+  if (labelEl !== null) labelEl.textContent = label;
+}
+
 /** VC の操作ボタンと状態表示を更新する */
 function renderVc() {
   const vc = VC.getState();
-  $("vc-join").disabled = vc.active;
-  $("vc-leave").disabled = !vc.active;
   $("vc-mute").disabled = !vc.active;
   $("vc-camera").disabled = !vc.active;
-  $("vc-mute").textContent = vc.muted ? "ミュート解除" : "ミュート";
-  $("vc-camera").textContent = vc.camera ? "カメラOFF" : "カメラON";
+  // 文言は「押すとどうなるか」、絵は「いまどうなっているか」を出す（Zoom と同じ流儀）
+  setVcControl($("vc-mute"), !vc.muted, vc.muted ? "ミュート解除" : "ミュート");
+  setVcControl($("vc-camera"), vc.camera, vc.camera ? "カメラOFF" : "カメラON");
   const peers = vc.peers
     .map((p) => `${p.nickname}: ${p.connectionState}${p.degraded === true ? "（品質低下）" : ""}`)
     .join(" / ");
-  const head = vc.active ? "参加中" : vc.eligible ? "未参加" : "未参加（VC枠外）";
+  const head = vc.active
+    ? "参加中"
+    : vcJoining
+    ? "マイクの許可を待っています…"
+    : vc.eligible
+    ? "音声なし"
+    : "音声なし（VC枠外）";
   $("vc-status").textContent = peers.length > 0 ? `${head} — ${peers}` : head;
   renderVcQuality(vc);
 }
@@ -781,12 +1151,54 @@ async function fetchIceServers() {
   }
 }
 
+/**
+ * 卓に着いたら VC にも自動で参加する。
+ *
+ * 「VCに参加」「VC退出」のボタンは置いていない。入店＝着席＝声の輪に入る、
+ * とひとつながりにするため。抜けるときは卓ごと（「お先に失礼」→ VC.leave）。
+ *
+ * VC.join() はマイク拒否・枠外（先着6人）・非対応ブラウザをすべて自分で
+ * 通知して false を返すので、失敗しても卓そのものは続く（音声なしで居られる）。
+ * roomState は再接続でも飛んでくるが、参加中なら join() が早期 return する。
+ */
+function autoJoinVc(msg) {
+  if (msg.t !== "roomState") return;
+  if (VC.getState().active) return;
+  // 先に一度描き直す。renderAll() は VC.handleServerMessage より前に走るので、
+  // ここで描き直さないと「VC枠外」（selfId 未設定のときの既定）が残ってしまう
+  vcJoining = true;
+  renderVc();
+  const done = () => {
+    vcJoining = false;
+    renderVc();
+  };
+  VC.join().then(done, done);
+}
+
+/**
+ * 卓に着いたら文字起こしも始める。
+ *
+ * VC の自動参加と揃える。ボタンは残してあるので、要らない人はいつでも切れる。
+ * 非対応ブラウザ（iOS Safari・Firefox 等）では setEnabled が自分で断るが、
+ * 無駄な通知を出さないよう先に isSupported を見る。
+ * roomState は再接続でも飛ぶので、すでに ON なら何もしない。
+ *
+ * 注意: docs/design/bot-voice.md §5.4 は「既定 OFF」と書いてある。
+ * この既定は仕様書の記述と食い違うので、追随のこと。
+ */
+function autoStartVoice(msg) {
+  if (msg.t !== "roomState") return;
+  if (!Voice.isSupported()) return;
+  if (Voice.getState().enabled) return;
+  Voice.setEnabled(true);
+}
+
 /** VC モジュールを組み込む。iceServers が null なら VC 側の既定を使う */
 function bindVc(iceServers) {
   VC.init({
     send,
     iceServers,
-    container: $("vc-media"),
+    container: $("vc-people"),
     onStatus: (event) => {
       if (event.kind === "error") showError(event.message);
       // 品質劣化の通知（§3.6）は異常ではなく正常な保護動作なので、
@@ -795,14 +1207,6 @@ function bindVc(iceServers) {
       log("VC", event.message);
       renderVc();
     },
-  });
-  $("vc-join").addEventListener("click", () => {
-    // 自動再生制限（iOS Safari）を避けるため、マイク取得はこの操作の直後に行う
-    VC.join().then(renderVc);
-  });
-  $("vc-leave").addEventListener("click", () => {
-    VC.leave();
-    renderVc();
   });
   $("vc-mute").addEventListener("click", () => {
     VC.toggleMute();
@@ -832,7 +1236,8 @@ function bindVoice() {
   // ボタン文言は常に Voice.getState().enabled から導く（vc-camera / vc-mute と同じ流儀）。
   // 権限拒否や5回連続失敗など、クリック以外の理由で OFF に倒れたときも表示がずれない
   const syncTranscribeLabel = () => {
-    transcribeBtn.textContent = Voice.getState().enabled ? "文字起こしOFF" : "文字起こしON";
+    const on = Voice.getState().enabled;
+    setVcControl(transcribeBtn, on, on ? "文字起こしOFF" : "文字起こしON");
   };
   Voice.init({
     send,
@@ -887,10 +1292,20 @@ function bind() {
     if (nickname.length > 0) msg.nickname = nickname;
     send(msg);
   });
-  $("select-game").addEventListener("click", () => {
-    send({ t: "selectGame", gameId: $("game").value });
+  $("game-open").addEventListener("click", () => toggleGamePlatform(true));
+  $("platform-close").addEventListener("click", () => toggleGamePlatform(false));
+  // 覆いの余白を押したら閉じる（札そのものを押したときは閉じない）
+  $("game-platform").addEventListener("click", (event) => {
+    if (event.target === $("game-platform")) toggleGamePlatform(false);
   });
-  $("start").addEventListener("click", () => send({ t: "startGame" }));
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") toggleGamePlatform(false);
+  });
+  $("platform-start").addEventListener("click", () => {
+    toggleGamePlatform(false);
+    startChosenGame();
+  });
+  $("start").addEventListener("click", startChosenGame);
   $("skip").addEventListener("click", () => send({ t: "skipPhase" }));
   $("leave").addEventListener("click", () => {
     state.leaving = true;
@@ -906,6 +1321,7 @@ function bind() {
   });
   Chat.init({
     send,
+    renderCard: renderChatCard,
     listEl: $("chat-log"),
     inputEl: $("chat-text"),
     formEl: $("chat-form"),
@@ -914,6 +1330,10 @@ function bind() {
   Sandbox.init({
     send,
     container: $("sandbox"),
+    // 余興の一覧は HTTP で後から届く。揃ったら品書きを組み直す
+    onGames: () => {
+      if (state.snapshot !== null) syncGameChoice(state.snapshot);
+    },
     onStatus: (event) => {
       if (event.kind === "error") showError(event.message);
       log("Sandbox", event.message);

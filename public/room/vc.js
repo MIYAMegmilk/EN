@@ -258,10 +258,18 @@
     }
   }
 
-  /** 自分のカメラ映像の表示を更新する */
+  /**
+   * 自分の枠の表示を更新する。
+   *
+   * VC に入っていれば、カメラが切でも枠を出す。入店した時点で VC に参加する
+   * 作りなので、枠が出ないと「自分は卓に着いているのか」が画面から分からない
+   * （以前はカメラを入れたときにしか枠が生えなかった）。
+   * 映像が無いあいだは video を隠し、下敷き（.vc-peer::before の黒地に斜線）を
+   * 見せる。
+   */
   function renderLocalVideo() {
     if (config.container === null) return;
-    if (state.camStream === null) {
+    if (!state.active) {
       if (state.localVideo !== null) {
         state.localVideo.root.remove();
         state.localVideo = null;
@@ -273,20 +281,28 @@
       root.className = "vc-peer vc-self";
       const label = document.createElement("p");
       label.className = "vc-peer-label";
-      label.textContent = "あなた（カメラ）";
+      label.textContent = "あなた";
       const video = document.createElement("video");
       video.autoplay = true;
       video.playsInline = true;
       // 自分の映像はハウリング防止のため必ずミュートする
       video.muted = true;
       video.className = "vc-video";
+      video.hidden = true;
       root.appendChild(label);
       root.appendChild(video);
       config.container.appendChild(root);
       state.localVideo = { root, video };
     }
-    state.localVideo.video.srcObject = state.camStream;
-    tryPlay(state.localVideo.video);
+    const video = state.localVideo.video;
+    if (state.camStream === null) {
+      video.hidden = true;
+      video.srcObject = null;
+      return;
+    }
+    video.hidden = false;
+    video.srcObject = state.camStream;
+    tryPlay(video);
   }
 
   // -------------------------------------------------------------------------
@@ -1139,6 +1155,8 @@
     state.active = true;
     state.muted = false;
     state.session = randomId();
+    // カメラが切でも自分の枠を出す（着席したことが画面で分かるように）
+    renderLocalVideo();
     notify("vcState", "VC に参加しました");
     announceReady();
     return true;
