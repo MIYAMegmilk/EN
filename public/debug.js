@@ -14,10 +14,10 @@
  *     → { uptimeMs, serverTime, roomCount, rooms: [{ code, playerCount, phase, sandbox }] }
  *   POST /api/debug/reset-limits         ヘッダ x-debug-token
  *     本文（省略可）: { ip?: string }（省略・空欄なら全IP対象）
- *     → { cleared: { login, register }, scope: "ip" | "all" }
+ *     → { cleared: { login, register, profile }, scope: "ip" | "all" }
  *   トークン未設定・不一致は 404（デバッグ機能の存在を隠すための仕様。401ではない）。
- *   reset-limits は開発中にログイン・登録のレート制限で詰まったとき、待たずに解除する
- *   ための操作。誤爆防止のため実行前に confirm() を挟む（このJS側のガード）。
+ *   reset-limits は開発中にログイン・登録・プロフィール保存のレート制限で詰まったとき、
+ *   待たずに解除するための操作。誤爆防止のため実行前に confirm() を挟む（このJS側のガード）。
  */
 
 "use strict";
@@ -491,8 +491,8 @@
 
     const ip = els.resetLimitsIp.value.trim();
     const confirmMessage = ip
-      ? `IP ${ip} のログイン・登録のレート制限を解除します。よろしいですか？`
-      : "すべてのIPのログイン・登録のレート制限を解除します。よろしいですか？";
+      ? `IP ${ip} のログイン・登録・プロフィール保存のレート制限を解除します。よろしいですか？`
+      : "すべてのIPのログイン・登録・プロフィール保存のレート制限を解除します。よろしいですか？";
     if (!confirm(confirmMessage)) return;
 
     els.resetLimitsError.textContent = "";
@@ -513,10 +513,11 @@
       }
       const cleared = res.body.cleared || {};
       const scopeLabel = res.body.scope === "ip" ? `IP ${ip}` : "全IP";
+      // 古いサーバー（profile 枠が無い応答）と混ざっても壊れないよう、どの枠も ?? 0 で受ける
       els.resetLimitsResult.textContent =
         `${scopeLabel} を解除しました（ログイン: ${cleared.login ?? 0}件, 登録: ${
           cleared.register ?? 0
-        }件）`;
+        }件, プロフィール保存: ${cleared.profile ?? 0}件）`;
       // 出来事の一覧を再読み込みする（この操作自体も debug.resetLimits として記録される）
       await refreshAll();
     } finally {
