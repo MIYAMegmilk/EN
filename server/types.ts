@@ -93,6 +93,31 @@ export const WS_SANDBOX_HARD_MAX = 150;
  */
 export const SANDBOX_PAYLOAD_MAX_BYTES = 4 * 1024;
 
+/**
+ * WS メッセージのレート制限: gameEvent（docs/design/games-unified.md §2.2 / §9.3）の
+ * 判定窓内最大件数。超過分は破棄する（切断しない）。判定窓は WS_RATE_WINDOW_MS を共用する。
+ * 【暫定値】。根拠: sandboxSignal 用に置いた WS_SANDBOX_RATE_MAX の値をそのまま引き継いだもの
+ * （設計書 §2.2）。サーバー側の負荷試験は未実施（設計書 §10-2）。
+ *
+ * **定義のみ。main.ts の専用レート枠への適用は後続 PR に回す。** それまで gameEvent は
+ * 一般枠（WS_RATE_MAX = 20件/秒）で判定される。一般枠のほうが厳しいため安全側だが、
+ * 描画中継（設計書 §2.7 は 10チャンク/秒 を想定）を実装する前に専用枠が要る。
+ */
+export const WS_GAME_EVENT_RATE_MAX = 30;
+/**
+ * gameEvent のハードキャップ。これを超える連投は乱用とみなして切断する。
+ * 【暫定値】。根拠は WS_GAME_EVENT_RATE_MAX と同じ（WS_SANDBOX_HARD_MAX の引き継ぎ）。
+ * **定義のみ。適用は後続 PR。**
+ */
+export const WS_GAME_EVENT_HARD_MAX = 150;
+/**
+ * gameEvent の payload の直列化サイズ上限（バイト、設計書 §9.3）。超過は棄却する。
+ * 【暫定値】。根拠は SANDBOX_PAYLOAD_MAX_BYTES の引き継ぎ。
+ * こちらは rooms.ts の gameEvent ハンドラで**すでに適用している**（レート枠と違い、
+ * ルーム層だけで完結するため）。
+ */
+export const GAME_EVENT_PAYLOAD_MAX_BYTES = 4 * 1024;
+
 // ---------------------------------------------------------------------------
 // §5 データモデル
 // ---------------------------------------------------------------------------
@@ -304,6 +329,13 @@ export type Room = {
   selectedGameId: string | null;
   /** 進行中のゲーム状態。未開始は null */
   game: GameState | null;
+  /**
+   * 進行中のゲームモジュールID（docs/design/games-unified.md §2.1）。未開始は null。
+   * PR2 時点で稼働するモジュールは prompt のみで、その state は既存の GameState
+   * そのものなので上の `game` に載せたままにしてある。専用モジュール（reflex 等）を
+   * 足す PR で `game` を `{ moduleId; state }` へ広げる
+   */
+  gameModuleId: string | null;
   /** チャット履歴。直近 CHAT_HISTORY_MAX 件のみ・古い順（§3.9） */
   chatHistory: ChatMessage[];
   /**
@@ -422,6 +454,16 @@ export type GameSummary = {
   promptCount: number;
   /** 公式ゲームかどうか */
   official: boolean;
+  /**
+   * どの基盤で動くゲームか（docs/design/games-unified.md §4）。
+   * prompt … 宣言的データ（GameDefinition）を prompt モジュールが進行させる
+   * module … 専用のゲームモジュール（server/games/<id>.ts）
+   *
+   * 省略時は prompt とみなす。必須にすると gamedef.ts の toSummary（宣言的データ専用で、
+   * 常に prompt になる）まで書き換えが要るため、当面は任意フィールドにしてある。
+   * モジュール型のゲームが載る PR で必須化を検討する
+   */
+  kind?: "prompt" | "module";
 };
 
 // ---------------------------------------------------------------------------
@@ -798,6 +840,19 @@ export type RoomSnapshot = {
   serverTime: number;
   /** 稼働中のサンドボックスゲーム。無ければ null（docs/design/game-sandbox.md） */
   sandbox: SandboxGameState | null;
+  /**
+   * 進行中のモジュール型ゲームの表示データ（docs/design/games-unified.md §2.2）。
+   * 途中参加・再接続でフル状態を配るために載せる。既存の `phase` / `view` と並存する。
+   * kind:"prompt" のゲーム（＝現行の全ゲーム）では入らない
+   */
+  game?: {
+    /** カタログ上のゲームID */
+    gameId: string;
+    /** 受信者ごとの表示データ */
+    view: unknown;
+    /** カウントダウン表示用の期限（epoch ms）。期限なしは null */
+    deadline: number | null;
+  };
 };
 
 // ---------------------------------------------------------------------------
@@ -875,6 +930,12 @@ export type C2S =
   /** ゲーム内メッセージ。サーバーは payload を解釈せず同室へ中継する（rtcSignal と同じ扱い） */
   | { t: "sandboxSignal"; payload: unknown }
   /**
+   * ゲーム内イベント（docs/design/games-unified.md §2.2）。
+   * サーバー（ゲームモジュール）が payload を**検証・解釈**して状態を進める。
+   * payload を解釈せず中継するだけの sandboxSignal とは正反対の設計であることに注意
+   */
+  | { t: "gameEvent"; payload: unknown }
+  /**
    * ランダムマッチの待機列に並ぶ（§3.1.2）。ゲスト可。
    * あだ名を省略するとサーバーが しゅんぴ の二つ名を付ける（join と同じ扱い）
    */
@@ -920,6 +981,11 @@ export type S2C =
   | { t: "sandboxState"; game: SandboxGameState | null }
   /** 中継されたゲーム内メッセージ。送信者本人には返らない */
   | { t: "sandboxSignal"; from: string; payload: unknown }
+  /**
+   * モジュール型ゲームの表示データ（docs/design/games-unified.md §2.2）。
+   * 受信者ごとに内容が変わる（§3.2 原則3）。deadline はカウントダウン表示用
+   */
+  | { t: "gameView"; gameId: string; view: unknown; deadline: number | null }
   | { t: "error"; code: ErrorCode; message: string };
 
 // ---------------------------------------------------------------------------
