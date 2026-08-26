@@ -285,6 +285,26 @@ export type VoiceLine = {
   at: number;
 };
 
+/**
+ * 進行中のゲーム1本（docs/design/games-unified.md §2.1）。
+ *
+ * state の中身はモジュールごとに異なるため、ルーム層は unknown のまま持ち運び、
+ * 解釈は必ず moduleId で引いたモジュール（server/games/index.ts）に任せる。
+ * ここを特定の型（かつて GameState だった）に固定すると、専用モジュールの state を
+ * 載せるたびに型の嘘（キャスト）が要るため、意図的に unknown にしてある
+ */
+export type ActiveGame = {
+  /** カタログ上のモジュールID（server/games/index.ts の正本） */
+  moduleId: string;
+  /** モジュールが持つ状態。ルーム層は中身を解釈しない */
+  state: unknown;
+  /**
+   * 進行中か。モジュールが `ended` 効果を出した時点で false になる。
+   * 終了後も state を捨てないのは、最終結果の表示（view）を配り続けるため
+   */
+  running: boolean;
+};
+
 /** ルーム。プロセスメモリ上のみで保持し KV には置かない（§5） */
 export type Room = {
   /** 6桁の参加コード */
@@ -327,15 +347,8 @@ export type Room = {
   availableGames: Map<string, GameDefinition>;
   /** 選択中のゲームID */
   selectedGameId: string | null;
-  /** 進行中のゲーム状態。未開始は null */
-  game: GameState | null;
-  /**
-   * 進行中のゲームモジュールID（docs/design/games-unified.md §2.1）。未開始は null。
-   * PR2 時点で稼働するモジュールは prompt のみで、その state は既存の GameState
-   * そのものなので上の `game` に載せたままにしてある。専用モジュール（reflex 等）を
-   * 足す PR で `game` を `{ moduleId; state }` へ広げる
-   */
-  gameModuleId: string | null;
+  /** 進行中のゲーム。未開始は null（docs/design/games-unified.md §2.1） */
+  game: ActiveGame | null;
   /** チャット履歴。直近 CHAT_HISTORY_MAX 件のみ・古い順（§3.9） */
   chatHistory: ChatMessage[];
   /**
@@ -444,14 +457,18 @@ export type GameSummary = {
   title: string;
   /** 説明 */
   description?: string;
-  /** ラウンド数 */
-  rounds: number;
-  /** 入力方式 */
-  inputType: InputType;
-  /** 採点方式 */
-  scoring: ScoringMode;
-  /** 出題件数 */
-  promptCount: number;
+  /** ラウンド数。kind:"prompt" のみ */
+  rounds?: number;
+  /** 入力方式。kind:"prompt" のみ */
+  inputType?: InputType;
+  /** 採点方式。kind:"prompt" のみ */
+  scoring?: ScoringMode;
+  /** 出題件数。kind:"prompt" のみ */
+  promptCount?: number;
+  /** 開始に必要な最少人数。kind:"module" のみ（prompt はエンジン共通の MIN_PLAYERS） */
+  minPlayers?: number;
+  /** 参加できる最大人数。kind:"module" のみ */
+  maxPlayers?: number;
   /** 公式ゲームかどうか */
   official: boolean;
   /**
@@ -461,7 +478,7 @@ export type GameSummary = {
    *
    * 省略時は prompt とみなす。必須にすると gamedef.ts の toSummary（宣言的データ専用で、
    * 常に prompt になる）まで書き換えが要るため、当面は任意フィールドにしてある。
-   * モジュール型のゲームが載る PR で必須化を検討する
+   * ルーム層（rooms.ts の buildSnapshot）は両方の種別に必ず明示して載せる
    */
   kind?: "prompt" | "module";
 };
@@ -480,6 +497,16 @@ export type Phase =
   | "judge"
   | "roundResult"
   | "finalResult";
+
+/**
+ * 卓としてのフェーズ（docs/design/games-unified.md §3.2）。
+ *
+ * 専用モジュール型のゲームは内訳のフェーズを自前で持ち、表示は S2C `gameView` が担うので、
+ * 卓の外からは "playing"（遊んでいる最中）としか見えない。
+ * エンジン（engine.ts）が扱うのはあくまで上の Phase であり、この語彙は
+ * ルーム層とクライアントの間だけで使う
+ */
+export type RoomPhase = Phase | "playing";
 
 /** ゲーム内での役割。途中参加者はそのラウンド中は観戦のみ（§8） */
 export type ParticipantRole = "player" | "spectator";
@@ -754,6 +781,17 @@ export type FinalResultPhaseView = {
   scores: ScoreEntry[];
 };
 
+/**
+ * playing: 専用モジュール型ゲームの進行中（docs/design/games-unified.md §3.2）。
+ * 中身の表示データは S2C `gameView` / `RoomSnapshot.game` で別に配るため、
+ * ここには「どのゲームが動いているか」だけを載せる
+ */
+export type PlayingPhaseView = {
+  phase: "playing";
+  /** 進行中のモジュールID（ビューモジュールの読み込みに使う） */
+  gameId: string;
+};
+
 /** フェーズごとの表示データ。受信者ごとに内容が変わる（§3.2 原則3） */
 export type PhaseView =
   | LobbyPhaseView
@@ -763,7 +801,8 @@ export type PhaseView =
   | RevealPhaseView
   | JudgePhaseView
   | RoundResultPhaseView
-  | FinalResultPhaseView;
+  | FinalResultPhaseView
+  | PlayingPhaseView;
 
 /**
  * 公開ルーム一覧の1行（§2 公開ルーム一覧 / §4.0 `GET /api/rooms`）。
@@ -821,7 +860,7 @@ export type RoomSnapshot = {
   /** 選択中のゲームID */
   selectedGameId: string | null;
   /** 現在のフェーズ */
-  phase: Phase;
+  phase: RoomPhase;
   /** 現フェーズの期限（epoch ms）。期限なしは null */
   deadline: number | null;
   /** 現フェーズの表示データ */
@@ -965,7 +1004,7 @@ export type S2C =
   | { t: "matched"; roomCode: string }
   | { t: "kicked" }
   | { t: "playerKicked"; playerId: string }
-  | { t: "phase"; phase: Phase; deadline?: number; view: PhaseView }
+  | { t: "phase"; phase: RoomPhase; deadline?: number; view: PhaseView }
   | { t: "roundResult"; scores: ScoreEntry[] }
   | { t: "finalResult"; scores: ScoreEntry[] }
   | { t: "hostChanged"; playerId: string }

@@ -108,8 +108,12 @@ export type ModuleResult<S> = {
   effects: ModuleEffect[];
 };
 
-/** ゲーム1本のサーバー側実装 */
-export type GameModule<S = unknown> = {
+/**
+ * ゲーム1本のサーバー側実装。
+ * S は状態、V は view が返す表示データの型（カタログに並べるときは
+ * どちらも unknown に潰れるが、モジュール自身とそのテストでは具体型が効く）
+ */
+export type GameModule<S = unknown, V = unknown> = {
   /** モジュールID。カタログ（server/games/index.ts）の正本 */
   id: string;
   /** 表示経路 */
@@ -121,7 +125,7 @@ export type GameModule<S = unknown> = {
   /** イベントを1件処理する */
   reduce(state: S, event: ModuleEvent): ModuleResult<S>;
   /** 受信者ごとの表示データ。秘密はここで絞る（§2.6） */
-  view(state: S, viewerId: string): unknown;
+  view(state: S, viewerId: string): V;
 };
 
 // ---------------------------------------------------------------------------

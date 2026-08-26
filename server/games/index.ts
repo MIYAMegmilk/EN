@@ -6,6 +6,7 @@
  * 「どの基盤で作るか」「どの一覧に登録するか」という分岐そのものを無くす。
  */
 
+import { chickenModule } from "./chicken.ts";
 import type { GameModule } from "./module.ts";
 import { promptModule } from "./prompt.ts";
 
@@ -16,9 +17,24 @@ import { promptModule } from "./prompt.ts";
  */
 export const GAME_MODULES: readonly GameModule[] = [
   promptModule,
+  chickenModule,
 ];
+
+/**
+ * 専用モジュール型のゲーム（kind:"module"）だけを並べたもの。
+ * ルーム層はこれを一覧（RoomSnapshot.availableGames）へ宣言的ゲームと並べて出し、
+ * selectGame / startGame の宛先として引く（設計書 §4）
+ */
+export const MODULE_GAMES: readonly GameModule[] = GAME_MODULES.filter(
+  (m) => m.kind === "module",
+);
 
 /** モジュールIDから引く。未知のIDは null */
 export function findGameModule(id: string): GameModule | null {
   return GAME_MODULES.find((m) => m.id === id) ?? null;
+}
+
+/** 専用モジュール型のゲームをIDから引く。prompt・未知のIDは null */
+export function findModuleGame(id: string): GameModule | null {
+  return MODULE_GAMES.find((m) => m.id === id) ?? null;
 }

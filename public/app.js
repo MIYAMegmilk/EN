@@ -135,7 +135,136 @@ const state = {
   reconnectTimer: null,
   // ログイン済みか（/api/me の結果）。「お会計」の出し入れに使う
   loggedIn: false,
+  // サーバー時刻との差（serverTime - Date.now()）。ビューモジュールの秒読みに使う
+  serverOffsetMs: 0,
 };
+
+/**
+ * 専用モジュール型ゲーム（docs/design/games-unified.md §3.2）の表示。
+ *
+ * サーバーは進行中、受信者ごとの gameView を配ってくる。こちらはその gameId から
+ * ビューモジュール（public/room/games/<id>.js）を動的 import して mount し、
+ * 以降は update に view を流すだけにする。ゲームの状態機械はサーバーにしか無い。
+ */
+const gameModuleState = {
+  /** いま mount しているゲームID（未 mount は null） */
+  gameId: null,
+  /** mount が返したハンドル（{ update, unmount }）。読み込み中は null */
+  handle: null,
+  /** import の多重発行を防ぐための、読み込み中のゲームID */
+  loadingId: null,
+  /** mount 前・読み込み中に届いた最新の gameView（mount 直後に流し込む） */
+  pending: null,
+  /** ビューモジュールを差し込む器。#phase-body の中に置いたまま使い回す */
+  host: null,
+};
+
+/**
+ * 読み込めるビューモジュールのIDか（設計書 §9.3 パス注入の防止）。
+ *
+ * URL に混ぜてよいのは**サーバーのカタログ由来のID**だけ、というのが規約だが、
+ * 受け取った文字列がその形をしているかは受け側でも必ず確かめる。
+ * 英小文字・数字・ハイフン・アンダースコアだけを通し、"/" や ".." は弾く
+ */
+function isLoadableGameId(gameId) {
+  return typeof gameId === "string" && /^[a-z0-9_-]{1,32}$/.test(gameId);
+}
+
+/** ビューモジュールへ渡す api（設計書 §3.2） */
+function gameModuleApi() {
+  return {
+    send: (payload) => send({ t: "gameEvent", payload }),
+    youId: state.snapshot === null ? null : state.snapshot.youId,
+    isHost: state.snapshot !== null && state.snapshot.youAreHost === true,
+    serverNow: () => Date.now() + state.serverOffsetMs,
+  };
+}
+
+/**
+ * gameView を1件受け取る。まだ mount していなければ、そのゲームの
+ * ビューモジュールを読み込んでから流し込む。
+ */
+function applyGameView(gameId, view, deadline) {
+  if (!isLoadableGameId(gameId)) return;
+  gameModuleState.pending = { gameId, view, deadline };
+  if (gameModuleState.gameId === gameId && gameModuleState.handle !== null) {
+    flushGameView();
+    return;
+  }
+  if (gameModuleState.loadingId === gameId) return;
+  loadGameModule(gameId);
+}
+
+/** 保留している view をビューモジュールへ渡す */
+function flushGameView() {
+  const pending = gameModuleState.pending;
+  const handle = gameModuleState.handle;
+  if (pending === null || handle === null) return;
+  if (pending.gameId !== gameModuleState.gameId) return;
+  try {
+    handle.update(pending.view, pending.deadline);
+  } catch (error) {
+    log("Game", `表示の更新に失敗しました: ${error}`);
+  }
+}
+
+/**
+ * ビューモジュールを読み込んで mount する。
+ * import する URL は上の isLoadableGameId を通ったカタログ由来のIDだけから組み立てる。
+ */
+async function loadGameModule(gameId) {
+  unmountGameModule();
+  gameModuleState.loadingId = gameId;
+  try {
+    const module = await import(`/room/games/${gameId}.js`);
+    // 読み込みを待っている間に別のゲームへ移った・卓を出た場合は捨てる
+    if (gameModuleState.loadingId !== gameId) return;
+    if (typeof module.mount !== "function") {
+      throw new Error("mount が見つかりません");
+    }
+    const host = gameModuleHost();
+    clear(host);
+    gameModuleState.gameId = gameId;
+    gameModuleState.handle = module.mount(host, gameModuleApi());
+    flushGameView();
+  } catch (error) {
+    showError("あそびの画面を読み込めませんでした");
+    log("Game", `${gameId} の読み込みに失敗しました: ${error}`);
+  } finally {
+    if (gameModuleState.loadingId === gameId) gameModuleState.loadingId = null;
+  }
+}
+
+/** ビューモジュールを片付ける。ゲームが終わったとき・卓を出たときに呼ぶ */
+function unmountGameModule() {
+  const handle = gameModuleState.handle;
+  gameModuleState.gameId = null;
+  gameModuleState.handle = null;
+  gameModuleState.loadingId = null;
+  gameModuleState.pending = null;
+  if (handle !== null) {
+    try {
+      handle.unmount();
+    } catch (error) {
+      log("Game", `後始末に失敗しました: ${error}`);
+    }
+  }
+  if (gameModuleState.host !== null) clear(gameModuleState.host);
+}
+
+/**
+ * ビューモジュールを差し込む器を返す。
+ *
+ * #phase-body は renderPhase のたびに空にされるが、この器そのものは作り直さない。
+ * 作り直すと、描き直しのたびにビューモジュールの DOM とリスナが消えてしまう
+ * （器を持ち回して付け替えるだけなら、中身はそのまま生き残る）
+ */
+function gameModuleHost() {
+  if (gameModuleState.host === null) {
+    gameModuleState.host = el("div", undefined, "game-module");
+  }
+  return gameModuleState.host;
+}
 
 /**
  * サーバー再起動による切断から、待ち時間を伸ばしつつ繋ぎ直す。
@@ -538,6 +667,7 @@ function resetToEntry() {
   Voice.reset();
   Bot.reset();
   Sandbox.reset();
+  unmountGameModule();
   renderAll();
 }
 
@@ -555,6 +685,19 @@ function receive(msg) {
       state.phase = msg.snapshot.phase;
       state.deadline = msg.snapshot.deadline;
       state.view = msg.snapshot.view;
+      if (typeof msg.snapshot.serverTime === "number") {
+        state.serverOffsetMs = msg.snapshot.serverTime - Date.now();
+      }
+      // 途中参加・再接続でも、進行中のあそびを丸ごと復元する（設計書 §5）
+      if (msg.snapshot.game !== undefined && msg.snapshot.game !== null) {
+        applyGameView(
+          msg.snapshot.game.gameId,
+          msg.snapshot.game.view,
+          msg.snapshot.game.deadline,
+        );
+      } else {
+        unmountGameModule();
+      }
       if (typeof msg.snapshot.session === "string") {
         store.save(msg.snapshot.code, msg.snapshot.session);
       }
@@ -597,10 +740,16 @@ function receive(msg) {
       state.phase = msg.phase;
       state.deadline = msg.deadline ?? null;
       state.view = msg.view;
+      // あそびが終わった（ロビーへ戻った）ら、ビューモジュールを片付ける。
+      // 進行中の gameView は phase とは別便で届く（設計書 §2.2）
+      if (msg.phase !== "playing") unmountGameModule();
       if (state.snapshot !== null && msg.view.phase === "lobby") {
         state.snapshot.selectedGameId = msg.view.selectedGameId;
       }
       renderAll();
+      break;
+    case "gameView":
+      applyGameView(msg.gameId, msg.view, msg.deadline);
       break;
     case "roundResult":
       renderScores("ラウンド結果", msg.scores);
@@ -777,13 +926,17 @@ function listGames(snapshot) {
   const games = [];
   const withHue = (game) => ({ ...game, hue: THUMB_HUES[games.length % THUMB_HUES.length] });
   for (const game of snapshot.availableGames) {
+    // 専用モジュール型（設計書 §4）はラウンド数・採点方式を持たないので、人数を出す
     const scoring = SCORING_LABELS[game.scoring];
+    const meta = game.kind === "module"
+      ? `${game.minPlayers}〜${game.maxPlayers}人`
+      : `${game.rounds}ラウンド・${scoring === undefined ? game.scoring : scoring}`;
     games.push(withHue({
       choice: `official:${game.id}`,
       id: game.id,
       title: game.title,
       description: game.description ?? "",
-      meta: `${game.rounds}ラウンド・${scoring === undefined ? game.scoring : scoring}`,
+      meta,
       badge: "宴の余興",
       official: true,
     }));
@@ -1000,6 +1153,11 @@ function renderPhase() {
     case "lobby":
       body.appendChild(el("p", "ホストがゲームを選んで開始するのを待っています。"));
       break;
+    // 専用モジュール型のあそび（設計書 §3.2）。中身はビューモジュールが描くので、
+    // ここは器を置き直すだけにする。器ごと作り直すと中身が消える
+    case "playing":
+      body.appendChild(gameModuleHost());
+      break;
     case "intro":
       body.appendChild(el("p", view.title));
       if (view.description) body.appendChild(el("p", view.description));
@@ -1117,6 +1275,7 @@ const PHASE_LABELS = {
   judge: "投票中",
   roundResult: "ラウンド結果",
   finalResult: "最終結果",
+  playing: "あそび中",
 };
 
 /** フェーズの表示名を返す */

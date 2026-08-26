@@ -163,7 +163,7 @@ function toModuleEffects(effect: EngineEffect): ModuleEffect[] {
 }
 
 /** 宣言的フロー（GameDefinition）を進行させるモジュール */
-export const promptModule: GameModule<GameState> = {
+export const promptModule: GameModule<GameState, PhaseView> = {
   id: PROMPT_MODULE_ID,
   kind: "prompt",
   meta: {
