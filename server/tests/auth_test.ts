@@ -1028,3 +1028,129 @@ Deno.test("reset-limits: IPを指定したときもプロフィール保存の�
     else Deno.env.set("EN_DEBUG_TOKEN", savedToken);
   }
 });
+
+// ---------------------------------------------------------------------------
+// PUT /api/profile の楽観ロック（versionstamp の照合。競合したら409）
+// ---------------------------------------------------------------------------
+
+Deno.test("PUT /api/profile: 同時に保存すると片方が409になる（楽観ロック）", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const userId = randomUserId();
+    const registerRes = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId, password: "correcthorse" }),
+    });
+    const cookie = cookieFrom(registerRes);
+    const headers = { "content-type": "application/json", cookie };
+
+    // 先に2本の接続を開いておく。接続確立の待ちが入ると2つ目のリクエストが
+    // 1つ目の完了後に届いてしまい、同時保存の状況にならないため
+    const warmup = await Promise.all([
+      fetch(`${base}/api/me`, { headers: { cookie } }),
+      fetch(`${base}/api/me`, { headers: { cookie } }),
+    ]);
+    for (const res of warmup) await res.body?.cancel();
+
+    // 2つのタブから同時に保存した状況。素の set だと両方200になり先の変更が消える
+    const [left, right] = await Promise.all([
+      fetch(`${base}/api/profile`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ nickname: "ひだり", tags: ["game"] }),
+      }),
+      fetch(`${base}/api/profile`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ nickname: "みぎ", tags: ["music"] }),
+      }),
+    ]);
+    await left.body?.cancel();
+    await right.body?.cancel();
+    assertEquals(
+      [left.status, right.status].sort(),
+      [200, 409],
+      "片方だけが保存され、もう片方は409で弾かれること",
+    );
+
+    // 保存されたのは200を返した方の内容だけ（もう片方は書かれていない）
+    const winner = left.status === 200 ? "ひだり" : "みぎ";
+    const meBody = await (await fetch(`${base}/api/me`, { headers: { cookie } })).json();
+    assertEquals(meBody.nickname, winner);
+    assertEquals(meBody.tags, winner === "ひだり" ? ["game"] : ["music"]);
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("PUT /api/profile: 続けて保存する分には409にならず後の内容が残る（回帰）", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const userId = randomUserId();
+    const registerRes = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId, password: "correcthorse" }),
+    });
+    const cookie = cookieFrom(registerRes);
+    const headers = { "content-type": "application/json", cookie };
+
+    const first = await fetch(`${base}/api/profile`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ nickname: "はじめ", tags: ["game"] }),
+    });
+    assertEquals(first.status, 200);
+    await first.body?.cancel();
+
+    const second = await fetch(`${base}/api/profile`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ nickname: "あとから", tags: ["music"] }),
+    });
+    assertEquals(second.status, 200, "直前の保存を読み直しているので競合しないこと");
+    assertEquals(await second.json(), { nickname: "あとから", tags: ["music"] });
+
+    const meBody = await (await fetch(`${base}/api/me`, { headers: { cookie } })).json();
+    assertEquals(meBody.nickname, "あとから");
+    assertEquals(meBody.tags, ["music"]);
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("PUT /api/profile: 保存の直前にアカウントが消えていると404（楽観ロックの前提）", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const userId = randomUserId();
+    const registerRes = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId, password: "correcthorse" }),
+    });
+    const cookie = cookieFrom(registerRes);
+
+    // セッションは有効なままアカウントだけ消す（楽観ロックの check 以前に弾く経路）
+    await kv.delete(["user", userId]);
+
+    const res = await fetch(`${base}/api/profile`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ nickname: "たろう", tags: [] }),
+    });
+    assertEquals(res.status, 404);
+    assert(typeof (await res.json()).error === "string", "error メッセージが返ること");
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});

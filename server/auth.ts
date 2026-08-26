@@ -480,7 +480,14 @@ export class AuthApi {
       return errorResponse(404, "アカウントが見つかりません");
     }
     const updated: User = { ...entry.value, nickname: nicknameResult.value, tags: uniqueTags };
-    await this.#kv.set(userKey, updated);
+    // 読み出してから書き戻すまでの間に別の保存が入ると、素の set では後勝ちで
+    // 先の変更が消える（同じユーザーが2つのタブでプロフィールを開いている場合など。
+    // あだ名と趣味タグを1回の書き込みでまとめて更新するため、消える範囲が広い）。
+    // 読んだ versionstamp を照合し、変わっていたら書かずに 409 を返して呼び出し側にやり直させる
+    const commit = await this.#kv.atomic().check(entry).set(userKey, updated).commit();
+    if (!commit.ok) {
+      return errorResponse(409, "プロフィールが同時に更新されました。再度お試しください");
+    }
 
     return jsonResponse({ nickname: updated.nickname, tags: updated.tags });
   }
