@@ -43,7 +43,7 @@
       .noren {
         flex: 1;
         display: grid;
-        grid-template-columns: 1fr 1.05fr 1fr 1.05fr 1fr;
+        grid-template-columns: 1fr 1fr 1fr;
         gap: 5px;
         min-height: 0;
       }
@@ -53,11 +53,7 @@
         display: flex;
         align-items: flex-start;
         justify-content: center;
-        padding-top: 14%;
-        font-family: var(--serif);
-        font-size: 22px;
-        letter-spacing: 0.22em;
-        text-indent: 0.22em;
+        padding-top: 20%;
         border-radius: 0 0 3px 3px;
         box-shadow: 0 12px 22px rgba(0, 0, 0, 0.4);
       }
@@ -80,9 +76,20 @@
         background: linear-gradient(180deg, #a8241f, #8d1c18);
       }
 
-      .cloth-cream {
-        background: linear-gradient(180deg, #f0e4cf, #e2d2b6);
-        color: #4a2b16;
+      /* 左右の暖簾に入れる白丸で囲んだ一文字 */
+      .noren-mark {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 2.3em;
+        height: 2.3em;
+        border: 1.5px solid rgba(255, 255, 255, 0.85);
+        border-radius: 50%;
+        font-family: var(--serif);
+        font-size: 26px;
+        font-style: normal;
+        color: #fff;
+        line-height: 1;
       }
 
       /* ログインの箱。上端を画面上から10vhの位置に固定するので、スクロール
@@ -238,17 +245,15 @@
         animation-fill-mode: forwards;
       }
 
-      body.entering .noren span:nth-child(1),
-      body.entering .noren span:nth-child(2) {
+      body.entering .noren span:nth-child(1) {
         animation-name: noren-split-left;
       }
 
-      body.entering .noren span:nth-child(3) {
+      body.entering .noren span:nth-child(2) {
         animation-name: noren-split-center;
       }
 
-      body.entering .noren span:nth-child(4),
-      body.entering .noren span:nth-child(5) {
+      body.entering .noren span:nth-child(3) {
         animation-name: noren-split-right;
       }
 
@@ -327,11 +332,9 @@
     <div class="noren-wrap" aria-hidden="true">
       <div class="noren-pole"></div>
       <div class="noren">
+        <span class="cloth-red"><i class="noren-mark">宴</i></span>
         <span class="cloth-red"></span>
-        <span class="cloth-cream">宴</span>
-        <span class="cloth-red"></span>
-        <span class="cloth-cream">宴</span>
-        <span class="cloth-red"></span>
+        <span class="cloth-red"><i class="noren-mark">宴</i></span>
       </div>
     </div>
     <main>
