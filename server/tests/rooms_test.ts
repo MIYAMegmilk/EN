@@ -11,6 +11,7 @@ import {
   normalizeRoomCode,
   NOT_IMPLEMENTED_MESSAGE,
   phaseDurationsFor,
+  promptStateOf,
   RoomManager,
   validateChatText,
   validateNickname,
@@ -21,6 +22,8 @@ import {
   VOICE_RATE_WINDOW_MS,
 } from "../rooms.ts";
 import { DEFAULT_PHASE_DURATIONS } from "../engine.ts";
+import { OFFICIAL_GAMES } from "../official_games.ts";
+import { MODULE_GAMES } from "../games/index.ts";
 import type { S2C } from "../types.ts";
 import {
   CHAT_HISTORY_MAX,
@@ -37,7 +40,6 @@ import {
   PENDING_KNOCK_MAX,
   ROOM_CAPACITY,
   ROOM_NAME_MAX,
-  SANDBOX_PAYLOAD_MAX_BYTES,
   VC_CAPACITY,
 } from "../types.ts";
 
@@ -127,14 +129,13 @@ function humanChats(link: MockLink): Extract<S2C, { t: "chat" }>[] {
   return all(link, "chat").filter((m) => !m.message.bot);
 }
 
-/** テスト用の環境を作る。sandboxGameIds を渡すとサンドボックスの開始を許可する gameId を指定できる */
-function setup(options: { sandboxGameIds?: ReadonlySet<string> } = {}) {
+/** テスト用の環境を作る */
+function setup() {
   const clock = new FakeClock();
   const manager = new RoomManager({
     now: () => clock.now,
     setTimer: clock.setTimer,
     clearTimer: clock.clearTimer,
-    sandboxGameIds: options.sandboxGameIds,
   });
   return { clock, manager };
 }
@@ -236,7 +237,8 @@ Deno.test("ルーム作成: 作成者がホストとして入室し、6桁コー
   assertEquals(snapshot.youAreHost, true);
   assertEquals(snapshot.hostId, snapshot.youId);
   assertEquals(snapshot.phase, "lobby");
-  assertEquals(snapshot.availableGames.length, 3);
+  // 一覧は「宣言的データのゲーム + 専用モジュール型のゲーム」（設計書 §4）
+  assertEquals(snapshot.availableGames.length, OFFICIAL_GAMES.length + MODULE_GAMES.length);
   assertExists(snapshot.session);
   assertEquals(manager.roomCount, 1);
   manager.dispose();
@@ -691,7 +693,10 @@ Deno.test("退室化: ゲーム中に在籍が2人未満になると中断して
 
   clock.advance(DISCONNECT_GRACE_MS);
   assertEquals(last(host.link, "phase")?.phase, "lobby");
-  assertEquals(manager.getRoom(host.snapshot.code)?.game?.phase, "lobby");
+  // サーバー側の state もロビーへ戻っていること（Room.game の中身は
+  // モジュールごとに違うので、prompt の state は promptStateOf 経由で読む）
+  const room = manager.getRoom(host.snapshot.code);
+  assertEquals(room === undefined ? null : promptStateOf(room)?.phase, "lobby");
   assertEquals(manager.getRoom(host.snapshot.code)?.players.size, 1);
   manager.dispose();
 });
@@ -2052,218 +2057,6 @@ Deno.test("dispose: 残っているタイマーをすべて解除する", () => 
   manager.dispose();
   assertEquals(clock.pending, 0);
   assertEquals(manager.roomCount, 0);
-});
-
-// ---------------------------------------------------------------------------
-// サンドボックスゲーム（docs/design/game-sandbox.md §4 / §5）
-// ---------------------------------------------------------------------------
-
-Deno.test("sandboxStart: ホスト以外は NOT_HOST", () => {
-  const { manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
-  const host = createRoom(manager);
-  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
-  assertExists(guest.state);
-  manager.handle(guest.link, { t: "sandboxStart", gameId: "reflex" });
-  assertEquals(last(guest.link, "error")?.code, "NOT_HOST");
-  manager.handle(guest.link, { t: "sandboxEnd" });
-  assertEquals(last(guest.link, "error")?.code, "NOT_HOST");
-  manager.dispose();
-});
-
-Deno.test("sandboxStart: 未知の gameId は INVALID_INPUT（ホワイトリストに無い・dev 除外を含む）", () => {
-  const { manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
-  const host = createRoom(manager);
-  manager.handle(host.link, { t: "sandboxStart", gameId: "not-in-manifest" });
-  assertEquals(last(host.link, "error")?.code, "INVALID_INPUT");
-  assertEquals(manager.getRoom(host.snapshot.code)?.sandbox, null);
-  manager.dispose();
-});
-
-Deno.test("sandboxStart: 既存エンジンのゲームが進行中は PHASE_MISMATCH", () => {
-  const { manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
-  const host = createRoom(manager);
-  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
-  assertExists(guest.state);
-  manager.handle(host.link, { t: "selectGame", gameId: "official-ogiri" });
-  manager.handle(host.link, { t: "startGame" });
-  assertEquals(last(host.link, "phase")?.phase, "intro");
-
-  manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
-  assertEquals(last(host.link, "error")?.code, "PHASE_MISMATCH");
-  assertEquals(manager.getRoom(host.snapshot.code)?.sandbox, null);
-  manager.dispose();
-});
-
-Deno.test("sandboxStart: 二重開始は DUPLICATE（同じ gameId でも状態は変わらない）", () => {
-  const { clock, manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
-  const host = createRoom(manager);
-  manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
-  const first = manager.getRoom(host.snapshot.code)?.sandbox;
-  assertExists(first);
-
-  clock.advance(1_000);
-  manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
-  assertEquals(last(host.link, "error")?.code, "DUPLICATE");
-  // 状態（startedAt を含む）は再開始で変わらない（冪等）
-  assertEquals(manager.getRoom(host.snapshot.code)?.sandbox, first);
-  // 2回目の sandboxState は配信されない
-  assertEquals(all(host.link, "sandboxState").length, 1);
-  manager.dispose();
-});
-
-Deno.test("sandboxStart/sandboxEnd: 全員に sandboxState として届く", () => {
-  const { manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
-  const host = createRoom(manager);
-  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
-  assertExists(guest.state);
-
-  manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
-  const started = last(guest.link, "sandboxState");
-  assertExists(started);
-  assertEquals(started.game?.gameId, "reflex");
-  assertEquals(started.game?.startedBy, host.snapshot.youId);
-
-  manager.handle(host.link, { t: "sandboxEnd" });
-  assertEquals(last(guest.link, "sandboxState")?.game, null);
-  manager.dispose();
-});
-
-Deno.test("sandboxEnd: 稼働していないときは何もしない（冪等）", () => {
-  const { manager } = setup();
-  const host = createRoom(manager);
-  manager.handle(host.link, { t: "sandboxEnd" });
-  assertEquals(last(host.link, "error"), undefined);
-  assertEquals(all(host.link, "sandboxState").length, 0);
-  manager.dispose();
-});
-
-Deno.test("スナップショット: 途中参加者が稼働中のサンドボックス状態を復元できる", () => {
-  const { clock, manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
-  const host = createRoom(manager);
-  manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
-  clock.advance(5_000);
-
-  const late = joinRoom(manager, host.snapshot.code, "あとから");
-  assertExists(late.state);
-  assertEquals(late.state.snapshot.sandbox?.gameId, "reflex");
-  assertEquals(late.state.snapshot.sandbox?.startedBy, host.snapshot.youId);
-  manager.dispose();
-});
-
-Deno.test("スナップショット: サンドボックス未稼働なら sandbox は null", () => {
-  const { manager } = setup();
-  const host = createRoom(manager);
-  assertEquals(host.snapshot.sandbox, null);
-  manager.dispose();
-});
-
-Deno.test("サンドボックス稼働中は既存エンジンの selectGame / startGame が PHASE_MISMATCH", () => {
-  const { manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
-  const host = createRoom(manager);
-  manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
-
-  manager.handle(host.link, { t: "selectGame", gameId: "official-ogiri" });
-  assertEquals(last(host.link, "error")?.code, "PHASE_MISMATCH");
-  manager.handle(host.link, { t: "startGame" });
-  assertEquals(last(host.link, "error")?.code, "PHASE_MISMATCH");
-  assertEquals(manager.getRoom(host.snapshot.code)?.game, null);
-  manager.dispose();
-});
-
-Deno.test("sandboxSignal: 稼働中は送信者以外の全員へ無改変で中継される（送信者には返らない）", () => {
-  const { manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
-  const host = createRoom(manager);
-  const guestA = joinRoom(manager, host.snapshot.code, "ゲストA");
-  const guestB = joinRoom(manager, host.snapshot.code, "ゲストB");
-  assertExists(guestA.state);
-  assertExists(guestB.state);
-  manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
-
-  const payload = { k: "tap", round: 1 };
-  manager.handle(host.link, { t: "sandboxSignal", payload });
-  const toA = last(guestA.link, "sandboxSignal");
-  const toB = last(guestB.link, "sandboxSignal");
-  assertExists(toA);
-  assertExists(toB);
-  assertEquals(toA.from, host.snapshot.youId);
-  assertEquals(toA.payload, payload);
-  assertEquals(toB.from, host.snapshot.youId);
-  // 送信者本人には返らない
-  assertEquals(all(host.link, "sandboxSignal").length, 0);
-  manager.dispose();
-});
-
-Deno.test("sandboxSignal: サンドボックス未稼働なら黙って破棄される", () => {
-  const { manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
-  const host = createRoom(manager);
-  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
-  assertExists(guest.state);
-  const before = guest.link.received.length;
-
-  manager.handle(host.link, { t: "sandboxSignal", payload: { k: "x" } });
-  assertEquals(guest.link.received.length, before);
-  assertEquals(last(host.link, "error"), undefined);
-  manager.dispose();
-});
-
-Deno.test("sandboxSignal: payload が上限（4KB）を超えると黙って破棄される", () => {
-  const { manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
-  const host = createRoom(manager);
-  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
-  assertExists(guest.state);
-  manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
-
-  const before = guest.link.received.length;
-  // JSON 直列化後のバイト数が上限を超えるよう、十分大きな文字列を1フィールドに積む
-  const huge = "a".repeat(SANDBOX_PAYLOAD_MAX_BYTES + 100);
-  manager.handle(host.link, { t: "sandboxSignal", payload: { big: huge } });
-  assertEquals(guest.link.received.length, before);
-  assertEquals(last(host.link, "error"), undefined);
-
-  // 上限以内なら通常どおり中継される
-  manager.handle(host.link, { t: "sandboxSignal", payload: { small: "ok" } });
-  assertEquals(last(guest.link, "sandboxSignal")?.payload, { small: "ok" });
-  manager.dispose();
-});
-
-Deno.test("sandboxSignal: ルーム未参加の接続からは ROOM_NOT_FOUND", () => {
-  const { manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
-  createRoom(manager);
-  const link = new MockLink();
-  manager.handle(link, { t: "sandboxSignal", payload: {} });
-  assertEquals(last(link, "error")?.code, "ROOM_NOT_FOUND");
-  manager.dispose();
-});
-
-Deno.test("ホスト退出: サンドボックス稼働中でもホスト交代が起き、サンドボックスは継続する（§5.1）", () => {
-  const { clock, manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
-  const host = createRoom(manager);
-  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
-  assertExists(guest.state);
-  manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
-  const sandboxBefore = manager.getRoom(host.snapshot.code)?.sandbox;
-  assertExists(sandboxBefore);
-
-  manager.disconnect(host.link);
-  clock.advance(DISCONNECT_GRACE_MS + 1);
-  assertExists(last(guest.link, "hostChanged"));
-  assertEquals(manager.getRoom(host.snapshot.code)?.hostId, guest.state.snapshot.youId);
-  // サンドボックスの状態はホスト交代の影響を受けない
-  assertEquals(manager.getRoom(host.snapshot.code)?.sandbox, sandboxBefore);
-  manager.dispose();
-});
-
-Deno.test("退室: 全員が退室するとサンドボックス稼働中でもルームが削除される", () => {
-  const { manager } = setup({ sandboxGameIds: new Set(["reflex"]) });
-  const host = createRoom(manager);
-  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
-  assertExists(guest.state);
-  manager.handle(host.link, { t: "sandboxStart", gameId: "reflex" });
-
-  manager.handle(guest.link, { t: "leave" });
-  manager.handle(host.link, { t: "leave" });
-  assertEquals(manager.roomCount, 0);
-  manager.dispose();
 });
 
 // ---------------------------------------------------------------------------

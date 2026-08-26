@@ -20,6 +20,52 @@
         max-width: 960px;
       }
 
+      /* ── 到着 ──────────────────────────────────────────
+         暖簾をくぐった先の景色から、この画面が浮かび上がる。
+         login.html は同じ assets/interior.svg を暗転の代わりに出したまま
+         遷移してくるので、こちらもその絵から始めれば継ぎ目が見えない。
+         （インラインの script は CSP（default-src 'self'）で読めないため、
+         「くぐって来たときだけ」の出し分けはしない。入り口に戻ってきた
+         ときも同じ絵から始まるが、店に入り直したことに変わりはない）*/
+      @keyframes arrive-fade {
+        to {
+          opacity: 0;
+        }
+      }
+
+      @keyframes arrive-rise {
+        from {
+          opacity: 0;
+          transform: translateY(10px);
+        }
+      }
+
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: 60;
+        background: #150d07 url("./assets/interior.svg") center / cover no-repeat;
+        pointer-events: none;
+        animation: arrive-fade 620ms 60ms ease-out forwards;
+      }
+
+      main {
+        animation: arrive-rise 620ms 180ms ease-out both;
+      }
+
+      /* 揺れを嫌う設定。持ち上がりはやめ、明るさの移り変わりだけ残す */
+      @media (prefers-reduced-motion: reduce) {
+        body::before {
+          animation-duration: 320ms;
+          animation-delay: 0ms;
+        }
+
+        main {
+          animation: none;
+        }
+      }
+
       h1 {
         font-family: var(--serif);
         font-size: 22px;

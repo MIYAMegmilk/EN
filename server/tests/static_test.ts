@@ -246,3 +246,57 @@ Deno.test("entrance.html: 卓を建てるカードが index.html/廊下カード
     kv.close();
   }
 });
+
+/**
+ * 「暖簾をくぐった先の景色」は assets/interior.svg 1枚が正本で、
+ * 3D の背景板・login.html の遷移画面・entrance.html の到着が同じ絵を使う。
+ * どれかが別の絵を持ち出すと、くぐった先と遷移画面と着いた先が別の店に見える。
+ */
+Deno.test("interior.svg: 3D・遷移画面・到着が同じ1枚を使っている", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  const base = `http://127.0.0.1:${server.port}`;
+  try {
+    const svg = await fetch(`${base}/assets/interior.svg`);
+    assertEquals(svg.status, 200, "景色が配信されている必要があります");
+    assert(
+      (svg.headers.get("content-type") ?? "").includes("image/svg+xml"),
+      "SVG として配信される必要があります（three も CSS も画像として読む）",
+    );
+    await svg.body?.cancel();
+
+    for (const path of ["/login.html", "/entrance.html", "/noren-scene.js"]) {
+      const res = await fetch(`${base}${path}`);
+      const text = await res.text();
+      assert(
+        text.includes("interior.svg"),
+        `${path} が assets/interior.svg を参照している必要があります`,
+      );
+    }
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("corridor.html: 入り口へ戻るリンクが entrance.html を指している", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/corridor.html`);
+    const html = await res.text();
+    assert(
+      html.includes('id="to-entrance"') && html.includes('href="/entrance.html"'),
+      "corridor.html に entrance.html へ戻るリンクが必要です",
+    );
+    // 狭い画面ではバーが横スクロールになり、最初に見えている物しか押せない。
+    // 見出しより後ろへ動かすと、スマホでは戻れなくなる
+    assert(
+      html.indexOf('id="to-entrance"') < html.indexOf("<h1>"),
+      "戻るリンクはバーの見出しより前に置く必要があります",
+    );
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});

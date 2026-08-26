@@ -75,6 +75,15 @@ type App = {
   state: any;
   // deno-lint-ignore no-explicit-any
   store: any;
+  // deno-lint-ignore no-explicit-any
+  gameModuleState: any;
+  applyGameView: (gameId: string, view: unknown, deadline: number | null) => void;
+  unmountGameModule: () => void;
+  flushGameView: () => void;
+  // deno-lint-ignore no-explicit-any
+  gameModuleHost: () => any;
+  // deno-lint-ignore no-explicit-any
+  gameModuleApi: () => any;
 };
 
 type Harness = {
@@ -175,9 +184,8 @@ async function load(
     "Voice",
     "Chat",
     "Bot",
-    "Sandbox",
     "Sound",
-    `${source}\n; return { state, store };`,
+    `${source}\n; return { state, store, gameModuleState, applyGameView, unmountGameModule, flushGameView, gameModuleHost, gameModuleApi };`,
   );
 
   const app = factory(
@@ -226,8 +234,6 @@ async function load(
     stubModule("Chat", calls),
     // renderVcBotTiles が isHost と bots を読む。トグルの可否に使う
     stubModule("Bot", calls, { getState: () => ({ bots: {}, isHost: false }) }),
-    // 品書きは公式ゲームと余興を1つに並べる。余興の一覧はここから引く
-    stubModule("Sandbox", calls, { getGames: () => [] }),
     // 効果音。音量の定数は数値として読まれる（loop の引数に入る）ので実物と同じ値を返す
     stubModule("Sound", calls, { GAYA_CORRIDOR: 0.32, GAYA_ROOM: 0.06 }),
   ) as App;
@@ -726,6 +732,126 @@ Deno.test("app.js: 再接続すべきセッションがある場合は保留中�
   const sent = h.socket().parsedSent();
   assertEquals(sent.length, 1, "復帰の join が勝ったので別の join は送られない");
   assertEquals(sent[0].roomCode, "654321", "復帰先は保存済みセッションの卓のはず");
+});
+
+// ---------------------------------------------------------------------------
+// クライアント専用ゲームのビューモジュール受け渡し（gameModuleState.pending）
+//
+// public/app.js は gameId から `/room/games/<id>.js` を動的 import する。
+// この絶対パスは Deno のモジュール解決ではドライブ直下（file:///C:/room/...）に
+// 解決されてしまい、テスト環境からは本物の import を再現できない
+// （import 自体は1行だけの薄いブラウザ機能なので、ここでは検証対象にしない）。
+//
+// そこで、app.js の実装が実際に呼ぶ unmountGameModule / flushGameView /
+// applyGameView をそのまま使い、import 部分だけ data: URL 経由の疑似モジュールに
+// 差し替えて loadGameModule と同じ手順（pending を積む → 前のモジュールを
+// 片付ける → import → mount → flush）を再現する。これなら pending を
+// unmountGameModule が握りつぶすバグを、本物の関数を使って再現・検証できる。
+// ---------------------------------------------------------------------------
+
+/** mount() が呼ばれるたびに update/unmount の呼び出しを記録する疑似ビューモジュール */
+function fakeGameModuleUrl(): string {
+  const src = `
+    export function mount(container, api) {
+      const calls = { updates: [], unmounted: false };
+      return {
+        update(view, deadline) { calls.updates.push({ view, deadline }); },
+        unmount() { calls.unmounted = true; },
+        calls,
+      };
+    }
+  `;
+  return `data:text/javascript,${encodeURIComponent(src)}`;
+}
+
+Deno.test("app.js: gameView が1通しか来なくても、mount 後に初回 view が渡る", async () => {
+  const h = await load();
+  const view = { seed: 1, dummy: true };
+
+  // applyGameView の最初の一手を再現: まだ mount していないので pending に積む
+  h.app.gameModuleState.pending = { gameId: "fixture", view, deadline: null };
+  // loadGameModule の最初の一手を再現: 前のモジュールを片付ける
+  // （ここで pending まで巻き込んで消すのが今回のバグだった）
+  h.app.unmountGameModule();
+  assertExists(h.app.gameModuleState.pending, "1通しか来ない gameView を mount 前に失っている");
+  assertEquals(h.app.gameModuleState.pending.gameId, "fixture");
+
+  // loadGameModule の続きを再現: import → mount → flush
+  const module = await import(fakeGameModuleUrl());
+  const host = h.app.gameModuleHost();
+  h.app.gameModuleState.gameId = "fixture";
+  h.app.gameModuleState.handle = module.mount(host, h.app.gameModuleApi());
+  h.app.flushGameView();
+
+  const calls = h.app.gameModuleState.handle.calls;
+  assertEquals(calls.updates.length, 1, "mount 後に初回 view が渡っていない");
+  assertEquals(calls.updates[0].view, view);
+});
+
+Deno.test("app.js: pending の gameId が違うハンドルには渡さない（flushGameView の安全弁）", async () => {
+  const h = await load();
+  const module = await import(fakeGameModuleUrl());
+  h.app.gameModuleState.gameId = "game-a";
+  h.app.gameModuleState.handle = module.mount(h.app.gameModuleHost(), h.app.gameModuleApi());
+
+  h.app.gameModuleState.pending = { gameId: "game-b", view: { b: 1 }, deadline: null };
+  h.app.flushGameView();
+
+  assertEquals(
+    h.app.gameModuleState.handle.calls.updates.length,
+    0,
+    "別ゲーム宛の pending をそのまま渡してしまっている",
+  );
+});
+
+Deno.test("app.js: ゲームを切り替えても、前のゲームの view が新しいゲームへ混入しない", async () => {
+  const h = await load();
+
+  // ゲームAが動いていて、view を1件受け取り済み
+  const moduleA = await import(fakeGameModuleUrl());
+  h.app.gameModuleState.gameId = "game-a";
+  h.app.gameModuleState.handle = moduleA.mount(h.app.gameModuleHost(), h.app.gameModuleApi());
+  const handleA = h.app.gameModuleState.handle;
+  h.app.applyGameView("game-a", { a: 1 }, null);
+  assertEquals(handleA.calls.updates.length, 1);
+
+  // サーバーからゲームBへの切り替え相当の gameView が届く
+  // （loadGameModule が行う「pending を積む → 前のモジュールを片付ける」を再現）
+  const viewB = { b: 2 };
+  h.app.gameModuleState.pending = { gameId: "game-b", view: viewB, deadline: null };
+  h.app.unmountGameModule();
+
+  // 前のハンドルAはもう state から外れているので、Bの view を受け取ってはいけない
+  assertEquals(handleA.calls.updates.length, 1, "前のゲームのハンドルにBの view が渡った");
+  assertEquals(handleA.calls.unmounted, true, "前のハンドルが片付けられていない");
+
+  // Bの mount が完了する
+  const moduleB = await import(fakeGameModuleUrl());
+  h.app.gameModuleState.gameId = "game-b";
+  h.app.gameModuleState.handle = moduleB.mount(h.app.gameModuleHost(), h.app.gameModuleApi());
+  h.app.flushGameView();
+
+  assertEquals(
+    h.app.gameModuleState.handle.calls.updates.length,
+    1,
+    "新しいゲームに初回 view が渡っていない",
+  );
+  assertEquals(h.app.gameModuleState.handle.calls.updates[0].view, viewB);
+  assertEquals(handleA.calls.updates.length, 1, "古いハンドルに view が漏れている");
+});
+
+Deno.test("app.js: 同じゲームに view が繰り返し届く経路は壊れていない", async () => {
+  const h = await load();
+  const module = await import(fakeGameModuleUrl());
+  h.app.gameModuleState.gameId = "game-a";
+  h.app.gameModuleState.handle = module.mount(h.app.gameModuleHost(), h.app.gameModuleApi());
+
+  h.app.applyGameView("game-a", { n: 1 }, null);
+  h.app.applyGameView("game-a", { n: 2 }, null);
+  h.app.applyGameView("game-a", { n: 3 }, null);
+
+  const updates = h.app.gameModuleState.handle.calls.updates;
+  assertEquals(updates.map((u: { view: unknown }) => u.view), [{ n: 1 }, { n: 2 }, { n: 3 }]);
 });
 
 Deno.test("app.js: 保留中の卓作成と保留中の入室が両方あれば卓作成を優先する", async () => {

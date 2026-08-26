@@ -244,10 +244,14 @@
         }
       }
 
+      /* 遷移画面。暗転ではなく「暖簾をくぐった先の景色」を出す。
+         3D の背景板（noren-scene.js）と entrance.html の到着も同じ
+         assets/interior.svg を使うので、3つが同じ店として繋がる。
+         下に置いた地の色は、絵が届かなかったときの受け皿 */
       #enter-overlay {
         position: fixed;
         inset: 0;
-        background: linear-gradient(180deg, rgba(44, 32, 22, 0.98), rgba(20, 14, 9, 0.98));
+        background: #150d07 url("./assets/interior.svg") center / cover no-repeat;
         opacity: 0;
         pointer-events: none;
         transition: opacity 400ms ease-in;

@@ -61,6 +61,8 @@ import * as THREE from "/vendor/three/three.module.min.js";
 import { GLTFLoader } from "/vendor/three/GLTFLoader.js";
 
 const MODEL_URL = "/assets/noren.glb";
+/** 暖簾をくぐった先の景色。login.html / entrance.html と共有する正本 */
+const INTERIOR_URL = "/assets/interior.svg";
 
 // ── 時間割（ミリ秒） ────────────────────────────────────
 // 合計 2.6 秒。以前は 5.667 秒で、うち 2.45 秒が完全な静止画だった。
@@ -167,6 +169,9 @@ function supportsWebGL() {
 export async function preloadNorenIntro() {
   if (!supportsWebGL()) return false;
   try {
+    // 店内の絵も先に取りに行く。歩き終わりに間に合わないと、いちばん見せたい
+    // ところが無地の暗がりになる。待たないのは、glb さえあれば演出は始められるため
+    loadInteriorTexture();
     await loadModel();
     return true;
   } catch {
@@ -337,87 +342,29 @@ function buildFabricTexture(width, height) {
 /**
  * 扉の向こうの店内。
  *
- * このモデルは z が -0.73 までしか無い薄い書き割りで、戸を開けると
- * 背景の黒がそのまま覗いていた。部屋を作り込む必要はない（半秒しか映らない）
- * ので、ぼかした提灯と、奥に続く廊下の明暗だけを 1 枚に描いて立てる。
+ * 中身は public/assets/interior.svg が持つ。あの1枚が「くぐった先の景色」の
+ * 正本で、ここ（3D の背景板）と、login.html の遷移画面と、entrance.html の
+ * 到着の3か所から同じ絵として使う。3つがずれると「くぐった先」と「遷移画面」と
+ * 「着いた先」が別の店に見えてしまうため、絵は1枚しか持たない。
  *
- * ## どこに描くかは、画角から逆算する
+ * canvas で描いていたのをやめたのは、遷移画面（CSS）と共有できないから。
+ * SVG なら three は <img> 経由でテクスチャにでき、CSS は background-image に
+ * できる。同じファイルなので、色を変えても3か所が勝手に揃う。
  *
- * この板（6 × 4.2、中心 (0, 1.5, -3.0)）のうち画面に入るのはごく一部。
- * カメラが立ち止まる (0, 1.35, -1.2) から見える範囲を実測すると:
- *
- *   ・横長のウィンドウ … u ∈ [0.331, 0.669]（applyCoverFov が水平画角を
- *     固定するので、どれだけ横長でもここは変わらない）
- *   ・縦長のウィンドウ … u ∈ [0.44, 0.56] まで狭まる
- *   ・上下は canvas の y ∈ [0.41, 0.67] あたり
- *
- * 最初はここを外していて、提灯 2 つがどちらも枠の外に出ていた。歩き終えた
- * 最後の 1 秒——いちばん「明るい方へ入っていく」を効かせたい瞬間——が、
- * ただの暗い茶色になっていた。**絵は必ず中央の帯に置くこと。**
- * 板やカメラの終点を動かしたら、ここも measure し直す。
+ * 画面に入る範囲はウィンドウの縦横比で変わるので、3D と CSS を画素まで
+ * 合わせることはできない。合わせる代わりに「どこを切り取っても居酒屋の中に
+ * 見える」絵にしてある（詳細は interior.svg の冒頭）。
  */
-/** 画面に必ず入る帯（canvas の割合）。上のコメントの実測値 */
-const INTERIOR_SAFE_X = [0.44, 0.56];
-const INTERIOR_SAFE_Y = [0.42, 0.65];
+let cachedInteriorTexture = null;
 
-function buildInteriorTexture() {
-  const canvas = document.createElement("canvas");
-  canvas.width = 512;
-  canvas.height = 384;
-  const ctx = canvas.getContext("2d");
-
-  const midY = (INTERIOR_SAFE_Y[0] + INTERIOR_SAFE_Y[1]) / 2;
-
-  // 見える帯がいちばん明るくなるように、明るさの山を midY へ寄せる。
-  // ACES のトーンマッピング（露出 0.95）を通ると中間色はかなり沈むので、
-  // canvas 上ではやや強めに置いてちょうどいい
-  const base = ctx.createLinearGradient(0, 0, 0, canvas.height);
-  base.addColorStop(0.00, "#241608");
-  base.addColorStop(midY, "#573619");
-  base.addColorStop(1.00, "#1a1008");
-  ctx.fillStyle = base;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  const glow = (x, y, r, color) => {
-    const g = ctx.createRadialGradient(
-      canvas.width * x,
-      canvas.height * y,
-      0,
-      canvas.width * x,
-      canvas.height * y,
-      canvas.width * r,
-    );
-    g.addColorStop(0, color);
-    g.addColorStop(1, "rgba(255, 150, 70, 0)");
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-  };
-
-  // 奥全体の空気。縦長のウィンドウでもここだけは必ず映る
-  glow(0.5, midY, 0.34, "rgba(255, 176, 96, 0.22)");
-  // 提灯ふたつ。輪郭を描かずグラデーションだけにするのは、ピントの合っていない
-  // 奥として見せたいため。左右へ振る幅は安全帯の内側に収める
-  glow(INTERIOR_SAFE_X[0], midY + 0.03, 0.13, "rgba(255, 214, 150, 0.7)");
-  glow(INTERIOR_SAFE_X[1], midY - 0.04, 0.10, "rgba(255, 200, 132, 0.55)");
-
-  // 奥へ続く廊下の暗がり。見える帯の下に置いて「まだ床の先がある」に見せる。
-  // 帯の真ん中に置くと、最後の 1 秒が暗く沈んで何も無い絵になる
-  const depth = ctx.createRadialGradient(
-    canvas.width * 0.5,
-    canvas.height * (INTERIOR_SAFE_Y[1] + 0.14),
-    0,
-    canvas.width * 0.5,
-    canvas.height * (INTERIOR_SAFE_Y[1] + 0.14),
-    canvas.width * 0.26,
-  );
-  depth.addColorStop(0, "rgba(10, 6, 3, 0.7)");
-  depth.addColorStop(1, "rgba(10, 6, 3, 0)");
-  ctx.fillStyle = depth;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  return texture;
+function loadInteriorTexture() {
+  if (cachedInteriorTexture === null) {
+    // load() はテクスチャを即座に返し、画像が届いた時点で中身が入る。
+    // 待たないので、絵が遅れても演出の出だしは止まらない
+    cachedInteriorTexture = new THREE.TextureLoader().load(INTERIOR_URL);
+    cachedInteriorTexture.colorSpace = THREE.SRGBColorSpace;
+  }
+  return cachedInteriorTexture;
 }
 
 // ── シーンの組み立て ────────────────────────────────────
@@ -445,15 +392,34 @@ function buildBackdrop(scene) {
   scene.add(ground);
   disposables.push(groundGeo, groundMat);
 
-  const interiorTex = buildInteriorTexture();
-  const backGeo = new THREE.PlaneGeometry(6, 4.2);
+  // 店内の絵が届かない・板の外へ視界がはみ出す場合の受け皿。無地の暗がりを
+  // 一枚後ろに立てておくと、隙間から背景の黒が覗くことがなくなる
+  const voidGeo = new THREE.PlaneGeometry(9, 6);
+  const voidMat = new THREE.MeshBasicMaterial({ color: 0x150d07, toneMapped: false });
+  const backVoid = new THREE.Mesh(voidGeo, voidMat);
+  backVoid.position.set(0, 1.5, -3.4);
+  scene.add(backVoid);
+  disposables.push(voidGeo, voidMat);
+
+  // 店内。interior.svg は 1200x800（3:2）なので、板も同じ比にして歪ませない。
+  //
+  // 大きさと高さは「歩き終わりに何が正面に来るか」で決めてある。カメラは
+  // (0, 1.35, -1.2) で止まり、そこから見えるのはこの板の横 56% / 縦 45% ほど。
+  //
+  // 板を大きくすると絵が引き伸ばされて、見える範囲が狭まる（＝寄る）。
+  // 逆に小さくすると引くが、戸を通して見える範囲を覆えなくなる。3.6 x 2.4 が
+  // その折り合いで、中心を目線より下げてあるのは、切り取られる枠を絵の
+  // 上のほうへずらして提灯を入れるため。枠に入るのは提灯の下端・品書き・
+  // 棚の瓶・カウンターの天板。
+  const backGeo = new THREE.PlaneGeometry(3.6, 2.4);
   // 光を受けない板にする。奥は「明るい場所」であってほしいので、
   // こちら側のライトの届き方に左右させない
-  const backMat = new THREE.MeshBasicMaterial({ map: interiorTex, toneMapped: true });
+  const backMat = new THREE.MeshBasicMaterial({ map: loadInteriorTexture(), toneMapped: true });
   const back = new THREE.Mesh(backGeo, backMat);
-  back.position.set(0, 1.5, -3.0);
+  back.position.set(0, 1.30, -3.0);
   scene.add(back);
-  disposables.push(backGeo, backMat, interiorTex);
+  // テクスチャは使い回すので、ここでは捨てない（dispose() がまとめて片付ける）
+  disposables.push(backGeo, backMat);
 
   return disposables;
 }
@@ -832,6 +798,8 @@ export async function playNorenIntro(stageEl, options = {}) {
     }
     for (const d of extras) d.dispose();
     envTarget.dispose();
+    cachedInteriorTexture?.dispose();
+    cachedInteriorTexture = null;
     scene.environment = null;
     renderer.dispose();
     // これを呼ばないと WebGL のコンテキストがブラウザの上限（16 前後）まで

@@ -11,7 +11,7 @@
  *   GET /api/debug/events?limit=&kind=   ヘッダ x-debug-token
  *     → { events: [{ seq, at, kind, message, detail }] }
  *   GET /api/debug/summary               ヘッダ x-debug-token
- *     → { uptimeMs, serverTime, roomCount, rooms: [{ code, playerCount, phase, sandbox }] }
+ *     → { uptimeMs, serverTime, roomCount, rooms: [{ code, playerCount, phase }] }
  *   POST /api/debug/reset-limits         ヘッダ x-debug-token
  *     本文（省略可）: { ip?: string }（省略・空欄なら全IP対象）
  *     → { cleared: { login, register, profile }, scope: "ip" | "all" }
@@ -252,7 +252,7 @@
     table.className = "rooms-table";
     const thead = document.createElement("thead");
     const headRow = document.createElement("tr");
-    for (const label of ["卓コード", "人数", "フェーズ", "サンドボックス"]) {
+    for (const label of ["卓コード", "人数", "フェーズ"]) {
       headRow.appendChild(el("th", label));
     }
     thead.appendChild(headRow);
@@ -265,7 +265,6 @@
       row.appendChild(el("td", room.code ?? "-"));
       row.appendChild(el("td", typeof room.playerCount === "number" ? room.playerCount : "-"));
       row.appendChild(el("td", room.phase ?? "-"));
-      row.appendChild(el("td", room.sandbox ? "有" : "無"));
       tbody.appendChild(row);
     }
     table.appendChild(tbody);
