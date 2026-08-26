@@ -782,8 +782,16 @@ class WsTestClient {
     });
   }
 
-  static connect(port: number): Promise<WsTestClient> {
-    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  /**
+   * cookie を渡すとその Cookie ヘッダー付きでハンドシェイクする。
+   * 標準の WebSocket コンストラクタには headers 引数が無いため、integration_test.ts の
+   * TestClient と同じく Deno 独自拡張の第2引数 { headers } を使う。
+   */
+  static connect(port: number, cookie?: string): Promise<WsTestClient> {
+    const socket = cookie === undefined
+      ? new WebSocket(`ws://127.0.0.1:${port}/ws`)
+      // deno-lint-ignore no-explicit-any
+      : new WebSocket(`ws://127.0.0.1:${port}/ws`, { headers: { cookie } } as any);
     const client = new WsTestClient(socket);
     return new Promise((resolve, reject) => {
       socket.addEventListener("open", () => resolve(client), { once: true });
@@ -875,5 +883,109 @@ Deno.test("結合: sandboxSignal の連投は一般枠（20件/秒）を消費�
     assertEquals(client.closeCode, null, "一般枠の 20件/秒 では切断されていない");
   } finally {
     await handle.shutdown();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 壊れた Cookie ヘッダーの扱い（回帰）
+//
+// `getCookies()` は空文字・空白のみ・`"; ;"`・`"=abc"` の Cookie ヘッダーで例外を投げる。
+// セッションの取り出しが素の `getCookies()` だったころは、この例外がハンドラの外まで抜けて
+// 500 になっていた。とくに `/` はトップページなので、壊れた Cookie を送るブラウザや bot は
+// サイトを開くことすらできなかった。Cookie が無いのと同じ（＝未ログイン）扱いになること。
+// ---------------------------------------------------------------------------
+
+/** サーバーまで届く「壊れた Cookie ヘッダー」。空白のみは送信の途中で "" に詰められる */
+const BROKEN_COOKIES = ["", "   ", "; ;", "=abc"];
+
+/** login.html だけが持つ目印（static_test.ts と同じ要素を見る） */
+const LOGIN_HTML_MARKER = 'id="guest-link"';
+/** index.html だけが持つ目印 */
+const INDEX_HTML_MARKER = 'id="login-link"';
+
+// どのCookieでどこが落ちたか取り違えないよう、値ごとに1件ずつ立てる
+for (const cookie of BROKEN_COOKIES) {
+  const label = JSON.stringify(cookie);
+
+  Deno.test(`GET / は壊れたCookie ${label} でも500にせず login.html を返す（回帰）`, async () => {
+    const kv = await Deno.openKv(":memory:");
+    const handle = startServer(0, "127.0.0.1", kv);
+    try {
+      const res = await fetch(`http://127.0.0.1:${handle.port}/`, { headers: { cookie } });
+      assertEquals(res.status, 200);
+      const html = await res.text();
+      assert(html.includes(LOGIN_HTML_MARKER), "未ログイン扱いなので login.html が返ること");
+      assert(!html.includes(INDEX_HTML_MARKER), "index.html は返らないこと");
+    } finally {
+      await handle.shutdown();
+      kv.close();
+    }
+  });
+
+  Deno.test(
+    `PATCH /api/rooms/{code} は壊れたCookie ${label} を500ではなく401で返す（回帰）`,
+    async () => {
+      const kv = await Deno.openKv(":memory:");
+      const handle = startServer(0, "127.0.0.1", kv);
+      try {
+        // セッションの判定はルームを探すより前なので、実在しないコードでも 401 まで到達する
+        const res = await fetch(`http://127.0.0.1:${handle.port}/api/rooms/000000`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json", cookie },
+          body: JSON.stringify({ description: "ひとこと", tags: [] }),
+        });
+        await res.body?.cancel();
+        assertEquals(res.status, 401);
+      } finally {
+        await handle.shutdown();
+        kv.close();
+      }
+    },
+  );
+
+  Deno.test(
+    `GET /ws は壊れたCookie ${label} でも500にせず未ログインとして接続できる（回帰）`,
+    async () => {
+      const kv = await Deno.openKv(":memory:");
+      const handle = startServer(0, "127.0.0.1", kv);
+      // 接続できずに 500 が返ると connect が reject する（＝このテストが落ちる）
+      const client = await WsTestClient.connect(handle.port, cookie);
+      try {
+        assertEquals(client.closeCode, null, "アップグレードは成立すること");
+        // userId が null のときと同じ道を通る（ルーム作成にはログインが要る）
+        client.send({ t: "createRoom", nickname: "たろう", visibility: "private" });
+        await waitUntil(() => client.countError("AUTH_REQUIRED") >= 1, "AUTH_REQUIRED の受信");
+      } finally {
+        await handle.shutdown();
+        kv.close();
+      }
+    },
+  );
+}
+
+Deno.test("GET / は正しいCookieでログイン済みなら従来どおり index.html を返す", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const handle = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${handle.port}`;
+    const registerRes = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        userId: "u" + crypto.randomUUID().replace(/-/g, "").slice(0, 10),
+        password: "correcthorse",
+      }),
+    });
+    assertEquals(registerRes.status, 200);
+    const cookie = registerRes.headers.get("set-cookie")?.split(";")[0];
+    assertExists(cookie);
+
+    const res = await fetch(`${base}/`, { headers: { cookie } });
+    assertEquals(res.status, 200);
+    const html = await res.text();
+    assert(html.includes(INDEX_HTML_MARKER), "ログイン済みなら index.html が返ること");
+  } finally {
+    await handle.shutdown();
+    kv.close();
   }
 });
