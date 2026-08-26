@@ -355,6 +355,122 @@ function connect() {
 }
 
 /**
+ * ノックの状態（§3.1.1）。
+ *
+ * 申請者は卓に入っていないので、snapshot ではここが唯一の手がかりになる。
+ * 承認されたら entryToken を添えて join し直す（それが §3.1.1 の入室経路）。
+ */
+const knockState = { roomCode: null, nickname: "" };
+
+/** 公開・承認制の卓にノックする。一覧（rooms.js）の「ノックする」から呼ぶ */
+function knockRoom(roomCode) {
+  state.rejoinAfterRestart = false;
+  pendingRoomMeta = null;
+  const nickname = $("nickname").value.trim();
+  if (nickname.length === 0) {
+    // 承認するホストは名前しか手がかりが無いので、ここだけは省略させない
+    showError("ノックにはあだ名が要ります。先に入力してください");
+    return;
+  }
+  knockState.roomCode = roomCode;
+  knockState.nickname = nickname;
+  const msg = { t: "knock", roomCode, nickname };
+  // 前にこの卓へ関わったときのトークンがあれば渡す（ブロック判定に使われる）
+  const saved = store.load();
+  if (saved !== null && saved.code === roomCode) msg.session = saved.session;
+  send(msg);
+  showNotice("ノックしました。ホストが気づくまでお待ちください（60秒）");
+}
+
+/** ノックの返事。通れば entryToken を添えてそのまま入室する */
+function handleKnockResult(msg) {
+  const roomCode = msg.roomCode ?? knockState.roomCode;
+  if (!msg.accepted || roomCode === null || msg.entryToken === undefined) {
+    knockState.roomCode = null;
+    showError("入店をお断りされました（時間切れの場合もあります）");
+    return;
+  }
+  showNotice("通していただけました。入店します");
+  send({
+    t: "join",
+    roomCode,
+    nickname: knockState.nickname,
+    entryToken: msg.entryToken,
+  });
+  knockState.roomCode = null;
+}
+
+/** ホストの手元に、表で待っている人を出す（§3.2 原則3 によりホストにしか届かない） */
+function renderKnocks(snapshot) {
+  const box = $("knocks");
+  const list = $("knocks-list");
+  const knocks = Array.isArray(snapshot.pendingKnocks) ? snapshot.pendingKnocks : [];
+  box.classList.toggle("hidden", knocks.length === 0);
+  clear(list);
+  const full = snapshot.players.length >= snapshot.capacity;
+  for (const knock of knocks) {
+    const row = el("li");
+    row.appendChild(el("span", knock.nickname));
+    const actions = el("div", undefined, "knock-actions");
+    const ok = el("button", full ? "満席" : "通す", "btn btn-gold btn-mini");
+    ok.type = "button";
+    // 満席のあいだは通せない。申請は残るので、誰かが抜けたら押せるようになる（§3.1）
+    ok.disabled = full;
+    ok.addEventListener("click", () => send({ t: "approveKnock", knockId: knock.knockId }));
+    const no = el("button", "お断り", "btn btn-mini");
+    no.type = "button";
+    no.addEventListener("click", () => send({ t: "rejectKnock", knockId: knock.knockId }));
+    actions.appendChild(ok);
+    actions.appendChild(no);
+    row.appendChild(actions);
+    list.appendChild(row);
+  }
+}
+
+/**
+ * ランダムマッチ（§3.1.2）の待機状態。
+ * サーバーが唯一の状態機械なので、ここは表示のためだけに持つ。
+ */
+let queueWaiting = false;
+
+/** 待機表示を出し入れする */
+function renderQueue(text) {
+  queueWaiting = text !== null;
+  $("queue-waiting").classList.toggle("hidden", !queueWaiting);
+  $("queue-join").disabled = queueWaiting;
+  if (text !== null) $("queue-status").textContent = text;
+}
+
+/** 相席の待機列に並ぶ。あだ名は空欄でよい（しゅんぴが二つ名を付ける） */
+function joinQueue() {
+  state.rejoinAfterRestart = false;
+  pendingRoomMeta = null;
+  const msg = { t: "joinQueue" };
+  const nickname = $("nickname").value.trim();
+  if (nickname.length > 0) msg.nickname = nickname;
+  send(msg);
+  renderQueue("席を探しています…");
+}
+
+/** 待機列から抜ける */
+function leaveQueue() {
+  send({ t: "leaveQueue" });
+  renderQueue(null);
+  showError("");
+}
+
+/** 待っている人数の目安と、次に席が合うまでの見込みを出す */
+function handleQueueStatus(msg) {
+  if (!queueWaiting) return;
+  const seconds = Math.max(0, Math.round((msg.nextCheckAt - Date.now()) / 1000));
+  const others = Math.max(0, msg.waiting - 1);
+  const company = others === 0
+    ? "いまはあなただけです"
+    : `ほかに${others}人が探しています`;
+  renderQueue(`席を探しています…（${company}／次の見合わせまで約${seconds}秒）`);
+}
+
+/**
  * 「お引き取り」を押した相手と、その待ち受けを捨てるタイマー。
  * 一度押しただけでは送らず、二度目で確定させる（§3.1）。
  */
@@ -403,6 +519,7 @@ function confirmKick(player) {
  */
 function resetToEntry() {
   store.drop();
+  renderQueue(null);
   clearPendingKick();
   // 卓を出たらざわめきも止める。一覧に戻ったのに店内の音が続くと居場所が分からない
   Sound.stop("gaya");
@@ -481,6 +598,21 @@ function receive(msg) {
       break;
     case "finalResult":
       renderScores("最終結果", msg.scores);
+      break;
+    case "queueStatus":
+      handleQueueStatus(msg);
+      break;
+    case "matched":
+      // 直後に roomState が続くので、ここでは待機表示を畳むだけでよい
+      renderQueue(null);
+      showNotice("相席が決まりました。入店します");
+      break;
+    case "knockResult":
+      handleKnockResult(msg);
+      break;
+    case "knockRequest":
+      // 申請そのものはスナップショットで届くので、ここでは気づかせるだけ
+      showNotice(`${msg.nickname} さんが表でノックしています`);
       break;
     case "kicked": {
       // キックされた卓のトークンは残す。捨てると次に入り直すときに提示できず、
@@ -592,6 +724,8 @@ function renderAll() {
     }
     players.appendChild(row);
   }
+
+  renderKnocks(snapshot);
 
   const inLobby = state.phase === "lobby";
   $("lobby-controls").classList.toggle("hidden", !inLobby);
@@ -1362,13 +1496,43 @@ function bind() {
     const msg = { t: "createRoom", nickname: $("nickname").value, visibility };
     if (visibility === "public") {
       msg.roomName = $("room-name").value;
+      // 承認制は一覧に出す卓にだけ付く（§3.1.1）
+      const entryMode = $("entry-mode").value === "knock" ? "knock" : "open";
+      if (entryMode === "knock") msg.entryMode = entryMode;
       pendingRoomMeta = {
         description: $("room-description").value,
         tags: checkedRoomTagIds(),
       };
     } else {
       pendingRoomMeta = null;
+      // 合言葉は招待制の卓にだけ付く（§3.1）。空欄なら積まない
+      const passphrase = $("new-passphrase").value.trim();
+      if (passphrase.length > 0) msg.passphrase = passphrase;
     }
+    send(msg);
+  });
+
+  // 誰に見せるかに合わせて合言葉欄を出し入れする。公開の卓に出したままだと、
+  // 付けられるように見えてサーバーに弾かれるだけになる
+  const syncPassphraseField = () => {
+    const isPrivate = $("visibility").value === "private";
+    $("new-passphrase-field").classList.toggle("hidden", !isPrivate);
+    // 入店のしかたは一覧に出す卓だけの話。招待制ではコードか合言葉で入る
+    $("entry-mode-field").classList.toggle("hidden", isPrivate);
+  };
+  $("visibility").addEventListener("change", syncPassphraseField);
+  syncPassphraseField();
+
+  $("queue-join").addEventListener("click", joinQueue);
+  $("queue-leave").addEventListener("click", leaveQueue);
+
+  $("join-passphrase").addEventListener("click", () => {
+    state.rejoinAfterRestart = false;
+    pendingRoomMeta = null;
+    // コードは積まない。合言葉だけで卓を引く（§3.1）
+    const msg = { t: "join", passphrase: $("passphrase").value };
+    const nickname = $("nickname").value.trim();
+    if (nickname.length > 0) msg.nickname = nickname;
     send(msg);
   });
   $("join").addEventListener("click", () => {
@@ -1437,6 +1601,10 @@ function bind() {
     },
   });
 }
+
+// 一覧（rooms.js）からノックできるようにする。app.js は classic script なので、
+// 同じグローバルに置くだけで届く
+globalThis.knockRoom = knockRoom;
 
 /** 起動する。ICE 設定を先に取ってから VC を初期化する */
 async function start() {

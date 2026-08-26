@@ -15,8 +15,10 @@
  * await を書かない。
  *
  * 軽量スコープ: createRoom の認証必須化（AUTH_REQUIRED）は実装済み。
- * 公開ルームは「オープン入室」まで実装済み（作成・一覧・コードだけでの入室）。
- * 承認制（ノック）・importGame・24時間自動削除は未実装。
+ * 公開ルームはオープン入室と承認制（ノック・§3.1.1）の両方に対応する。
+ * 招待制ルームは6桁コードと合言葉（§3.1）のどちらでも入れる。
+ * ランダムマッチ（§3.1.2）の待機列もここで持つ。
+ * ホストによるキック（§3.1）も実装済み。importGame・24時間自動削除は未実装。
  * 接続点は `TODO(チーム分担)` として記してある。
  * VC は rtcSignal の中継のみを受け持つ（§3.6。接続の確立はクライアント側）。
  * §3.8 の WS レート制限（1接続あたり 20件/秒）は main.ts の WebSocket 層で実装済み。
@@ -30,9 +32,21 @@ import {
   CHAT_TEXT_MAX,
   type ChatMessage,
   DISCONNECT_GRACE_MS,
+  ENTRY_TOKEN_TTL_MS,
   err,
   type ErrorCode,
+  type Knock,
+  KNOCK_RATE_WINDOW_MS,
+  KNOCK_TTL_MS,
+  type KnockPublic,
+  MATCH_GROUP_MAX,
+  MATCH_GROUP_MIN,
+  MATCH_INTERVAL_MS,
+  MATCH_QUEUE_MAX,
   ok,
+  PASSPHRASE_MAX,
+  PASSPHRASE_MIN,
+  PENDING_KNOCK_MAX,
   type Phase,
   type PhaseDurations,
   type PhaseView,
@@ -45,6 +59,7 @@ import {
   ROOM_CODE_LENGTH,
   ROOM_DESCRIPTION_MAX,
   ROOM_NAME_MAX,
+  type RoomEntryMode,
   type RoomSnapshot,
   type S2C,
   SANDBOX_PAYLOAD_MAX_BYTES,
@@ -228,6 +243,8 @@ type RoomEntry = {
   graceTimers: Map<string, TimerHandle>;
   /** チャットのレート制限用。playerId → 判定窓内の発言時刻（古い順、§3.9） */
   chatTimes: Map<string, number[]>;
+  /** ノックのレート制限（§3.8）。接続ID → 直近のノック時刻 */
+  knockTimes: Map<string, number>;
   /** 文字起こしのレート制限用。playerId → 判定窓内の受信時刻（古い順、docs/design/bot-voice.md） */
   voiceTimes: Map<string, number[]>;
   /** bot 3体の状態（§3.10） */
@@ -250,6 +267,24 @@ type LinkState = {
 
 /** 参加者をルームから外す理由 */
 type RemoveReason = "leave" | "graceExpired" | "kick";
+
+/** 相席を待っている人（§3.1.2） */
+type Waiting = {
+  link: ClientLink;
+  /** 省略された場合は undefined。成立時に しゅんぴ が二つ名を付ける */
+  nickname: string | undefined;
+  joinedAt: number;
+};
+
+/** ノック中の申請者。返事を届けるのと、時間切れを畳むために持つ */
+type KnockerState = {
+  link: ClientLink;
+  roomCode: string;
+  /** 申請者に割り当てたセッショントークン。承認されたらそのまま入室に使う */
+  sessionToken: string;
+  /** 自動拒否のタイマー */
+  timer: TimerHandle;
+};
 
 // ---------------------------------------------------------------------------
 // 入力検証
@@ -278,6 +313,40 @@ export function validateChatText(input: unknown): Result<string> {
  * 公開ルームのルーム名を検証して正規化する（1..20文字・制御文字禁止、§3.1）。
  * 一覧は未ログインでも見えるので、ここを通った文字列だけが外に出る。
  */
+/**
+ * 合言葉を検証して正規化する（4〜20文字・制御文字禁止、§3.1）。
+ *
+ * 口頭やチャットで伝えられる前提なので、前後の空白は落とす。
+ * 中の空白は残す（「さくら 三番」のような合言葉を許すため）。
+ */
+export function validatePassphrase(input: unknown): Result<string> {
+  if (typeof input !== "string") {
+    return err("INVALID_INPUT", "合言葉を入力してください");
+  }
+  const trimmed = input.trim();
+  const length = charLength(trimmed);
+  if (length < PASSPHRASE_MIN) {
+    return err("INVALID_INPUT", `合言葉は${PASSPHRASE_MIN}文字以上で入力してください`);
+  }
+  if (length > PASSPHRASE_MAX) {
+    return err("INVALID_INPUT", `合言葉は${PASSPHRASE_MAX}文字以内で入力してください`);
+  }
+  if (hasControlChar(trimmed)) {
+    return err("INVALID_INPUT", "合言葉に使用できない文字が含まれています");
+  }
+  return ok(trimmed);
+}
+
+/**
+ * 合言葉の突き合わせに使う鍵。
+ *
+ * 大文字小文字の違いで別の卓になると、口頭で伝えたときに入れない事故が起きる。
+ * 一意判定も入室の照合も、この鍵で行う。
+ */
+export function passphraseKey(passphrase: string): string {
+  return passphrase.toLowerCase();
+}
+
 export function validateRoomName(input: unknown): Result<string> {
   if (typeof input !== "string") {
     return err("INVALID_INPUT", "ルーム名を入力してください");
@@ -349,6 +418,24 @@ export type SetRoomMetaResult =
 export class RoomManager {
   private readonly rooms = new Map<string, RoomEntry>();
   private readonly links = new Map<string, LinkState>();
+  /**
+   * 合言葉 → 6桁コードの索引（§3.1）。
+   * 全ルーム横断で一意にするためと、入室時に卓を引くために持つ。
+   * 鍵は passphraseKey（小文字化）で、卓を消すときに必ず解放する
+   */
+  private readonly passphrases = new Map<string, string>();
+  /**
+   * ノック中の申請者（§3.1.1）。knockId → 申請者の接続。
+   * 申請者はまだ卓に居ないので links には載らない。承認・拒否・時間切れの返事を
+   * 届けるためにここで持つ。返事を送ったら必ず消す
+   */
+  private readonly knockers = new Map<string, KnockerState>();
+  /** ランダムマッチの待機列（§3.1.2）。並んだ順を保つので配列で持つ */
+  private readonly queue: Waiting[] = [];
+  /** 成立判定のタイマー。誰も待っていない間は張らない */
+  private matchTimer: TimerHandle | null = null;
+  /** 次の成立判定の時刻。待っている人への表示に使う */
+  private matchDeadline: number | null = null;
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => TimerHandle;
   private readonly clearTimer: (handle: TimerHandle) => void;
@@ -420,6 +507,7 @@ export class RoomManager {
         playerCount: room.players.size,
         capacity: ROOM_CAPACITY,
         playing: game !== null && game.phase !== "lobby",
+        entryMode: room.entryMode,
         createdAt: room.createdAt,
       };
       // 選択中のゲームは「何をして遊んでいる卓か」の手がかりとして出す。
@@ -446,6 +534,20 @@ export class RoomManager {
       this.handleJoin(link, msg);
       return;
     }
+    // ノックは卓の外から届く（§3.1.1）。links に載っていないので join と同じ扱いにする
+    if (msg.t === "knock") {
+      this.handleKnock(link, msg);
+      return;
+    }
+    // 相席の待機列も卓の外の話（§3.1.2）
+    if (msg.t === "joinQueue") {
+      this.handleJoinQueue(link, msg);
+      return;
+    }
+    if (msg.t === "leaveQueue") {
+      this.handleLeaveQueue(link);
+      return;
+    }
     const state = this.links.get(link.id);
     if (state === undefined) {
       sendError(link, "ROOM_NOT_FOUND", "ルームに参加していません");
@@ -456,6 +558,10 @@ export class RoomManager {
 
   /** WebSocket が閉じたときの処理（§3.2: 60秒はセッションを保持する） */
   disconnect(link: ClientLink): void {
+    // 待機列に並んだまま切れた人を残さない（§3.1.2）
+    if (this.removeFromQueue(link)) this.sendQueueStatus();
+    // ノックしたまま切れた人も残さない（§3.1.1）
+    this.dropKnocksFrom(link);
     const state = this.links.get(link.id);
     if (state === undefined) return;
     this.links.delete(link.id);
@@ -500,8 +606,15 @@ export class RoomManager {
     for (const entry of [...this.rooms.values()]) {
       this.clearRoomTimers(entry);
     }
+    // ノックの自動拒否タイマーは卓ではなく knockers 側にぶら下がっている。
+    // 残すとテストが「タイマーが片付いていない」で落ちるし、本番でも漏れになる
+    for (const knocker of this.knockers.values()) this.clearTimer(knocker.timer);
+    this.knockers.clear();
+    this.cancelMatchTimer();
+    this.queue.length = 0;
     this.rooms.clear();
     this.links.clear();
+    this.passphrases.clear();
   }
 
   /**
@@ -571,6 +684,39 @@ export class RoomManager {
       }
       roomName = validated.value;
     }
+    // 入室方式は公開ルームだけの概念（§3.1）。招待制はコードか合言葉で入るので、
+    // 承認を挟む余地がない
+    let entryMode: RoomEntryMode = "open";
+    if (msg.entryMode !== undefined) {
+      if (msg.entryMode !== "open" && msg.entryMode !== "knock") {
+        sendError(link, "INVALID_INPUT", "入室方式が不正です");
+        return;
+      }
+      if (msg.visibility !== "public" && msg.entryMode === "knock") {
+        sendError(link, "INVALID_INPUT", "承認制は一覧に出す卓にのみ設定できます");
+        return;
+      }
+      entryMode = msg.entryMode;
+    }
+    // 合言葉は招待制ルームのみ（§3.1）。公開ルームは一覧から入れるので意味がない
+    let passphrase: string | undefined;
+    if (msg.passphrase !== undefined) {
+      if (msg.visibility !== "private") {
+        sendError(link, "INVALID_INPUT", "合言葉は招待制の卓にのみ付けられます");
+        return;
+      }
+      const validated = validatePassphrase(msg.passphrase);
+      if (!validated.ok) {
+        sendError(link, validated.code, validated.message);
+        return;
+      }
+      if (this.passphrases.has(passphraseKey(validated.value))) {
+        // 一意でないと、入力した合言葉がどの卓を指すのか決まらない（§3.1）
+        sendError(link, "DUPLICATE", "その合言葉はすでに使われています");
+        return;
+      }
+      passphrase = validated.value;
+    }
     const nickname = validateNickname(msg.nickname);
     if (!nickname.ok) {
       sendError(link, nickname.code, nickname.message);
@@ -591,6 +737,7 @@ export class RoomManager {
     const room: Room = {
       code,
       visibility: msg.visibility,
+      entryMode,
       ownerUserId: link.userId,
       hostId: host.id,
       players: new Map([[host.id, host]]),
@@ -605,6 +752,7 @@ export class RoomManager {
       createdAt: now,
       lastActiveAt: now,
       ...(roomName === undefined ? {} : { roomName }),
+      ...(passphrase === undefined ? {} : { passphrase }),
     };
     const entry: RoomEntry = {
       room,
@@ -614,16 +762,36 @@ export class RoomManager {
       phaseTimer: null,
       graceTimers: new Map(),
       chatTimes: new Map(),
+      knockTimes: new Map(),
       voiceTimes: new Map(),
       bot: createBotState(now),
       botTimer: null,
       botPollTimer: null,
     };
     this.rooms.set(code, entry);
+    if (passphrase !== undefined) this.passphrases.set(passphraseKey(passphrase), code);
     this.armBotTimer(entry);
     this.links.set(link.id, { link, roomCode: code, playerId: host.id });
     // TODO(チーム分担): §3.1 最終アクティビティから24時間で自動削除する掃除処理
     this.sendSnapshot(entry, host);
+  }
+
+  /**
+   * join の宛先を決める（§3.1）。
+   *
+   * 6桁コードと合言葉のどちらでも入れる。両方あればコードを優先する
+   * （URL や QR から来た人は、合言葉を知らなくても入れるべきなので）。
+   * どちらでも引けなければ null を返し、呼び出し側が ROOM_NOT_FOUND にする。
+   * 合言葉が違うのか卓が無いのかは区別せずに返す。区別できると、合言葉を
+   * 総当たりで試したときに「当たり」が分かってしまう
+   */
+  private resolveRoomCode(msg: Extract<C2S, { t: "join" }>): string | null {
+    const code = normalizeRoomCode(msg.roomCode);
+    if (code !== null) return code;
+    if (typeof msg.passphrase !== "string") return null;
+    const validated = validatePassphrase(msg.passphrase);
+    if (!validated.ok) return null;
+    return this.passphrases.get(passphraseKey(validated.value)) ?? null;
   }
 
   /** 招待制ルームへの参加。session 指定時は再接続として扱う（§3.2） */
@@ -632,7 +800,7 @@ export class RoomManager {
       sendError(link, "INVALID_INPUT", "すでにルームに参加しています");
       return;
     }
-    const code = normalizeRoomCode(msg.roomCode);
+    const code = this.resolveRoomCode(msg);
     if (code === null || !this.rooms.has(code)) {
       sendError(link, "ROOM_NOT_FOUND", "ルームが見つかりません");
       return;
@@ -645,6 +813,38 @@ export class RoomManager {
       }
       this.doJoin(entry, link, msg);
     });
+  }
+
+  /**
+   * 入室許可（entryToken）を検証して使い切る（§3.1.1）。
+   *
+   * 使用は1回限り・60秒で失効。ノック時のあだ名と一致していることも見る
+   * （承認された名前と違う名前で入られると、ホストが通した相手と別人になる）。
+   * 成功したら、その申請者に割り当ててあったセッショントークンを返す
+   */
+  private consumeEntryToken(
+    room: Room,
+    token: unknown,
+    nickname: string,
+    now: number,
+  ): Result<string> {
+    if (typeof token !== "string") {
+      return err("INVALID_TOKEN", "この卓に入るにはホストの承認が要ります");
+    }
+    const pending = room.pendingEntries.get(token);
+    if (pending === undefined || pending.used) {
+      return err("INVALID_TOKEN", "入室の許可が見つかりません。もう一度ノックしてください");
+    }
+    if (pending.expiresAt <= now) {
+      room.pendingEntries.delete(token);
+      return err("INVALID_TOKEN", "入室の許可の期限が切れました。もう一度ノックしてください");
+    }
+    if (pending.nickname !== nickname) {
+      return err("INVALID_TOKEN", "ノックしたときのあだ名と違います");
+    }
+    // 1回限り。使ったものは残さない
+    room.pendingEntries.delete(token);
+    return ok(pending.sessionToken);
   }
 
   /** 参加の本体。キューの中から呼ばれる */
@@ -690,7 +890,21 @@ export class RoomManager {
       sendError(link, "ROOM_FULL", `このルームは満員です（定員${ROOM_CAPACITY}人）`);
       return;
     }
+    // 承認制の卓は、承認の証（entryToken）が無いと入れない（§3.1.1）。
+    // 公開ルームは6桁コードを一覧に出さないので、コードだけでは通さない
+    let approvedSession: string | undefined;
+    if (room.visibility === "public" && room.entryMode === "knock") {
+      const consumed = this.consumeEntryToken(room, msg.entryToken, nicknameValue, now);
+      if (!consumed.ok) {
+        sendError(link, consumed.code, consumed.message);
+        return;
+      }
+      approvedSession = consumed.value;
+    }
     const player = this.newPlayer(nicknameValue);
+    // 承認された人には、ノック時に割り当てたトークンをそのまま持たせる。
+    // こうしておくと、キックされたあとに再ノックしてもブロックが効く
+    if (approvedSession !== undefined) player.sessionToken = approvedSession;
     room.players.set(player.id, player);
     room.lastActiveAt = now;
     entry.links.set(player.id, link);
@@ -852,10 +1066,14 @@ export class RoomManager {
       case "kick":
         this.handleKick(entry, state, msg);
         return;
-      // TODO(チーム分担): §3.1.1 knock / approveKnock / rejectKnock（公開ルーム）
-      case "knock":
       case "approveKnock":
+        this.handleApproveKnock(entry, state, msg);
+        return;
       case "rejectKnock":
+        this.handleRejectKnock(entry, state, msg);
+        return;
+      // knock は卓の外から届くので handle() の入口で処理する。ここへは来ない
+      case "knock":
       // TODO(チーム分担): §3.5 importGame（共有コードから availableGames に追加）
       case "importGame":
         sendError(state.link, "INVALID_INPUT", NOT_IMPLEMENTED_MESSAGE);
@@ -1152,6 +1370,410 @@ export class RoomManager {
   }
 
   /**
+   * 公開・承認制ルームへの入室申請（§3.1.1）。
+   *
+   * 申請者はまだ卓に居ないので、返事は knockers 経由で直接その接続へ送る。
+   * 申請者にはここでセッショントークンを割り当て、承認されたらそのまま入室に使う。
+   * こうしておくと、キックされた相手が再ノックしてきたときにブロックが効く。
+   */
+  private handleKnock(link: ClientLink, msg: Extract<C2S, { t: "knock" }>): void {
+    if (this.links.has(link.id)) {
+      sendError(link, "INVALID_INPUT", "すでにルームに参加しています");
+      return;
+    }
+    const code = normalizeRoomCode(msg.roomCode);
+    if (code === null) {
+      sendError(link, "ROOM_NOT_FOUND", "ルームが見つかりません");
+      return;
+    }
+    this.enqueue(code, () => {
+      const entry = this.rooms.get(code);
+      if (entry === undefined) {
+        sendError(link, "ROOM_NOT_FOUND", "ルームが見つかりません");
+        return;
+      }
+      const room = entry.room;
+      if (room.visibility !== "public" || room.entryMode !== "knock") {
+        // 承認を待つ必要がない卓。ノックではなく join で入ってもらう
+        sendError(link, "INVALID_INPUT", "この卓はノックなしで入れます");
+        return;
+      }
+      const nickname = validateNickname(msg.nickname);
+      if (!nickname.ok) {
+        sendError(link, nickname.code, nickname.message);
+        return;
+      }
+      // 名乗られた session は「前にこの卓へ関わった証」の自己申告でしかない。
+      // クライアントが自由に決められる値なので、**ブロックの照合にだけ**使う。
+      // 空文字は名乗っていないのと同じ扱いにする
+      const known = typeof msg.session === "string" && msg.session.length > 0
+        ? msg.session
+        : undefined;
+      if (known !== undefined && room.blockedSessions.has(known)) {
+        sendError(link, "BLOCKED", "この卓には入れません");
+        return;
+      }
+      // 1つの接続が同じ卓へ何度も申請しないよう、先の申請を数える（§3.8）
+      for (const knocker of this.knockers.values()) {
+        if (knocker.link.id === link.id && knocker.roomCode === code) {
+          sendError(link, "DUPLICATE", "すでにこの卓をノックしています");
+          return;
+        }
+      }
+      const now = this.now();
+      const recent = entry.knockTimes.get(link.id);
+      if (recent !== undefined && now - recent < KNOCK_RATE_WINDOW_MS) {
+        sendError(link, "RATE_LIMITED", "続けてノックはできません。少し待ってください");
+        return;
+      }
+      if (room.pendingKnocks.size >= PENDING_KNOCK_MAX) {
+        // ホストが捌ききれない数を溜めない（§3.8）
+        sendError(link, "RATE_LIMITED", "この卓は取り込み中です。時間をおいてください");
+        return;
+      }
+      const knockId = crypto.randomUUID();
+      const knock: Knock = {
+        knockId,
+        roomCode: code,
+        nickname: nickname.value,
+        // 必ずサーバーが新規発行する。名乗られた値を採ると、その値を知る第三者が
+        // join の session から reconnect でき、entryToken もホストの承認も無しに
+        // 入室できてしまう（doJoin は findBySession を entryToken 検査より前に見る）
+        sessionToken: crypto.randomUUID(),
+        createdAt: now,
+        expiresAt: now + KNOCK_TTL_MS,
+      };
+      room.pendingKnocks.set(knockId, knock);
+      entry.knockTimes.set(link.id, now);
+      this.knockers.set(knockId, {
+        link,
+        roomCode: code,
+        sessionToken: knock.sessionToken,
+        timer: this.setTimer(() => {
+          this.enqueue(code, () => this.expireKnock(code, knockId));
+        }, KNOCK_TTL_MS),
+      });
+      // 申請者一覧はホストにだけ見せる（§3.2 原則3）
+      this.sendToHost(entry, { t: "knockRequest", knockId, nickname: knock.nickname });
+      this.sendHostSnapshotRefresh(entry);
+    });
+  }
+
+  /** ホストが申請を通す（§3.1.1）。entryToken を発行して申請者へ渡す */
+  private handleApproveKnock(
+    entry: RoomEntry,
+    state: LinkState,
+    msg: Extract<C2S, { t: "approveKnock" }>,
+  ): void {
+    if (!this.requireHost(entry, state)) return;
+    const knock = this.takeKnockForHost(entry, state, msg.knockId, false);
+    if (knock === null) return;
+    // 満員の間は通せないが、申請は保留のまま残す（§3.1 の「満員時のノック承認」）。
+    // 誰かが抜けたら、そのまま承認し直せる
+    if (entry.room.players.size >= ROOM_CAPACITY) {
+      sendError(state.link, "ROOM_FULL", `このルームは満員です（定員${ROOM_CAPACITY}人）`);
+      return;
+    }
+    const knocker = this.knockers.get(msg.knockId);
+    entry.room.pendingKnocks.delete(msg.knockId);
+    if (knocker !== undefined) {
+      this.clearTimer(knocker.timer);
+      this.knockers.delete(msg.knockId);
+    }
+    const now = this.now();
+    const entryToken = crypto.randomUUID().replaceAll("-", "");
+    entry.room.pendingEntries.set(entryToken, {
+      entryToken,
+      nickname: knock.nickname,
+      sessionToken: knock.sessionToken,
+      issuedAt: now,
+      expiresAt: now + ENTRY_TOKEN_TTL_MS,
+      used: false,
+    });
+    knocker?.link.send({
+      t: "knockResult",
+      accepted: true,
+      roomCode: entry.room.code,
+      entryToken,
+    });
+    this.sendHostSnapshotRefresh(entry);
+  }
+
+  /** ホストが申請を断る（§3.1.1） */
+  private handleRejectKnock(
+    entry: RoomEntry,
+    state: LinkState,
+    msg: Extract<C2S, { t: "rejectKnock" }>,
+  ): void {
+    if (!this.requireHost(entry, state)) return;
+    if (this.takeKnockForHost(entry, state, msg.knockId, true) === null) return;
+    this.sendHostSnapshotRefresh(entry);
+  }
+
+  /**
+   * 保留中の申請を引く。remove が true なら取り下げて申請者へ拒否を返す。
+   * 見つからない場合はホストへエラーを返して null を返す
+   */
+  private takeKnockForHost(
+    entry: RoomEntry,
+    state: LinkState,
+    knockId: unknown,
+    remove: boolean,
+  ): Knock | null {
+    if (typeof knockId !== "string") {
+      sendError(state.link, "INVALID_INPUT", "申請の指定が正しくありません");
+      return null;
+    }
+    const knock = entry.room.pendingKnocks.get(knockId);
+    if (knock === undefined) {
+      // 時間切れ・取り下げ済み。ホストの手元の表示が古いだけなので静かに知らせる
+      sendError(state.link, "INVALID_INPUT", "その申請はすでにありません");
+      return null;
+    }
+    if (remove) {
+      entry.room.pendingKnocks.delete(knockId);
+      this.settleKnocker(knockId, { t: "knockResult", accepted: false });
+    }
+    return knock;
+  }
+
+  /** 60秒で自動的に断る（§3.1.1）。申請者には拒否と同じ返事を返す */
+  private expireKnock(code: string, knockId: string): void {
+    const entry = this.rooms.get(code);
+    entry?.room.pendingKnocks.delete(knockId);
+    this.settleKnocker(knockId, { t: "knockResult", accepted: false });
+    if (entry !== undefined) this.sendHostSnapshotRefresh(entry);
+  }
+
+  /**
+   * 切れた接続が出していたノックを畳む（§3.1.1）。
+   *
+   * 申請者は卓に入っていないので links に載らず、disconnect() の通常経路では
+   * 掃除されない。放置すると保留枠（PENDING_KNOCK_MAX）を占めたまま60秒残り、
+   * 使い捨ての接続から繰り返されると、承認制の卓へ誰も申請できなくなる。
+   * ホストの手元にも「承認しても届かない幽霊」が並び続ける。
+   */
+  private dropKnocksFrom(link: ClientLink): void {
+    for (const [knockId, knocker] of [...this.knockers]) {
+      if (knocker.link.id !== link.id) continue;
+      this.clearTimer(knocker.timer);
+      this.knockers.delete(knockId);
+      const code = knocker.roomCode;
+      this.enqueue(code, () => {
+        const entry = this.rooms.get(code);
+        if (entry === undefined) return;
+        // レート制限の記録も一緒に捨てる。接続IDごとに増えるだけで刈られないため
+        entry.knockTimes.delete(link.id);
+        if (!entry.room.pendingKnocks.delete(knockId)) return;
+        this.sendHostSnapshotRefresh(entry);
+      });
+    }
+  }
+
+  /** 申請者へ返事を送り、待ち受けを畳む */
+  private settleKnocker(knockId: string, msg: S2C): void {
+    const knocker = this.knockers.get(knockId);
+    if (knocker === undefined) return;
+    this.clearTimer(knocker.timer);
+    this.knockers.delete(knockId);
+    knocker.link.send(msg);
+  }
+
+  /**
+   * ランダムマッチの待機列に並ぶ（§3.1.2）。
+   *
+   * 卓の外から届くので join と同じ扱いにする。あだ名の扱いも join に合わせ、
+   * 省略されたら しゅんぴ の二つ名をマッチ成立時に付ける。
+   */
+  private handleJoinQueue(link: ClientLink, msg: Extract<C2S, { t: "joinQueue" }>): void {
+    if (this.links.has(link.id)) {
+      sendError(link, "INVALID_INPUT", "すでにルームに参加しています");
+      return;
+    }
+    if (this.queue.some((w) => w.link.id === link.id)) {
+      sendError(link, "DUPLICATE", "すでに相席を待っています");
+      return;
+    }
+    if (this.queue.length >= MATCH_QUEUE_MAX) {
+      sendError(link, "RATE_LIMITED", "いまは相席の待ちが多すぎます。時間をおいてください");
+      return;
+    }
+    let nickname: string | undefined;
+    if (msg.nickname !== undefined) {
+      const validated = validateNickname(msg.nickname);
+      if (!validated.ok) {
+        sendError(link, validated.code, validated.message);
+        return;
+      }
+      nickname = validated.value;
+    }
+    this.queue.push({ link, nickname, joinedAt: this.now() });
+    this.armMatchTimer();
+    this.sendQueueStatus();
+  }
+
+  /** 待機列から抜ける（§3.1.2）。並んでいなければ何もしない */
+  private handleLeaveQueue(link: ClientLink): void {
+    if (!this.removeFromQueue(link)) return;
+    this.sendQueueStatus();
+  }
+
+  /**
+   * 待機列から外す。切断時にも呼ぶ（§3.1.2「WS 切断で自動的に列から外れる」）。
+   * 実際に外れたときだけ true を返す
+   */
+  private removeFromQueue(link: ClientLink): boolean {
+    const at = this.queue.findIndex((w) => w.link.id === link.id);
+    if (at < 0) return false;
+    this.queue.splice(at, 1);
+    if (this.queue.length === 0) this.cancelMatchTimer();
+    return true;
+  }
+
+  /** 待っている人へいまの様子を配る。人数が変わるたびに送る */
+  private sendQueueStatus(): void {
+    const waiting = this.queue.length;
+    const nextCheckAt = this.matchDeadline ?? this.now() + MATCH_INTERVAL_MS;
+    for (const waiter of this.queue) {
+      waiter.link.send({ t: "queueStatus", waiting, nextCheckAt });
+    }
+  }
+
+  /** 成立判定のタイマーを張る。すでに動いていれば何もしない */
+  private armMatchTimer(): void {
+    if (this.matchTimer !== null) return;
+    this.matchDeadline = this.now() + MATCH_INTERVAL_MS;
+    this.matchTimer = this.setTimer(() => {
+      this.matchTimer = null;
+      this.matchDeadline = null;
+      this.runMatching();
+    }, MATCH_INTERVAL_MS);
+  }
+
+  private cancelMatchTimer(): void {
+    if (this.matchTimer === null) return;
+    this.clearTimer(this.matchTimer);
+    this.matchTimer = null;
+    this.matchDeadline = null;
+  }
+
+  /**
+   * 成立判定（§3.1.2）。
+   *
+   * 並んだ順に最大4人ずつ切り出し、2人以上そろったグループを成立させる。
+   * 端数（1人）は列に残して次の周期へ回す。待っている人が居る限りタイマーを張り直す。
+   */
+  private runMatching(): void {
+    while (this.queue.length >= MATCH_GROUP_MIN) {
+      const group = this.queue.splice(0, MATCH_GROUP_MAX);
+      // 途中で切れた接続を捨てる。捨てた結果1人になったら成立させない
+      // 待っている間に卓へ入った人は列から外す（切断は disconnect で外れている）
+      const alive = group.filter((w) => !this.links.has(w.link.id));
+      if (alive.length < MATCH_GROUP_MIN) {
+        // 生き残りは列の先頭へ戻して、次の周期でもう一度合わせる
+        this.queue.unshift(...alive);
+        break;
+      }
+      this.createMatchRoom(alive);
+    }
+    if (this.queue.length > 0) this.armMatchTimer();
+    this.sendQueueStatus();
+  }
+
+  /**
+   * マッチ専用ルームを作って全員を入れる（§3.1.2）。
+   *
+   * 一覧に載せず合言葉も持たないので、後から他人は入れない。ホストは先頭の1人。
+   * ownerUserId は空（システム生成）。それ以外は通常の卓と同じに扱う
+   */
+  private createMatchRoom(group: Waiting[]): void {
+    const code = this.allocateRoomCode();
+    if (code === null) {
+      for (const waiter of group) {
+        sendError(waiter.link, "INVALID_INPUT", "相席の席を用意できませんでした");
+      }
+      return;
+    }
+    const now = this.now();
+    const taken = new Set<string>();
+    const players = new Map<string, Player>();
+    const links = new Map<string, ClientLink>();
+    let hostId = "";
+    for (const waiter of group) {
+      // あだ名を省いた人には、ここで しゅんぴ の二つ名を付ける（§3.0 / §3.10）
+      const nickname = waiter.nickname ?? pickNickname(taken, this.rng);
+      taken.add(nickname);
+      const player = this.newPlayer(nickname);
+      if (hostId === "") hostId = player.id;
+      players.set(player.id, player);
+      links.set(player.id, waiter.link);
+    }
+    const room: Room = {
+      code,
+      // 一覧に載せない。載せると「後から他人が入れない」が守れない
+      visibility: "private",
+      entryMode: "open",
+      ownerUserId: "",
+      hostId,
+      players,
+      pendingKnocks: new Map(),
+      pendingEntries: new Map(),
+      blockedSessions: new Set(),
+      availableGames: new Map(OFFICIAL_GAMES.map((g) => [g.id, g])),
+      selectedGameId: null,
+      game: null,
+      chatHistory: [],
+      sandbox: null,
+      createdAt: now,
+      lastActiveAt: now,
+    };
+    const entry: RoomEntry = {
+      room,
+      links,
+      queue: [],
+      draining: false,
+      phaseTimer: null,
+      graceTimers: new Map(),
+      chatTimes: new Map(),
+      knockTimes: new Map(),
+      voiceTimes: new Map(),
+      bot: createBotState(now),
+      botTimer: null,
+      botPollTimer: null,
+    };
+    this.rooms.set(code, entry);
+    this.armBotTimer(entry);
+    for (const [playerId, link] of links) {
+      this.links.set(link.id, { link, roomCode: code, playerId });
+    }
+    // 先に成立を知らせてから中身を配る。roomState だけだと、待っていた人の画面で
+    // 「いつのまにか卓に居る」ことになって何が起きたか分からない
+    for (const link of links.values()) link.send({ t: "matched", roomCode: code });
+    for (const player of players.values()) {
+      this.sendSnapshot(entry, player);
+      this.applyBotEvent(entry, {
+        t: "playerJoined",
+        playerId: player.id,
+        nickname: player.nickname,
+      });
+    }
+  }
+
+  /** ホストの接続へ1件送る */
+  private sendToHost(entry: RoomEntry, msg: S2C): void {
+    entry.links.get(entry.room.hostId)?.send(msg);
+  }
+
+  /**
+   * 申請者一覧が変わったので、ホストにだけスナップショットを送り直す。
+   * pendingKnocks はホスト以外には載らないため、全員へ配る必要がない（§3.2 原則3）
+   */
+  private sendHostSnapshotRefresh(entry: RoomEntry): void {
+    const host = entry.room.players.get(entry.room.hostId);
+    if (host !== undefined) this.sendSnapshot(entry, host);
+  }
+
+  /**
    * ホストが参加者を退出させる（§3.1）。
    *
    * 相手の sessionToken をブロックリストへ入れ、あわせて「発行済みで未使用の入室許可
@@ -1184,11 +1806,12 @@ export class RoomManager {
       return;
     }
     room.blockedSessions.add(target.sessionToken);
-    // TODO(ノック実装者): 下の2つの掃除は sessionToken の突き合わせで動く。
-    // ノックを実装するときは、承認時に配ったトークンを入室した参加者へ
-    // 引き継がせること（player.sessionToken に入れる）。newPlayer() が毎回
-    // 新しい値を発行するため、引き継がないとここが何にもマッチせず、
-    // キックされた人が元のノック用トークンで再ノックできてしまう
+    // 下の2つの掃除は sessionToken の突き合わせで動く。ノック（§3.1.1）は
+    // 承認時に配ったトークンを入室した参加者へそのまま引き継ぐので
+    // （doJoin の approvedSession → player.sessionToken）、ここが正しく当たる。
+    // newPlayer() は毎回新しい値を発行するため、その引き継ぎをやめると
+    // ここが何にもマッチせず、キックされた人が元のノック用トークンで
+    // 再ノックできてしまう
     for (const [token, pending] of room.pendingEntries) {
       if (pending.sessionToken === target.sessionToken) room.pendingEntries.delete(token);
     }
@@ -1515,6 +2138,15 @@ export class RoomManager {
     entry.links.clear();
     entry.chatTimes.clear();
     entry.voiceTimes.clear();
+    // 待っている申請者を放置しない。卓が消えたのだから断りを返して畳む
+    for (const knockId of [...entry.room.pendingKnocks.keys()]) {
+      this.settleKnocker(knockId, { t: "knockResult", accepted: false });
+    }
+    entry.room.pendingKnocks.clear();
+    entry.knockTimes.clear();
+    // 合言葉を解放する。残したままだと、消えた卓の合言葉が永久に使えなくなる
+    const passphrase = entry.room.passphrase;
+    if (passphrase !== undefined) this.passphrases.delete(passphraseKey(passphrase));
     this.rooms.delete(entry.room.code);
   }
 
@@ -1613,7 +2245,16 @@ export class RoomManager {
     if (poll !== null) {
       snapshot.botPoll = { pollId: poll.id, deadline: poll.startedAt + END_POLL_MS };
     }
-    // TODO(チーム分担): §3.1.1 公開ルームではホストにのみ pendingKnocks を載せる
+    // 申請者一覧はホストにだけ載せる（§3.2 原則3）。
+    // 他の参加者に「誰が入りたがっているか」を見せる理由がない
+    if (snapshot.youAreHost && room.pendingKnocks.size > 0) {
+      snapshot.pendingKnocks = [...room.pendingKnocks.values()].map((k): KnockPublic => ({
+        knockId: k.knockId,
+        nickname: k.nickname,
+        createdAt: k.createdAt,
+        expiresAt: k.expiresAt,
+      }));
+    }
     return snapshot;
   }
 

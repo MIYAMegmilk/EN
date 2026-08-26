@@ -590,6 +590,69 @@
         overflow-wrap: anywhere;
       }
 
+      .queue-waiting {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-top: 7px;
+        padding: 8px 10px;
+        border: 1px solid var(--gold-3);
+        border-radius: var(--r-md);
+        background: rgba(230, 166, 63, 0.06);
+      }
+
+      .queue-waiting p {
+        margin: 0;
+        font-size: 12.5px;
+        color: var(--text);
+      }
+
+      .queue-waiting .btn {
+        flex: none;
+        padding: 5px 11px;
+        font-size: 12px;
+      }
+
+      .knocks {
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid var(--line-soft);
+      }
+
+      .knocks h3 {
+        margin: 0 0 6px;
+        font-size: 12px;
+        color: var(--gold);
+      }
+
+      #knocks-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+
+      #knocks-list li {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+        padding: 6px 9px;
+        border: 1px solid var(--line-soft);
+        border-radius: var(--r-md);
+        font-size: 12.5px;
+        overflow-wrap: anywhere;
+      }
+
+      #knocks-list .knock-actions {
+        display: flex;
+        flex: none;
+        gap: 5px;
+      }
+
       /*
        * お引き取り（§3.1）。ホストの行にだけ出る。
        * .btn そのままだと呑み手の一覧の中で大きすぎるので、ここだけ詰める。
@@ -1728,6 +1791,17 @@
             />
           </div>
 
+          <!-- いますぐ飲む（§3.1.2）。知らない人と自動で相席する -->
+          <div class="field">
+            <button id="queue-join" class="btn btn-gold btn-block" type="button">
+              いますぐ飲む（相席）
+            </button>
+            <div id="queue-waiting" class="queue-waiting hidden" role="status">
+              <p id="queue-status">席を探しています…</p>
+              <button id="queue-leave" class="btn btn-red" type="button">やめる</button>
+            </div>
+          </div>
+
           <div class="field">
             <label for="code">参加コード（数字6桁）</label>
             <div class="entry-join">
@@ -1740,6 +1814,21 @@
                 placeholder="123456"
               />
               <button id="join" class="btn" type="button">入店</button>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="passphrase">合言葉（4〜20文字）</label>
+            <!-- コードを知らなくても、合言葉だけで入れる（§3.1） -->
+            <div class="entry-join">
+              <input
+                class="input"
+                id="passphrase"
+                maxlength="20"
+                autocomplete="off"
+                placeholder="さくら三番"
+              />
+              <button id="join-passphrase" class="btn" type="button">入店</button>
             </div>
           </div>
 
@@ -1776,6 +1865,25 @@
                   <option value="public">お座敷一覧に出す（誰でも入店できる）</option>
                   <option value="private">一覧に出さない（コードを知っている人だけ）</option>
                 </select>
+              </div>
+              <!-- 承認制は一覧に出す卓にだけ付く（§3.1.1） -->
+              <div class="field" id="entry-mode-field">
+                <label for="entry-mode">入店のしかた</label>
+                <select class="input" id="entry-mode">
+                  <option value="open">そのまま入ってもらう</option>
+                  <option value="knock">ノックしてもらい、こちらで通す</option>
+                </select>
+              </div>
+              <!-- 合言葉は招待制の卓にだけ付く。app.js が誰に見せるかに合わせて出し入れする -->
+              <div class="field hidden" id="new-passphrase-field">
+                <label for="new-passphrase">合言葉（4〜20文字・任意）</label>
+                <input
+                  class="input"
+                  id="new-passphrase"
+                  maxlength="20"
+                  autocomplete="off"
+                  placeholder="付けるとコードなしで入れます"
+                />
               </div>
               <button id="create" class="btn btn-gold btn-block" type="button">卓を立てる</button>
             </div>
@@ -1897,6 +2005,11 @@
             <p id="room-meta"></p>
 
             <ul id="players"></ul>
+            <!-- ノックしてきた人（ホストのみ・§3.1.1）。中身は app.js が組み立てる -->
+            <section id="knocks" class="knocks hidden" aria-label="ノックしている人">
+              <h3>表で待っている人</h3>
+              <ul id="knocks-list"></ul>
+            </section>
 
             <div class="rail-foot">
               <!--
