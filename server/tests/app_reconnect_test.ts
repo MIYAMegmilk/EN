@@ -126,10 +126,15 @@ type PendingCreateRoom = {
   description?: string;
   tags: string[];
 };
-type RoomHandoffStub = { consumePendingCreateRoom: () => PendingCreateRoom | null };
+type PendingJoinRoom = { roomCode: string };
+type RoomHandoffStub = {
+  consumePendingCreateRoom: () => PendingCreateRoom | null;
+  consumePendingJoinRoom: () => PendingJoinRoom | null;
+};
 
 const DEFAULT_ROOM_HANDOFF: RoomHandoffStub = {
   consumePendingCreateRoom: () => null,
+  consumePendingJoinRoom: () => null,
 };
 
 /** app.js を偽の環境で読み込む */
@@ -521,7 +526,10 @@ Deno.test("app.js: 保留中の卓作成があれば接続確立時に自動で 
     description: "今夜は焼酎の会です",
     tags: ["drink"],
   };
-  const h = await load(DEFAULT_GUEST_PROFILE, { consumePendingCreateRoom: () => pending });
+  const h = await load(DEFAULT_GUEST_PROFILE, {
+    consumePendingCreateRoom: () => pending,
+    consumePendingJoinRoom: () => null,
+  });
   h.socket().open();
   const sent = h.socket().parsedSent();
   assertEquals(sent.length, 1);
@@ -532,7 +540,10 @@ Deno.test("app.js: 保留中の卓作成があれば接続確立時に自動で 
 });
 
 Deno.test("app.js: 保留中の卓作成が無ければ接続確立時に何も送らない", async () => {
-  const h = await load(DEFAULT_GUEST_PROFILE, { consumePendingCreateRoom: () => null });
+  const h = await load(DEFAULT_GUEST_PROFILE, {
+    consumePendingCreateRoom: () => null,
+    consumePendingJoinRoom: () => null,
+  });
   h.socket().open();
   assertEquals(h.socket().parsedSent().length, 0);
 });
@@ -540,6 +551,7 @@ Deno.test("app.js: 保留中の卓作成が無ければ接続確立時に何も�
 Deno.test("app.js: 再接続すべきセッションがある場合は卓の自動作成より join を優先する", async () => {
   const h = await load(DEFAULT_GUEST_PROFILE, {
     consumePendingCreateRoom: () => ({ nickname: "x", visibility: "private", tags: [] }),
+    consumePendingJoinRoom: () => null,
   });
   h.storage.set("en-session", JSON.stringify({ code: "654321", session: "sess-xyz" }));
   h.socket().open();
@@ -562,6 +574,7 @@ Deno.test(
         consumeCalls += 1;
         return { nickname: "x", visibility: "private", tags: [] };
       },
+      consumePendingJoinRoom: () => null,
     });
     h.storage.set("en-session", JSON.stringify({ code: "654321", session: "sess-xyz" }));
     h.socket().open();
@@ -579,7 +592,10 @@ Deno.test("app.js: 保留中の卓作成が private のときは roomName を送
     visibility: "private",
     tags: [],
   };
-  const h = await load(DEFAULT_GUEST_PROFILE, { consumePendingCreateRoom: () => pending });
+  const h = await load(DEFAULT_GUEST_PROFILE, {
+    consumePendingCreateRoom: () => pending,
+    consumePendingJoinRoom: () => null,
+  });
   h.socket().open();
   const sent = h.socket().parsedSent();
   assertEquals(sent.length, 1);
@@ -613,7 +629,10 @@ Deno.test(
       description: "今夜は焼酎の会です",
       tags: ["drink"],
     };
-    const h = await load(DEFAULT_GUEST_PROFILE, { consumePendingCreateRoom: () => pending });
+    const h = await load(DEFAULT_GUEST_PROFILE, {
+      consumePendingCreateRoom: () => pending,
+      consumePendingJoinRoom: () => null,
+    });
     h.socket().open();
     const sent = h.socket().parsedSent();
     assertEquals(sent.length, 1);
@@ -622,3 +641,49 @@ Deno.test(
     assertFalse(Object.hasOwn(sent[0], "tags"));
   },
 );
+
+Deno.test("app.js: corridor.html からの保留中の入室があれば接続確立時に自動で join を送る", async () => {
+  const h = await load(DEFAULT_GUEST_PROFILE, {
+    consumePendingCreateRoom: () => null,
+    consumePendingJoinRoom: () => ({ roomCode: "482913" }),
+  });
+  h.socket().open();
+  const sent = h.socket().parsedSent();
+  assertEquals(sent.length, 1);
+  assertEquals(sent[0].t, "join");
+  assertEquals(sent[0].roomCode, "482913");
+  assertFalse(Object.hasOwn(sent[0], "nickname"), "あだ名は集めていないので送らない");
+});
+
+Deno.test("app.js: 再接続すべきセッションがある場合は保留中の入室より join（復帰）を優先する", async () => {
+  let consumeCalls = 0;
+  const h = await load(DEFAULT_GUEST_PROFILE, {
+    consumePendingCreateRoom: () => null,
+    consumePendingJoinRoom: () => {
+      consumeCalls += 1;
+      return { roomCode: "482913" };
+    },
+  });
+  h.storage.set("en-session", JSON.stringify({ code: "654321", session: "sess-xyz" }));
+  h.socket().open();
+
+  assertEquals(
+    consumeCalls,
+    1,
+    "復帰が勝っても pendingJoin は消費されていなければならない（一回性）",
+  );
+  const sent = h.socket().parsedSent();
+  assertEquals(sent.length, 1, "復帰の join が勝ったので別の join は送られない");
+  assertEquals(sent[0].roomCode, "654321", "復帰先は保存済みセッションの卓のはず");
+});
+
+Deno.test("app.js: 保留中の卓作成と保留中の入室が両方あれば卓作成を優先する", async () => {
+  const h = await load(DEFAULT_GUEST_PROFILE, {
+    consumePendingCreateRoom: () => ({ nickname: "x", visibility: "private", tags: [] }),
+    consumePendingJoinRoom: () => ({ roomCode: "482913" }),
+  });
+  h.socket().open();
+  const sent = h.socket().parsedSent();
+  assertEquals(sent.length, 1);
+  assertEquals(sent[0].t, "createRoom");
+});

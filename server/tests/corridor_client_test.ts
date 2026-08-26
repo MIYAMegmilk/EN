@@ -1291,7 +1291,10 @@ Deno.test("corridor.html / index.html: インラインの script や on* 属性�
   // ESM は type="module" ＋ 絶対パスの import だけで読む。
   // 本番の CSP は default-src 'self' だけで script-src を別に持たないので、
   // 同一オリジンの絶対パスなら静的 import も動的 import も通る。
-  assertStringIncludes(indexSource, '<script type="module" src="./corridor.js">');
+  //
+  // index.html はもう corridor.js を読まない（3D をホームに埋め込むのをやめ、一覧専用にした）。
+  // corridor.html（standalone）だけが引き続き読む
+  assertStringIncludes(htmlSource, '<script type="module" src="./corridor.js">');
   assertStringIncludes(entrySource, `import("/assets/3d/corridor-view.js")`);
 });
 

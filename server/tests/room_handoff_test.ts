@@ -19,6 +19,7 @@ type PendingCreateRoom = {
   description?: string;
   tags: string[];
 };
+type PendingJoinRoom = { roomCode: string };
 type FakeSessionStorage = {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
@@ -29,6 +30,8 @@ type FakeSessionStorage = {
 function load(sessionStorage: FakeSessionStorage): {
   setPendingCreateRoom(payload: PendingCreateRoom): void;
   consumePendingCreateRoom(): PendingCreateRoom | null;
+  setPendingJoinRoom(payload: PendingJoinRoom): void;
+  consumePendingJoinRoom(): PendingJoinRoom | null;
 } {
   const fakeWindow: Record<string, unknown> = {};
   const factory = new Function(
@@ -143,4 +146,59 @@ Deno.test("room-handoff.js: sessionStorage が例外を投げても setPendingCr
   };
   const RoomHandoff = load(throwing);
   RoomHandoff.setPendingCreateRoom({ nickname: "x", visibility: "private", tags: [] });
+});
+
+Deno.test("room-handoff.js: pendingJoinRoom も未保存なら null を返す", () => {
+  const RoomHandoff = load(fakeSessionStorage());
+  assertEquals(RoomHandoff.consumePendingJoinRoom(), null);
+});
+
+Deno.test("room-handoff.js: pendingJoinRoom を1回だけ読み戻せる", () => {
+  const storage = fakeSessionStorage();
+  const RoomHandoff = load(storage);
+  RoomHandoff.setPendingJoinRoom({ roomCode: "482913" });
+  assertEquals(RoomHandoff.consumePendingJoinRoom(), { roomCode: "482913" });
+  // 2回目は消費済みなので null
+  assertEquals(RoomHandoff.consumePendingJoinRoom(), null);
+});
+
+Deno.test("room-handoff.js: pendingCreateRoom と pendingJoinRoom は別キーで独立している", () => {
+  const storage = fakeSessionStorage();
+  const RoomHandoff = load(storage);
+  RoomHandoff.setPendingCreateRoom({ nickname: "x", visibility: "private", tags: [] });
+  RoomHandoff.setPendingJoinRoom({ roomCode: "482913" });
+  // 片方を消費してももう片方は残る
+  assertEquals(RoomHandoff.consumePendingJoinRoom(), { roomCode: "482913" });
+  assertEquals(RoomHandoff.consumePendingCreateRoom()?.nickname, "x");
+});
+
+Deno.test("room-handoff.js: pendingJoinRoom の roomCode が文字列でなければ null を返す", () => {
+  const RoomHandoff = load(
+    fakeSessionStorage({ "en:pendingJoinRoom": JSON.stringify({ roomCode: 482913 }) }),
+  );
+  assertEquals(RoomHandoff.consumePendingJoinRoom(), null);
+});
+
+Deno.test("room-handoff.js: pendingJoinRoom の roomCode が空文字なら null を返す", () => {
+  const RoomHandoff = load(
+    fakeSessionStorage({ "en:pendingJoinRoom": JSON.stringify({ roomCode: "" }) }),
+  );
+  assertEquals(RoomHandoff.consumePendingJoinRoom(), null);
+});
+
+Deno.test("room-handoff.js: pendingJoinRoom も壊れたJSONなら null を返す", () => {
+  const RoomHandoff = load(fakeSessionStorage({ "en:pendingJoinRoom": "not json" }));
+  assertEquals(RoomHandoff.consumePendingJoinRoom(), null);
+});
+
+Deno.test("room-handoff.js: sessionStorage が例外を投げても setPendingJoinRoom は落ちない", () => {
+  const throwing: FakeSessionStorage = {
+    getItem: () => null,
+    setItem: () => {
+      throw new Error("blocked");
+    },
+    removeItem: () => {},
+  };
+  const RoomHandoff = load(throwing);
+  RoomHandoff.setPendingJoinRoom({ roomCode: "482913" });
 });

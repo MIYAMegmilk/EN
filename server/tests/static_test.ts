@@ -206,6 +206,26 @@ Deno.test("index.html: room-handoff.js が app.js より前に読み込まれる
   }
 });
 
+Deno.test("corridor.html: room-handoff.js が corridor.js より前に読み込まれる", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/corridor.html`);
+    const html = await res.text();
+    const handoffIndex = html.indexOf('<script src="./room-handoff.js">');
+    const scriptIndex = html.indexOf('<script type="module" src="./corridor.js">');
+    assert(handoffIndex >= 0, "room-handoff.js の読み込みが必要です");
+    assert(scriptIndex >= 0, "corridor.js の読み込みが必要です");
+    assert(
+      handoffIndex < scriptIndex,
+      "room-handoff.js は corridor.js より前に読み込む必要があります",
+    );
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
 Deno.test("entrance.html: 卓を建てるカードが index.html/廊下カードと並んで存在する", async () => {
   const kv = await Deno.openKv(":memory:");
   const server = startServer(0, "127.0.0.1", kv);

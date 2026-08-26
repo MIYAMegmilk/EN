@@ -27,9 +27,6 @@ function el(tag, text, className) {
   return node;
 }
 
-/** プリセット部屋タグの一覧（/api/room-tags の結果）。作成フォームの描画に使う */
-let presetRoomTags = [];
-
 /** VC への自動参加が進行中か（マイクの許可を待っている間だけ true） */
 let vcJoining = false;
 
@@ -42,27 +39,6 @@ const gameChoiceState = { choice: null, serverSelectedGameId: undefined };
 
 /** 作成直後に PATCH で反映する説明文・タグ。作成ボタン押下時にセットし、roomState 受信後にクリアする */
 let pendingRoomMeta = null;
-
-/** 卓を立てるフォームのタグ選択肢を描画する */
-function renderRoomTagsPicker(tags) {
-  const container = $("room-tags");
-  container.textContent = "";
-  for (const tag of tags) {
-    const label = document.createElement("label");
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.value = tag.id;
-    label.appendChild(checkbox);
-    label.appendChild(document.createTextNode(tag.label));
-    container.appendChild(label);
-  }
-}
-
-/** チェック済みのタグIDを取得する */
-function checkedRoomTagIds() {
-  return [...document.querySelectorAll('#room-tags input[type="checkbox"]:checked')]
-    .map((el) => el.value);
-}
 
 /**
  * createRoom を送る。#create ボタンでの手動作成と、entrance.html からの
@@ -101,19 +77,6 @@ async function applyPendingRoomMeta(code, meta) {
     }
   } catch {
     showError("説明文・タグの保存に失敗しました");
-  }
-}
-
-/** 起動時にプリセット部屋タグを読み込む */
-async function loadRoomTags() {
-  try {
-    const res = await fetch("/api/room-tags", { credentials: "same-origin" });
-    if (!res.ok) return;
-    const body = await res.json();
-    presetRoomTags = Array.isArray(body?.tags) ? body.tags : [];
-    renderRoomTagsPicker(presetRoomTags);
-  } catch {
-    // 読み込めなくてもタグなしで卓は作れるので無視する
   }
 }
 
@@ -309,13 +272,14 @@ function connect() {
     const afterRestart = state.restartRecovery;
     state.restartRecovery = false;
     const saved = store.load();
-    // create-room.html から渡された「これから建てる卓」があれば読み出す。
-    // 再接続すべきセッションがある場合（下の if 分岐）はそちらを優先するが、
+    // create-room.html / corridor.html から渡された「これから建てる卓」「入りたい卓」が
+    // あれば読み出す。再接続すべきセッションがある場合（下の if 分岐）はそちらを優先するが、
     // 読み出し自体は必ず行い sessionStorage から消しておく。そうしないと、
     // 今回は再接続が勝って使わなかった pending が sessionStorage に残ったまま
     // になり、この後の「退室 → 新規 onopen」など別の再接続のない機会に
-    // 意図せず自動作成が発火してしまう
-    const pending = RoomHandoff.consumePendingCreateRoom();
+    // 意図せず自動作成・自動入室が発火してしまう
+    const pendingCreate = RoomHandoff.consumePendingCreateRoom();
+    const pendingJoin = RoomHandoff.consumePendingJoinRoom();
     if (saved !== null) {
       // 再接続を試す（60秒以内なら復帰できる）。session が生きていればサーバーは
       // あだ名を見ない（doJoin が reconnect で早期 return する）ので、あだ名を省略して
@@ -326,8 +290,13 @@ function connect() {
       if (nickname.length > 0) msg.nickname = nickname;
       state.rejoinAfterRestart = afterRestart;
       send(msg);
-    } else if (pending !== null) {
-      doCreateRoom(pending);
+    } else if (pendingCreate !== null) {
+      doCreateRoom(pendingCreate);
+    } else if (pendingJoin !== null) {
+      // corridor.html で扉を選んだ卓に入る。あだ名は集めていないので空欄のまま送る
+      // （join はあだ名省略可。サーバーが自動で二つ名を付ける、§3.10）
+      state.rejoinAfterRestart = false;
+      send({ t: "join", roomCode: pendingJoin.roomCode });
     }
   };
   ws.onclose = (event) => {
@@ -1319,17 +1288,6 @@ function bind() {
     await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
     location.href = "/login.html";
   });
-  $("create").addEventListener("click", () => {
-    // 公開ルームはルーム名必須（§3.1）。一覧（rooms.js）に載るのはこちらだけ
-    const visibility = $("visibility").value === "public" ? "public" : "private";
-    doCreateRoom({
-      nickname: $("nickname").value,
-      visibility,
-      roomName: $("room-name").value,
-      description: $("room-description").value,
-      tags: checkedRoomTagIds(),
-    });
-  });
   $("join").addEventListener("click", () => {
     pendingRoomMeta = null;
     // 自分で入り直す操作。以降の ROOM_NOT_FOUND は打ち間違いなので通常の文言に戻す
@@ -1397,7 +1355,6 @@ async function start() {
   Sound.mountControls();
   // 入室の音は鳴る間が決まっていて、その場で取りに行くと間に合わない
   Sound.preload("decide", "knock", "slidingScreen");
-  loadRoomTags();
   refreshAccount();
   bindVc(await fetchIceServers());
   connect();
