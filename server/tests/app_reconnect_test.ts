@@ -113,8 +113,14 @@ function stubModule(
   });
 }
 
+type GuestProfileStub = { getGuestProfile: () => { nickname: string; tags: string[] } };
+
+const DEFAULT_GUEST_PROFILE: GuestProfileStub = {
+  getGuestProfile: () => ({ nickname: "", tags: [] }),
+};
+
 /** app.js を偽の環境で読み込む */
-async function load(): Promise<Harness> {
+async function load(guestProfile: GuestProfileStub = DEFAULT_GUEST_PROFILE): Promise<Harness> {
   FakeSocket.instances = [];
   const { elements, document } = createFakeDocument();
   const storage = new Map<string, string>();
@@ -137,6 +143,7 @@ async function load(): Promise<Harness> {
     "fetch",
     "WebSocket",
     "sessionStorage",
+    "GuestProfile",
     "location",
     "setTimeout",
     "clearTimeout",
@@ -158,6 +165,7 @@ async function load(): Promise<Harness> {
       setItem: (key: string, value: string) => storage.set(key, value),
       removeItem: (key: string) => storage.delete(key),
     },
+    guestProfile,
     { protocol: "http:", host: "127.0.0.1:8000", href: "" },
     (fn: () => void, ms: number) => {
       const id = timerSeq++;
@@ -475,4 +483,14 @@ Deno.test("app.js: 再起動以外の切断は、今までどおり再読み込�
   assertEquals(h.errorBox().textContent, "接続が切れました。再読み込みしてください");
   assertEquals(h.errorBox().className, "alert");
   assertEquals(h.timerDelays(), [], "自動再接続はしない");
+});
+
+Deno.test("app.js: 未ログインならゲストの一時あだ名を入室欄へ自動入力する", async () => {
+  const h = await load({ getGuestProfile: () => ({ nickname: "ましろ", tags: [] }) });
+  assertEquals(h.elements.get("nickname")?.value, "ましろ");
+});
+
+Deno.test("app.js: ゲストの一時あだ名が空なら入室欄も空のまま", async () => {
+  const h = await load();
+  assertEquals(h.elements.get("nickname")?.value, "");
 });

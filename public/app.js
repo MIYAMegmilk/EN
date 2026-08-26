@@ -259,6 +259,11 @@ async function refreshAccount() {
   // 保存済みのあだ名があれば入室欄に自動入力する（§3.0）。ユーザーが既に入力していたら上書きしない
   if (loggedIn && typeof body.nickname === "string" && $("nickname").value === "") {
     $("nickname").value = body.nickname;
+  } else if (!loggedIn && $("nickname").value === "") {
+    // ゲストの一時あだ名（entrance.html の簡易プロフィール編集で保存したもの、§3.0）
+    // があれば同様に自動入力する
+    const guest = GuestProfile.getGuestProfile();
+    if (guest.nickname !== "") $("nickname").value = guest.nickname;
   }
 }
 
