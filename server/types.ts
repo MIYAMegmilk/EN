@@ -70,49 +70,27 @@ export const WS_SIGNAL_RATE_MAX = 100;
 export const WS_SIGNAL_HARD_MAX = 500;
 
 /**
- * WS メッセージのレート制限: sandboxSignal（docs/design/game-sandbox.md §4.3）の
- * 判定窓内最大件数。超過分は破棄する（切断しない）。判定窓は WS_RATE_WINDOW_MS を共用する。
- * 【暫定値】。根拠: プロトタイプの runner がクライアント側で 30件/秒 のトークンバケットを
- * 持っており、その値で REFLEX の2人対戦が成立することを実測している。正規クライアントは
- * この上限に触れない前提の値であり、サーバー側の負荷試験は未実施（設計書 §10-3）。
- */
-export const WS_SANDBOX_RATE_MAX = 30;
-/**
- * sandboxSignal のハードキャップ（docs/design/game-sandbox.md §4.3）。
- * これを超える連投は乱用とみなして切断する。
- * 【暫定値】。根拠: rtcSignal のソフト:ハード = 100:500 = 1:5 の比に揃えた値。
- * 乱用の判定であって正規利用の想定値ではない。
- */
-export const WS_SANDBOX_HARD_MAX = 150;
-/**
- * sandboxSignal の payload の直列化サイズ上限（バイト、docs/design/game-sandbox.md §4.3）。
- * 超過は破棄する。
- * 【暫定値】。根拠: 既存の MAX_MESSAGE_BYTES（64KB）のままだと、10人ルームで
- * 64KB × 30件/秒 × 10人 の受信 → fan-out 9倍 で非現実的な帯域になる。4KB なら
- * 1ルームあたり最大 約1.2MB/秒 に収まる。
- */
-export const SANDBOX_PAYLOAD_MAX_BYTES = 4 * 1024;
-
-/**
  * WS メッセージのレート制限: gameEvent（docs/design/games-unified.md §2.2 / §9.3）の
  * 判定窓内最大件数。超過分は破棄する（切断しない）。判定窓は WS_RATE_WINDOW_MS を共用する。
- * 【暫定値】。根拠: sandboxSignal 用に置いた WS_SANDBOX_RATE_MAX の値をそのまま引き継いだもの
+ * 【暫定値】。根拠: 廃止した sandboxSignal 用の上限（30件/秒）をそのまま引き継いだもの
  * （設計書 §2.2）。サーバー側の負荷試験は未実施（設計書 §10-2）。
  *
- * main.ts の専用枠（rtcSignal / sandboxSignal と同構造）へ**適用済み**。
+ * main.ts の専用枠（rtcSignal と同構造）へ**適用済み**。
  * 一般枠（WS_RATE_MAX = 20件/秒）のままだと、描画中継（設計書 §2.7 は 10チャンク/秒 を想定）で
  * 描いている本人が切断されてしまうため、お絵かき当ての実装に合わせて配線した。
  */
 export const WS_GAME_EVENT_RATE_MAX = 30;
 /**
  * gameEvent のハードキャップ。これを超える連投は乱用とみなして切断する。
- * 【暫定値】。根拠は WS_GAME_EVENT_RATE_MAX と同じ（WS_SANDBOX_HARD_MAX の引き継ぎ）。
+ * 【暫定値】。根拠は WS_GAME_EVENT_RATE_MAX と同じ（廃止した sandboxSignal の上限の引き継ぎ）。
  * main.ts へ適用済み。
  */
 export const WS_GAME_EVENT_HARD_MAX = 150;
 /**
  * gameEvent の payload の直列化サイズ上限（バイト、設計書 §9.3）。超過は棄却する。
- * 【暫定値】。根拠は SANDBOX_PAYLOAD_MAX_BYTES の引き継ぎ。
+ * 【暫定値】。根拠は廃止した sandboxSignal の payload 上限（4KB）の引き継ぎ。
+ * 元の根拠: MAX_MESSAGE_BYTES（64KB）のままだと 64KB × 30件/秒 × 10人 の受信 →
+ * fan-out 9倍 で非現実的な帯域になる。4KB なら1ルームあたり最大 約1.2MB/秒 に収まる。
  * こちらは rooms.ts の gameEvent ハンドラで**すでに適用している**（レート枠と違い、
  * ルーム層だけで完結するため）。
  */
@@ -351,11 +329,6 @@ export type Room = {
   game: ActiveGame | null;
   /** チャット履歴。直近 CHAT_HISTORY_MAX 件のみ・古い順（§3.9） */
   chatHistory: ChatMessage[];
-  /**
-   * 稼働中のサンドボックスゲーム（docs/design/game-sandbox.md §5）。
-   * 既存エンジン（game）とは相互排他。未稼働は null
-   */
-  sandbox: SandboxGameState | null;
   /** 作成時刻（epoch ms） */
   createdAt: number;
   /** 最終アクティビティ時刻（epoch ms、24時間で自動削除） */
@@ -422,32 +395,6 @@ export type GameDefinition = {
 
 /** ゲーム定義から id / ownerId を除いた入稿データ（クライアントが送る形） */
 export type GameDefinitionDraft = Omit<GameDefinition, "id" | "ownerId">;
-
-// ---------------------------------------------------------------------------
-// サンドボックスゲーム（docs/design/game-sandbox.md）
-// ---------------------------------------------------------------------------
-
-/** 稼働中のサンドボックスゲーム。サーバーは gameId 以外の中身を知らない */
-export type SandboxGameState = {
-  /** マニフェスト（public/games/manifest.json）に載っているゲームID */
-  gameId: string;
-  /** 開始した playerId（開始時点のホスト） */
-  startedBy: string;
-  /** 開始時刻（epoch ms）。途中参加者の表示に使う */
-  startedAt: number;
-};
-
-/** マニフェストの1件。GET /api/sandboxGames が返す */
-export type SandboxGameInfo = {
-  id: string;
-  title: string;
-  description: string;
-  /** public/games/ 配下のファイル名（= id + ".js"） */
-  file: string;
-  minPlayers: number;
-  maxPlayers: number;
-  author: string;
-};
 
 /** 一覧・選択 UI 向けの要約。prompts を含まない */
 export type GameSummary = {
@@ -877,8 +824,6 @@ export type RoomSnapshot = {
   session?: string;
   /** サーバー時刻（epoch ms）。クライアントの時計ずれ補正用 */
   serverTime: number;
-  /** 稼働中のサンドボックスゲーム。無ければ null（docs/design/game-sandbox.md） */
-  sandbox: SandboxGameState | null;
   /**
    * 進行中のモジュール型ゲームの表示データ（docs/design/games-unified.md §2.2）。
    * 途中参加・再接続でフル状態を配るために載せる。既存の `phase` / `view` と並存する。
@@ -962,16 +907,11 @@ export type C2S =
   /** 終了アンケートへの投票（§3.10） */
   | { t: "endPollVote"; pollId: string; agree: boolean }
   | { t: "rtcSignal"; to: string; payload: unknown }
-  /** サンドボックスゲームを開始する（host only、docs/design/game-sandbox.md） */
-  | { t: "sandboxStart"; gameId: string }
-  /** サンドボックスゲームを終了する（host only） */
-  | { t: "sandboxEnd" }
-  /** ゲーム内メッセージ。サーバーは payload を解釈せず同室へ中継する（rtcSignal と同じ扱い） */
-  | { t: "sandboxSignal"; payload: unknown }
   /**
    * ゲーム内イベント（docs/design/games-unified.md §2.2）。
-   * サーバー（ゲームモジュール）が payload を**検証・解釈**して状態を進める。
-   * payload を解釈せず中継するだけの sandboxSignal とは正反対の設計であることに注意
+   * サーバーが受け取り、卓の状態として保持・配信する。
+   * 専用モジュール型のゲームは payload を**検証・解釈**して状態を進め、
+   * クライアント専用ゲーム（server/games/client.ts）は解釈せず中継ログに積む
    */
   | { t: "gameEvent"; payload: unknown }
   /**
@@ -1016,10 +956,6 @@ export type S2C =
   /** 終了アンケートが締まった（§3.10）。agreed が true ならお開きの合意が取れた */
   | { t: "botPollClosed"; pollId: string; agreed: boolean }
   | { t: "rtcSignal"; from: string; payload: unknown }
-  /** サンドボックスゲームの開始・終了。同室全員へ。null は「動いていない」 */
-  | { t: "sandboxState"; game: SandboxGameState | null }
-  /** 中継されたゲーム内メッセージ。送信者本人には返らない */
-  | { t: "sandboxSignal"; from: string; payload: unknown }
   /**
    * モジュール型ゲームの表示データ（docs/design/games-unified.md §2.2）。
    * 受信者ごとに内容が変わる（§3.2 原則3）。deadline はカウントダウン表示用

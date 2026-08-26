@@ -31,7 +31,7 @@ function el(tag, text, className) {
 let vcJoining = false;
 
 /**
- * いま選ばれているあそび（"official:<id>" / "sandbox:<id>"）。
+ * いま選ばれているあそび（"official:<id>"）。
  * 選択欄を品書きに置き換えたので、選択は画面ではなくここが持つ。
  * serverSelectedGameId は、卓側の選択が変わったことを見分けるための控え。
  */
@@ -235,13 +235,25 @@ async function loadGameModule(gameId) {
   }
 }
 
-/** ビューモジュールを片付ける。ゲームが終わったとき・卓を出たときに呼ぶ */
+/**
+ * ビューモジュールを片付ける。ゲームが終わったとき・卓を出たとき、
+ * および loadGameModule が新しいモジュールに差し替える直前に呼ぶ。
+ *
+ * pending はここで消さない。loadGameModule はまだ mount していない新しい
+ * gameView を pending に積んだ直後にこの関数を呼ぶため、ここで pending を
+ * null に戻すと「サーバーから1通しか届かない gameView」を mount 前に
+ * 取りこぼしてしまう（届いた view はもう二度と再送されない）。
+ *
+ * 消さなくても誤配信にはならない: flushGameView は
+ * `pending.gameId !== gameModuleState.gameId` のときは何もしないので、
+ * ここで gameId を null にしておけば、mount が完了して gameId が入り直すまで
+ * 古い pending が別のハンドルへ渡ることはない。
+ */
 function unmountGameModule() {
   const handle = gameModuleState.handle;
   gameModuleState.gameId = null;
   gameModuleState.handle = null;
   gameModuleState.loadingId = null;
-  gameModuleState.pending = null;
   if (handle !== null) {
     try {
       handle.unmount();
@@ -482,8 +494,6 @@ function connect() {
     Chat.handleServerMessage(msg);
     // bot の演出面（docs/design/bot.md §4）
     Bot.handleServerMessage(msg);
-    // サンドボックスゲーム（docs/design/game-sandbox.md）
-    Sandbox.handleServerMessage(msg);
     // ボットの VC タイル（見た目のみ）。Bot モジュールの状態確定後に描き直す
     renderVcBotTiles();
     if (msg.t === "chat" && msg.message !== undefined && msg.message.bot === true) {
@@ -666,7 +676,6 @@ function resetToEntry() {
   Chat.reset();
   Voice.reset();
   Bot.reset();
-  Sandbox.reset();
   unmountGameModule();
   renderAll();
 }
@@ -844,7 +853,6 @@ function renderAll() {
   $("bot").classList.toggle("hidden", snapshot === null);
   $("chat").classList.toggle("hidden", snapshot === null);
   $("phase").classList.toggle("hidden", snapshot === null);
-  $("sandbox").classList.toggle("hidden", snapshot === null);
   renderVc();
   renderVcBotTiles();
   if (snapshot === null) return;
@@ -918,9 +926,8 @@ const THUMB_HUES = [28, 202, 96, 330, 44, 268, 168, 8];
 /**
  * 品書きに並べる1本ぶんの情報に均す。
  *
- * 公式ゲーム（roomState の availableGames）と余興サンドボックス
- * （/api/sandboxGames）は形も出どころも違うので、ここで同じ形にしてから
- * 札を組む。choice が "official:<id>" / "sandbox:<id>"（開始時の出し分け用）。
+ * 一覧の出どころは roomState の availableGames 1本（設計書 §4）。
+ * choice が "official:<id>"（parseGameChoice で解く形をそのまま保つ）。
  */
 function listGames(snapshot) {
   const games = [];
@@ -939,17 +946,6 @@ function listGames(snapshot) {
       meta,
       badge: "宴の余興",
       official: true,
-    }));
-  }
-  for (const game of Sandbox.getGames()) {
-    games.push(withHue({
-      choice: `sandbox:${game.id}`,
-      id: game.id,
-      title: game.title,
-      description: game.description ?? "",
-      meta: `${game.minPlayers}〜${game.maxPlayers}人・作: ${game.author}`,
-      badge: "あそび（点は付かない）",
-      official: false,
     }));
   }
   return games;
@@ -971,7 +967,7 @@ function currentGame() {
 
 /**
  * 品書き（ゲーム一覧）を組み直す。
- * 余興の一覧は HTTP で後から届く（sandbox.js の onGames）ため、何度も呼ばれる。
+ * 一覧は roomState のたびに届くので、何度も呼ばれる。
  */
 function renderGamePlatform() {
   const list = $("game-list");
@@ -1070,18 +1066,11 @@ function syncGameChoice(snapshot) {
   renderGamePick();
 }
 
-/**
- * 選ばれているあそびを始める。公式ゲームと余興で出し口が違うので、
- * 種別を見て selectGame+startGame と sandboxStart を分ける。
- */
+/** 選ばれているあそびを始める（selectGame → startGame。設計書 §4） */
 function startChosenGame() {
   const choice = parseGameChoice(gameChoiceState.choice);
   if (choice === null) {
     showError("あそびを選んでください");
-    return;
-  }
-  if (choice.kind === "sandbox") {
-    Sandbox.start(choice.gameId);
     return;
   }
   // 品書きで選んだ時点で送っているが、卓側とずれていれば始める前に揃える
@@ -1721,18 +1710,6 @@ function bind() {
     inputEl: $("chat-text"),
     formEl: $("chat-form"),
     onError: showError,
-  });
-  Sandbox.init({
-    send,
-    container: $("sandbox"),
-    // 余興の一覧は HTTP で後から届く。揃ったら品書きを組み直す
-    onGames: () => {
-      if (state.snapshot !== null) syncGameChoice(state.snapshot);
-    },
-    onStatus: (event) => {
-      if (event.kind === "error") showError(event.message);
-      log("Sandbox", event.message);
-    },
   });
 }
 
