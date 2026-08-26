@@ -1176,4 +1176,3 @@ Deno.test("S2: アプリ本体に Permissions-Policy が付く（§9-2）", asyn
     kv.close();
   }
 });
-
