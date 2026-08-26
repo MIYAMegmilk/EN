@@ -559,6 +559,56 @@ Deno.test("切断: 早押し受付中の切断は進行を変えない", () => {
   assertEquals(result.state.players["c"]?.connected, false);
 });
 
+Deno.test("切断: 早押し受付中に最後の押せる人が抜けたら、期限を待たず発表へ進む", () => {
+  let state = startBuzzing(["a", "b"]);
+  // a は誤答済みでもう押せない。残るは b だけ
+  state = buzz(state, "a");
+  state = answer(state, "a", wrongOf(state));
+  assertEquals(state.phase, "buzz");
+  assertEquals(state.blocked, ["a"]);
+  // その b が切断すると、押せる人が0人になるので卓を止めずに発表へ進む
+  const result = hayaoshiModule.reduce(state, { t: "playerLeft", playerId: "b", now: T0 });
+  assertEquals(result.error, undefined);
+  assertEquals(result.state.phase, "reveal");
+  assertEquals(result.state.lastReveal?.winnerId, null);
+  assert(hasEffect(result.effects, "schedule"));
+});
+
+Deno.test("切断: まだ押せる人が残っているなら、期限は引き直さない", () => {
+  const state = startBuzzing(["a", "b", "c"]);
+  const before = state.deadline;
+  const result = hayaoshiModule.reduce(state, { t: "playerLeft", playerId: "c", now: T0 });
+  assertEquals(result.state.phase, "buzz");
+  // 切断のたびに残った人の持ち時間が伸び縮みしないこと
+  assertEquals(result.state.deadline, before);
+});
+
+Deno.test("キック: 早押し受付中に最後の押せる人が抜けたら発表へ進む", () => {
+  let state = startBuzzing(["a", "b", "c"]);
+  // a・b は誤答済み。押せるのは c だけ
+  state = buzz(state, "a");
+  state = answer(state, "a", wrongOf(state));
+  state = buzz(state, "b");
+  state = answer(state, "b", wrongOf(state));
+  assertEquals(state.phase, "buzz");
+  const result = hayaoshiModule.reduce(state, { t: "playerKicked", playerId: "c", now: T0 });
+  assertEquals(result.error, undefined);
+  assertEquals(result.state.phase, "reveal");
+  assertEquals(result.state.lastReveal?.winnerId, null);
+});
+
+Deno.test("切断中の人の早押しは受理しない（押せる人の定義を view と揃える）", () => {
+  let state = startBuzzing(["a", "b"]);
+  state = step(state, { t: "playerLeft", playerId: "a", now: T0 });
+  // view でも押せないことになっている
+  assertEquals(viewOf(state, "a").canBuzz, false);
+  // 遅れて届いた早押しも弾く（受理すると卓が回答時間ぶん止まる）
+  const result = tryEvent(state, "a", { k: "buzz" }, T0);
+  assertEquals(result.error, "PHASE_MISMATCH");
+  assertEquals(result.changed, false);
+  assertEquals(result.state.answererId, null);
+});
+
 Deno.test("再接続すると早押しに戻れる", () => {
   let state = startBuzzing(["a", "b"]);
   state = step(state, { t: "playerLeft", playerId: "b", now: T0 });
@@ -742,7 +792,7 @@ Deno.test("問題バンク: 25問以上あり、選択肢は4つで重複が無�
 Deno.test("問題バンク: 正解位置が特定の選択肢に偏っていない", () => {
   // 均等（1/4）から ±10 パーセントポイントまでの偏りは許容する。
   // 「1番目を選べば当たる」状態を防ぐための検査（gamedef_test.ts と同じ考え方）
-  const TOLERANCE = 0.1;
+  const TOLERANCE = 0.05;
   const counts = new Array(HAYAOSHI_OPTION_COUNT).fill(0);
   for (const q of HAYAOSHI_QUESTIONS) counts[q.answer]++;
   const expected = 1 / HAYAOSHI_OPTION_COUNT;

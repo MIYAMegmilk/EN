@@ -370,6 +370,12 @@ function clone(state: HayaoshiState): HayaoshiState {
     players: { ...state.players },
     scores: { ...state.scores },
     blocked: [...state.blocked],
+    // lastReveal も複製しておく。いまの書き手はオブジェクトごと差し替えているので
+    // 実害は無いが、共有したままだと将来 missedIds.push(...) のような書き方をした
+    // 瞬間に入力 state を壊す（ルーム層は保存中の state をそのまま渡してくる）
+    lastReveal: state.lastReveal === null
+      ? null
+      : { ...state.lastReveal, missedIds: [...state.lastReveal.missedIds] },
   };
 }
 
@@ -470,7 +476,8 @@ export const hayaoshiModule: GameModule<HayaoshiState, HayaoshiView> = {
         if (next.answererId === event.playerId && next.phase === "answer") {
           return releaseAnswerer(next, event.now);
         }
-        return moduleOk(next, [{ t: "viewChanged" }]);
+        // 早押し受付中に最後の押せる人が抜けたら、期限まで待たずに正解発表へ進む
+        return revealIfNobodyCanBuzz(next, event.now) ?? moduleOk(next, [{ t: "viewChanged" }]);
       }
       case "playerRejoined": {
         const player = state.players[event.playerId];
@@ -507,7 +514,8 @@ export const hayaoshiModule: GameModule<HayaoshiState, HayaoshiView> = {
           next.answererId = null;
           return resumeOrReveal(next, event.now, null);
         }
-        return moduleOk(next, [{ t: "viewChanged" }]);
+        // 早押し受付中に最後の押せる人が抜けたら、期限まで待たずに正解発表へ進む
+        return revealIfNobodyCanBuzz(next, event.now) ?? moduleOk(next, [{ t: "viewChanged" }]);
       }
       case "skipPhase":
         // ホストの操作で現フェーズを打ち切る。期限前でも進める
@@ -540,7 +548,7 @@ export const hayaoshiModule: GameModule<HayaoshiState, HayaoshiView> = {
         ? null
         : state.players[state.answererId]?.nickname ?? null,
       iAmAnswerer: state.answererId === viewerId,
-      canBuzz: state.phase === "buzz" && joined && !isBlocked,
+      canBuzz: state.phase === "buzz" && joined && canPlayerBuzz(state, viewerId),
       amBlocked: isBlocked,
       players: state.order.map((id) => {
         const player = state.players[id];
@@ -622,6 +630,11 @@ function handleBuzz(
   if (state.blocked.includes(playerId)) {
     return moduleFail(state, "DUPLICATE", "この問題ではもう回答できません");
   }
+  // 切断扱いの人は「押せる人」に数えていない（resumeOrReveal と同じ定義）。
+  // 数え漏れた人が回答権を取ると、卓が ANSWER_MS ぶん止まる
+  if (state.players[playerId]?.connected !== true) {
+    return moduleFail(state, "PHASE_MISMATCH", "接続が切れているため回答できません");
+  }
   if (state.deadline !== null && now > state.deadline) {
     return moduleFail(state, "PHASE_MISMATCH", "早押しの期限を過ぎています");
   }
@@ -670,6 +683,37 @@ function handleAnswer(
 // ---------------------------------------------------------------------------
 
 /**
+ * 早押し受付中に「押せる人」が誰も居なくなっていたら、期限を待たずに正解発表へ進める。
+ * まだ押せる人が居るなら null を返し、進行も期限もそのままにする
+ * （残った人の持ち時間を切断のたびに引き直さないため）。
+ *
+ * **引数は clone() 済みの下書き（draft）を渡すこと。**
+ * 切断・キックで最後の1人が抜けたときに、卓が BUZZ_MS ぶん空回りするのを防ぐ
+ */
+function revealIfNobodyCanBuzz(
+  draft: HayaoshiState,
+  now: number,
+): ModuleResult<HayaoshiState> | null {
+  if (draft.phase !== "buzz") return null;
+  if (canAnyoneBuzz(draft)) return null;
+  return toReveal(draft, now, null);
+}
+
+/**
+ * その人が早押しできる状態か（在籍していて・接続中で・この問で回答不可になっていない）。
+ * フェーズは見ない。handleBuzz・view・canAnyoneBuzz で同じ定義を使うためのもので、
+ * ここが3箇所でずれると「画面では押せるのにサーバーが弾く」が起きる
+ */
+function canPlayerBuzz(state: HayaoshiState, playerId: string): boolean {
+  return state.players[playerId]?.connected === true && !state.blocked.includes(playerId);
+}
+
+/** まだ早押しできる人（在籍・接続中・この問で回答不可になっていない人）が居るか */
+function canAnyoneBuzz(state: HayaoshiState): boolean {
+  return state.order.some((id) => canPlayerBuzz(state, id));
+}
+
+/**
  * 回答権を持っている人をこの問の回答不可にして権利を解放する。
  * 誤答・回答の時間切れ・回答権を持ったままの切断で呼ぶ（いずれも減点はしない）。
  *
@@ -696,10 +740,7 @@ function resumeOrReveal(
   now: number,
   winnerId: string | null,
 ): ModuleResult<HayaoshiState> {
-  const remaining = draft.order.filter((id) =>
-    !draft.blocked.includes(id) && draft.players[id]?.connected === true
-  );
-  if (remaining.length === 0) return toReveal(draft, now, winnerId);
+  if (!canAnyoneBuzz(draft)) return toReveal(draft, now, winnerId);
   draft.phase = "buzz";
   draft.deadline = now + BUZZ_RESUME_MS;
   return moduleOk(draft, [

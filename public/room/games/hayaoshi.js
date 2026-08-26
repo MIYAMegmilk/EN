@@ -338,6 +338,8 @@ export function mount(container, api) {
       //   - 早押し受付が開き直した（読み時間→受付、誤答で権利が空いて受付が再開）
       //   - 自分に回答権が回ってきた
       // 同じ view が2度届いただけでは解除しない（連打を通してしまうため）
+      // なお、期限超過などでサーバーに弾かれても phase が buzz のままなら抑止は解けない。
+      // その受付枠では押し直せなくなるが、連投を防ぐ安全側なので意図的にこうしている
       const questionChanged = questionNo !== lastQuestionNo;
       if (questionChanged || (lastPhase !== "buzz" && phase === "buzz")) buzzSent = false;
       if (questionChanged || (lastPhase !== "answer" && phase === "answer")) answerSent = false;
@@ -393,7 +395,9 @@ export function mount(container, api) {
       if (showReveal) {
         const correctNo = numberOrNull(reveal.correct);
         const correctText = typeof reveal.correctText === "string" ? reveal.correctText : "";
-        revealEl.textContent = correctNo === null
+        // 番号が欠けている・範囲外のときは番号を付けずに文言だけ出す
+        // （サーバー側の防御分岐が -1 を返しても「正解: 0.」にならないように）
+        revealEl.textContent = correctNo === null || correctNo < 0 || correctNo >= OPTION_COUNT
           ? `正解: ${correctText}`
           : `正解: ${correctNo + 1}. ${correctText}`;
         const winnerName = typeof reveal.winnerNickname === "string" ? reveal.winnerNickname : "";
