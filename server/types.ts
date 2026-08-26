@@ -736,6 +736,11 @@ export type PublicRoomSummary = {
   tags?: string[];
   /** ゲーム進行中か（lobby 以外） */
   playing: boolean;
+  /**
+   * 入室方式（§3.1）。knock ならホストの承認が要る。
+   * 一覧の「入店」を「ノックする」に出し分けるために載せる
+   */
+  entryMode: RoomEntryMode;
   /** 作成時刻（epoch ms）。「何時から灯りがついているか」の表示に使う */
   createdAt: number;
 };

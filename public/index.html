@@ -586,6 +586,45 @@
         overflow-wrap: anywhere;
       }
 
+      .knocks {
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid var(--line-soft);
+      }
+
+      .knocks h3 {
+        margin: 0 0 6px;
+        font-size: 12px;
+        color: var(--gold);
+      }
+
+      #knocks-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+
+      #knocks-list li {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+        padding: 6px 9px;
+        border: 1px solid var(--line-soft);
+        border-radius: var(--r-md);
+        font-size: 12.5px;
+        overflow-wrap: anywhere;
+      }
+
+      #knocks-list .knock-actions {
+        display: flex;
+        flex: none;
+        gap: 5px;
+      }
+
       /* レールの足元。呑み手が何人いても、この操作だけは必ず見えている */
       .rail-foot {
         display: flex;
@@ -1765,6 +1804,14 @@
                   <option value="private">一覧に出さない（コードを知っている人だけ）</option>
                 </select>
               </div>
+              <!-- 承認制は一覧に出す卓にだけ付く（§3.1.1） -->
+              <div class="field" id="entry-mode-field">
+                <label for="entry-mode">入店のしかた</label>
+                <select class="input" id="entry-mode">
+                  <option value="open">そのまま入ってもらう</option>
+                  <option value="knock">ノックしてもらい、こちらで通す</option>
+                </select>
+              </div>
               <!-- 合言葉は招待制の卓にだけ付く。app.js が誰に見せるかに合わせて出し入れする -->
               <div class="field hidden" id="new-passphrase-field">
                 <label for="new-passphrase">合言葉（4〜20文字・任意）</label>
@@ -1896,6 +1943,11 @@
             <p id="room-meta"></p>
 
             <ul id="players"></ul>
+            <!-- ノックしてきた人（ホストのみ・§3.1.1）。中身は app.js が組み立てる -->
+            <section id="knocks" class="knocks hidden" aria-label="ノックしている人">
+              <h3>表で待っている人</h3>
+              <ul id="knocks-list"></ul>
+            </section>
 
             <div class="rail-foot">
               <!--

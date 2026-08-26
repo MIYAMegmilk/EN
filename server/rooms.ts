@@ -487,6 +487,7 @@ export class RoomManager {
         playerCount: room.players.size,
         capacity: ROOM_CAPACITY,
         playing: game !== null && game.phase !== "lobby",
+        entryMode: room.entryMode,
         createdAt: room.createdAt,
       };
       // 選択中のゲームは「何をして遊んでいる卓か」の手がかりとして出す。
