@@ -23,6 +23,8 @@
    *   roomName?: string,
    *   description?: string,
    *   tags: string[],
+   *   entryMode?: "open" | "knock",
+   *   passphrase?: string,
    * }} PendingCreateRoom
    */
 
@@ -54,6 +56,11 @@
         roomName: typeof parsed.roomName === "string" ? parsed.roomName : undefined,
         description: typeof parsed.description === "string" ? parsed.description : undefined,
         tags: Array.isArray(parsed.tags) ? parsed.tags.filter((t) => typeof t === "string") : [],
+        // 承認制（§3.1.1）。知らない値は既定の open に倒す。sessionStorage は
+        // 利用者が書き換えられるので、ここで必ず二択に落としておく
+        entryMode: parsed.entryMode === "knock" ? "knock" : "open",
+        // 合言葉（§3.1）。長さと文字種はサーバーが検証する（validatePassphrase）
+        passphrase: typeof parsed.passphrase === "string" ? parsed.passphrase : undefined,
       };
     } catch {
       return null;

@@ -19,6 +19,10 @@ export const VC_CAPACITY = 6;
 export const NICKNAME_MAX = 20;
 /** 公開ルーム名の最大文字数（§3.1） */
 export const ROOM_NAME_MAX = 20;
+
+/** 合言葉の長さ（§3.1）。口頭で伝える前提なので短すぎず長すぎない範囲にする */
+export const PASSPHRASE_MIN = 4;
+export const PASSPHRASE_MAX = 20;
 /** 卓の説明文の最大文字数 */
 export const ROOM_DESCRIPTION_MAX = 100;
 /** 卓に付けられるプリセットタグの上限数 */
@@ -262,8 +266,22 @@ export type Room = {
   code: string;
   /** 公開 / 招待制。作成後は変更不可 */
   visibility: RoomVisibility;
+  /**
+   * 公開ルームの入室方式（§3.1）。作成後は変更不可。
+   * open  … 一覧から選んで承認なしで即入室
+   * knock … ノック → ホスト承認 → entryToken で入室（§3.1.1）
+   * 招待制ルームでは使わない（常に open 相当）
+   */
+  entryMode: RoomEntryMode;
   /** ルーム名（公開ルームのみ必須、20文字以内） */
   roomName?: string;
+  /**
+   * 合言葉（合言葉ルームのみ・4〜20文字、§3.1）。
+   * **クライアントへは絶対に送らない**（§4.3 で明記された制約）。
+   * 知っている人だけが入れる、という性質そのものが合言葉の価値なので、
+   * スナップショットにも公開一覧にも載せてはならない。
+   */
+  passphrase?: string;
   /** 卓の説明文（100文字以内・任意） */
   description?: string;
   /** プリセットタグ（最大5個・任意） */
@@ -301,6 +319,21 @@ export type Room = {
 
 /** ルームの公開設定 */
 export type RoomVisibility = "public" | "private";
+
+/** 公開ルームの入室方式（§3.1）。既定は open */
+export type RoomEntryMode = "open" | "knock";
+
+/** 同一セッションから同一ルームへノックできる間隔（ミリ秒、§3.8） */
+export const KNOCK_RATE_WINDOW_MS = 10_000;
+
+/** ランダムマッチの成立判定の周期（ミリ秒、§3.1.2） */
+export const MATCH_INTERVAL_MS = 30_000;
+/** 1グループの上限人数（§3.1.2）。これを超える待機は次の周期へ回る */
+export const MATCH_GROUP_MAX = 4;
+/** 成立に必要な最少人数（§3.1.2） */
+export const MATCH_GROUP_MIN = 2;
+/** 待機列に並べる人数の上限（§3.1.2） */
+export const MATCH_QUEUE_MAX = 100;
 
 // ---------------------------------------------------------------------------
 // §3.5 ゲーム定義
@@ -712,6 +745,11 @@ export type PublicRoomSummary = {
   tags?: string[];
   /** ゲーム進行中か（lobby 以外） */
   playing: boolean;
+  /**
+   * 入室方式（§3.1）。knock ならホストの承認が要る。
+   * 一覧の「入店」を「ノックする」に出し分けるために載せる
+   */
+  entryMode: RoomEntryMode;
   /** 作成時刻（epoch ms）。「何時から灯りがついているか」の表示に使う */
   createdAt: number;
 };
@@ -786,10 +824,20 @@ export type C2S =
     nickname: string;
     visibility: RoomVisibility;
     roomName?: string;
+    /** 公開ルームの入室方式（§3.1）。省略すると open */
+    entryMode?: RoomEntryMode;
+    /**
+     * 合言葉（招待制ルームのみ・4〜20文字、§3.1）。
+     * 全ルーム横断で一意。すでに使われていれば DUPLICATE で作成に失敗する
+     */
+    passphrase?: string;
   }
   | {
     t: "join";
-    roomCode: string;
+    /** 6桁の参加コード。passphrase を渡す場合は省略できる */
+    roomCode?: string;
+    /** 合言葉（§3.1）。roomCode の代わりに使える。両方あれば roomCode を優先する */
+    passphrase?: string;
     /**
      * あだ名。省略するとサーバーがしゅんぴの二つ名を付ける（§3.0 / §3.10）。
      * 空文字は「入力し忘れ」と区別できないので従来どおりエラーにする
@@ -798,7 +846,11 @@ export type C2S =
     session?: string;
     entryToken?: string;
   }
-  | { t: "knock"; roomCode: string; nickname: string }
+  /**
+   * 公開・承認制ルームへの入室申請（§3.1.1）。ゲスト可。
+   * session は前に同じ卓へ関わったときのトークン。あればブロック判定に使う
+   */
+  | { t: "knock"; roomCode: string; nickname: string; session?: string }
   | { t: "approveKnock"; knockId: string }
   | { t: "rejectKnock"; knockId: string }
   | { t: "kick"; playerId: string }
@@ -822,6 +874,13 @@ export type C2S =
   | { t: "sandboxEnd" }
   /** ゲーム内メッセージ。サーバーは payload を解釈せず同室へ中継する（rtcSignal と同じ扱い） */
   | { t: "sandboxSignal"; payload: unknown }
+  /**
+   * ランダムマッチの待機列に並ぶ（§3.1.2）。ゲスト可。
+   * あだ名を省略するとサーバーが しゅんぴ の二つ名を付ける（join と同じ扱い）
+   */
+  | { t: "joinQueue"; nickname?: string }
+  /** 待機列から抜ける（§3.1.2） */
+  | { t: "leaveQueue" }
   | { t: "leave" };
 
 /** サーバー → クライアント（§4.1） */
@@ -836,6 +895,13 @@ export type S2C =
     roomCode?: string;
     entryToken?: string;
   }
+  /**
+   * 待機列の様子（§3.1.2）。並んだ直後と、成立判定のたびに本人へ送る。
+   * waiting は自分を含む待機人数の目安
+   */
+  | { t: "queueStatus"; waiting: number; nextCheckAt: number }
+  /** マッチが成立した（§3.1.2）。直後に roomState が続く */
+  | { t: "matched"; roomCode: string }
   | { t: "kicked" }
   | { t: "playerKicked"; playerId: string }
   | { t: "phase"; phase: Phase; deadline?: number; view: PhaseView }

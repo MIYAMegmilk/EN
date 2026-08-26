@@ -11,7 +11,7 @@
  * 動かせる（voice_client_test.ts と同じ手口）。
  */
 
-import { assert, assertEquals, assertFalse } from "@std/assert";
+import { assert, assertEquals, assertExists, assertFalse } from "@std/assert";
 import { fromFileUrl } from "@std/path";
 import { SHUTDOWN_CLOSE_CODE } from "../rooms.ts";
 import { createFakeDocument, type FakeElement } from "./fake_dom.ts";
@@ -93,6 +93,8 @@ type Harness = {
   timerDelays(): number[];
   socket(): FakeSocket;
   errorBox(): FakeElement;
+  /** id で要素を引く。elements は遅延生成なので、こちら経由で取る */
+  element(id: string): FakeElement;
 };
 
 /** 何もしないダミーモジュール（vc.js / chat.js などの代わり） */
@@ -250,6 +252,7 @@ async function load(
     socket: () => FakeSocket.instances[FakeSocket.instances.length - 1],
     // 未生成でも作られるよう document 経由で取る
     errorBox: () => document.getElementById("error"),
+    element: (id: string) => document.getElementById(id),
   };
 }
 
@@ -281,6 +284,54 @@ function enterRoom(h: Harness, code = "123456"): void {
 // ---------------------------------------------------------------------------
 // テスト
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// キック（§3.1）。追い出された人が戻れないこと
+// ---------------------------------------------------------------------------
+
+Deno.test("app.js: キックされてもセッショントークンは捨てない", async () => {
+  const h = await load();
+  enterRoom(h);
+  const saved = h.storage.get("en-session");
+  assertExists(saved);
+
+  h.socket().receive({ t: "kicked" });
+
+  // 捨てると次の join で提示できず、サーバーがブロックを判定できなくなる（§3.1）
+  assertEquals(h.storage.get("en-session"), saved, "キックされた卓のトークンは残る");
+});
+
+Deno.test("app.js: 入り直すときは保存済みセッションを必ず積む", async () => {
+  const h = await load();
+  enterRoom(h, "123456");
+  h.socket().receive({ t: "kicked" });
+
+  // 追い出された人が、同じタブでコードを打ち直して入り直そうとする経路
+  h.element("code").value = "123456";
+  h.element("join").click();
+
+  const joins = h.socket().parsedSent().filter((m) => m.t === "join");
+  const lastJoin = joins[joins.length - 1];
+  assertExists(lastJoin);
+  assertEquals(lastJoin.roomCode, "123456");
+  // これが無いとサーバーは前のトークンを見られず、そのまま通してしまう
+  assertEquals(lastJoin.session, "sess-abc", "保存済みトークンを積んでいる");
+});
+
+Deno.test("app.js: 別の卓へ入るときは前の卓のセッションを積まない", async () => {
+  const h = await load();
+  enterRoom(h, "123456");
+  h.socket().receive({ t: "kicked" });
+
+  h.element("code").value = "654321";
+  h.element("join").click();
+
+  const joins = h.socket().parsedSent().filter((m) => m.t === "join");
+  const lastJoin = joins[joins.length - 1];
+  assertExists(lastJoin);
+  assertEquals(lastJoin.roomCode, "654321");
+  assertEquals(lastJoin.session, undefined, "別の卓に前のトークンは関係ない");
+});
 
 Deno.test("app.js: 1001 で切れたら、待ってから自動で繋ぎ直す", async () => {
   const h = await load();

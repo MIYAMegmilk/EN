@@ -162,6 +162,10 @@ Deno.test("create-room.html: 卓作成フォームの各要素が存在する", 
     assert(html.includes('id="create-room-description"'), "説明文入力欄が必要です");
     assert(html.includes('id="create-room-tags"'), "タグ一覧を描画するコンテナが必要です");
     assert(html.includes('id="create-room-visibility"'), "公開設定の選択欄が必要です");
+    // 承認制（§3.1.1）と合言葉（§3.1）はここでしか設定できない。欄が消えると
+    // サーバー側の実装が生きたまま到達不能になるので、静的に見張る
+    assert(html.includes('id="create-room-entry-mode"'), "入店のしかたの選択欄が必要です");
+    assert(html.includes('id="create-room-passphrase"'), "合言葉の入力欄が必要です");
     assert(html.includes('id="create-room-submit"'), "建てるボタンが必要です");
   } finally {
     await server.shutdown();

@@ -57,6 +57,19 @@ function checkedTagIds() {
     .map((el) => el.value);
 }
 
+/**
+ * 誰に見せるかに合わせて、承認制と合言葉の欄を出し入れする。
+ *
+ * 承認制（§3.1.1）は一覧に出す卓だけの話で、招待制ではコードか合言葉で入る。
+ * 合言葉（§3.1）は逆に招待制の卓にだけ付く。どちらも出したままにすると
+ * 付けられるように見えてサーバーに弾かれるだけになる。
+ */
+function syncVisibilityFields() {
+  const isPrivate = $("create-room-visibility").value === "private";
+  $("create-room-entry-mode-field").classList.toggle("hidden", isPrivate);
+  $("create-room-passphrase-field").classList.toggle("hidden", !isPrivate);
+}
+
 async function init() {
   const me = await callApi("/api/me");
   if (!me.ok) {
@@ -93,8 +106,13 @@ $("create-room-submit").addEventListener("click", () => {
     roomName,
     description: $("create-room-description").value,
     tags: checkedTagIds(),
+    entryMode: $("create-room-entry-mode").value === "knock" ? "knock" : "open",
+    passphrase: $("create-room-passphrase").value,
   });
   location.href = "/index.html";
 });
+
+$("create-room-visibility").addEventListener("change", syncVisibilityFields);
+syncVisibilityFields();
 
 init();

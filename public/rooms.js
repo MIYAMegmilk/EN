@@ -136,10 +136,16 @@
     card.appendChild(seats);
 
     const foot = el("div", "room-foot");
-    const enter = el("button", "btn btn-gold", "入店");
+    // 承認制の卓はそのままでは入れない。ホストを呼ぶ操作だと分かる文言にする（§3.1.1）
+    const knocking = room.entryMode === "knock";
+    const enter = el("button", "btn btn-gold", knocking ? "ノックする" : "入店");
     enter.type = "button";
     enter.disabled = full;
-    enter.addEventListener("click", () => enterRoom(room.code));
+    enter.addEventListener("click", () => {
+      // ノックの送信は app.js が持っている（申請中の状態と返事の受け取りが要るため）
+      if (knocking) global.knockRoom?.(room.code);
+      else enterRoom(room.code);
+    });
     foot.appendChild(enter);
     foot.appendChild(el("span", "room-since tabular", `${formatTime(room.createdAt)} から`));
     card.appendChild(foot);

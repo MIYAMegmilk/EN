@@ -116,6 +116,25 @@
             <option value="private">一覧に出さない（コードを知っている人だけ）</option>
           </select>
         </div>
+        <!-- 承認制は一覧に出す卓にだけ付く（§3.1.1） -->
+        <div class="field" id="create-room-entry-mode-field">
+          <label for="create-room-entry-mode">入店のしかた</label>
+          <select class="input" id="create-room-entry-mode">
+            <option value="open">そのまま入ってもらう</option>
+            <option value="knock">ノックしてもらい、こちらで通す</option>
+          </select>
+        </div>
+        <!-- 合言葉は招待制の卓にだけ付く。この画面の配線が誰に見せるかで出し入れする -->
+        <div class="field hidden" id="create-room-passphrase-field">
+          <label for="create-room-passphrase">合言葉（4〜20文字・任意）</label>
+          <input
+            class="input"
+            id="create-room-passphrase"
+            maxlength="20"
+            autocomplete="off"
+            placeholder="付けるとコードなしで入れます"
+          />
+        </div>
         <button id="create-room-submit" class="btn btn-gold btn-block btn-lg" type="button">
           建てる
         </button>

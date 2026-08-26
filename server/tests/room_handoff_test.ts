@@ -18,6 +18,10 @@ type PendingCreateRoom = {
   roomName?: string;
   description?: string;
   tags: string[];
+  /** 承認制（§3.1.1）。一覧に出す卓にだけ付く */
+  entryMode?: "open" | "knock";
+  /** 合言葉（§3.1）。招待制の卓にだけ付く */
+  passphrase?: string;
 };
 type PendingJoinRoom = { roomCode: string };
 type FakeSessionStorage = {
@@ -77,6 +81,9 @@ Deno.test("room-handoff.js: 保存した値を1回だけ読み戻せる", () => 
     roomName: "金曜の反省会",
     description: "今夜は焼酎の会です",
     tags: ["drink"],
+    // 渡されなければ既定の open。合言葉は付けていないので undefined のまま
+    entryMode: "open",
+    passphrase: undefined,
   });
   // 2回目は消費済みなので null
   assertEquals(RoomHandoff.consumePendingCreateRoom(), null);
@@ -95,6 +102,41 @@ Deno.test("room-handoff.js: private のとき roomName/description は省略で�
   assertEquals(result?.visibility, "private");
   assertEquals(result?.roomName, undefined);
   assertEquals(result?.tags, []);
+});
+
+Deno.test("room-handoff.js: 承認制と合言葉をそのまま渡す（§3.1 / §3.1.1）", () => {
+  const storage = fakeSessionStorage();
+  const RoomHandoff = load(storage);
+  RoomHandoff.setPendingCreateRoom({
+    nickname: "ホスト太郎",
+    visibility: "public",
+    roomName: "金曜の反省会",
+    tags: [],
+    entryMode: "knock",
+  });
+  assertEquals(RoomHandoff.consumePendingCreateRoom()?.entryMode, "knock");
+
+  RoomHandoff.setPendingCreateRoom({
+    nickname: "ホスト太郎",
+    visibility: "private",
+    tags: [],
+    passphrase: "さくら三番",
+  });
+  assertEquals(RoomHandoff.consumePendingCreateRoom()?.passphrase, "さくら三番");
+});
+
+Deno.test("room-handoff.js: 知らない entryMode は open に倒す（sessionStorage は書き換えられる）", () => {
+  const RoomHandoff = load(
+    fakeSessionStorage({
+      "en:pendingCreateRoom": JSON.stringify({
+        nickname: "x",
+        visibility: "public",
+        tags: [],
+        entryMode: "invite-only",
+      }),
+    }),
+  );
+  assertEquals(RoomHandoff.consumePendingCreateRoom()?.entryMode, "open");
 });
 
 Deno.test("room-handoff.js: 壊れたJSONが入っていても null を返す", () => {

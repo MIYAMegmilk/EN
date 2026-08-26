@@ -85,6 +85,8 @@ export const C2S_TYPES: ReadonlySet<string> = new Set([
   "sandboxStart",
   "sandboxEnd",
   "sandboxSignal",
+  "joinQueue",
+  "leaveQueue",
   "leave",
 ]);
 
