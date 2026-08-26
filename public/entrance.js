@@ -91,11 +91,22 @@ function updateSummary(nickname) {
   $("entrance-profile-summary").textContent = `あだ名: ${nickname === "" ? "未設定" : nickname}`;
 }
 
+function setToggleLabel(opening) {
+  $("entrance-profile-toggle").textContent = opening ? "戻る ▴" : "名札を整える ▾";
+}
+
+function closeProfileForm() {
+  $("entrance-profile-form").hidden = true;
+  $("entrance-profile-toggle").setAttribute("aria-expanded", "false");
+  setToggleLabel(false);
+}
+
 $("entrance-profile-toggle").addEventListener("click", () => {
   const form = $("entrance-profile-form");
   const opening = form.hidden;
   form.hidden = !opening;
   $("entrance-profile-toggle").setAttribute("aria-expanded", String(opening));
+  setToggleLabel(opening);
 });
 
 async function init() {
@@ -152,6 +163,7 @@ $("entrance-profile-save").addEventListener("click", async () => {
       renderTags(presetTags, savedTags);
       updateSummary(savedNickname);
       showStatus("プロフィールを保存しました");
+      closeProfileForm();
     } else {
       showError(`保存に失敗しました (${status}): ${body?.error ?? "unknown error"}`);
     }
@@ -163,6 +175,7 @@ $("entrance-profile-save").addEventListener("click", async () => {
   $("entrance-nickname").value = trimmed;
   updateSummary(trimmed);
   showStatus("名札を保存しました");
+  closeProfileForm();
 });
 
 init();
