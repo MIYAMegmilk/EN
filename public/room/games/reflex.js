@@ -51,6 +51,13 @@ const AFTER_MS = 4000;
 const ROUND_MS = LEAD_MS + WAIT_MAX_MS + AFTER_MS;
 /** 合図から受け付ける締め切り（ms） */
 const GO_TIMEOUT_MS = 4000;
+/**
+ * ラウンドを締めるまでの猶予（ms）。
+ * 締め切りは各自の api.serverNow() で判定するので、時計のずれと中継の遅れで
+ * 「締切ぎわのタップが、送った本人には入って他人には入らない」ズレが起きる。
+ * 猶予を挟むぶんだけ、そのズレを吸収する
+ */
+const SETTLE_GRACE_MS = 800;
 
 export function mount(container, api) {
   const shell = createShell(container, "反射神経バトル REFLEX");
@@ -238,9 +245,11 @@ export function mount(container, api) {
     if (g.ready) {
       const now = api.serverNow();
       const r = currentRound(now);
-      // 合図から締め切りを過ぎたラウンドは、その場で締める（時刻だけで決まる）
-      for (let past = 0; past < r; past++) settle(past);
-      if (r < TOTAL_ROUNDS && now >= goAt(r) + GO_TIMEOUT_MS) settle(r);
+      // 合図から締め切り + 猶予を過ぎたラウンドは、その場で締める（時刻だけで決まる）
+      for (let past = 0; past < r; past++) {
+        if (now >= goAt(past) + GO_TIMEOUT_MS + SETTLE_GRACE_MS) settle(past);
+      }
+      if (r < TOTAL_ROUNDS && now >= goAt(r) + GO_TIMEOUT_MS + SETTLE_GRACE_MS) settle(r);
       const key = [...g.scores.entries()].map(([id, s]) => `${id}:${s}`).sort().join(",");
       if (key !== lastBoardKey) {
         lastBoardKey = key;

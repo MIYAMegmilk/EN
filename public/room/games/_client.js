@@ -145,11 +145,17 @@ export function createRng(seed) {
   return {
     /** 0 以上 1 未満 */
     float: () => next() / 0x1_0000_0000,
-    /** min 以上 max 未満の整数 */
+    /**
+     * min 以上 max 未満の整数。
+     * 範囲が空（max <= min）でも **種を1つ進める**。サーバーの randomInt が
+     * そうしているためで、ここを揃えないと空範囲を1回通しただけで
+     * 以降の列が卓の全員で食い違う
+     */
     int: (min, max) => {
       const span = Math.floor(max) - Math.floor(min);
+      const r = next() / 0x1_0000_0000;
       if (span <= 0) return Math.floor(min);
-      return Math.floor(min) + Math.floor((next() / 0x1_0000_0000) * span);
+      return Math.floor(min) + Math.floor(r * span);
     },
     /** 配列を決定的に混ぜた新しい配列（Fisher-Yates） */
     shuffle: (items) => {

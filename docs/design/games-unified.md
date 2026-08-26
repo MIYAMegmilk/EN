@@ -67,7 +67,7 @@ v0.2 はそれを**基盤を1本に潰すことではなく、判断基準を迷
 具体的には次の3点で分散のコストを消している。
 
 - **一覧・開始経路・進行の正本は1つのまま**。クライアント専用ゲームも
-  `server/games/index.ts` のカタログに載り、`selectGame` → `startGame` → `gameView` → `endGame`
+  `server/games/index.ts` のカタログに載り、`selectGame` → `startGame` → `gameView` → 終了
   という同じ経路で動く（§2.8）。基盤が2つに割れるわけではない。
 - **登録の手数が同じ**。どちらも「`GAME_MODULES` に1行足す」で終わる。
 - **判断が3問のイエス/ノーで済む**（§1.3）。
@@ -246,7 +246,7 @@ state の描画履歴に積み、`viewChanged` で配る。途中参加・再接
 `server/games/client.ts`（新規）に次のファクトリを置く（**実測**: 実装済み）。
 
 ```ts
-clientGame({ id, title, description, minPlayers, maxPlayers, relayLogMax });
+clientGame({ id, title, description, minPlayers, maxPlayers, relayLogMax, payloadMaxBytes });
 ```
 
 これが通常の `GameModule`（`kind: "module"`）を**自動生成して返す**。
@@ -260,9 +260,17 @@ clientGame({ id, title, description, minPlayers, maxPlayers, relayLogMax });
 大きくすると view 1通が太り、配信量がその分だけ増えるので、
 「同時に飛び交いうるイベント件数」に合わせて小さく取る。
 
+`payloadMaxBytes` は中継 payload 1件の直列化サイズ上限（バイト）。
+省略時は `CLIENT_PAYLOAD_MAX_BYTES_DEFAULT = 256`【暫定値】、上限は共通の
+`GAME_EVENT_PAYLOAD_MAX_BYTES`（4KB）。**ルーム層の 4KB とは別に、ここでもう一段絞る。**
+理由は §2.8.2「配信量」のとおりで、`relayLogMax × payloadMaxBytes` が
+そのまま view 1通の上限＝ファンアウトの上限になるため。
+4KB を許すと改造クライアント**1台**で1卓あたりのファンアウトを桁違いに膨らませられる。
+収録3本はいずれも 64B で足りている（**実測**: `server/games/index.ts`）。
+
 生成されたモジュールは普通のモジュールなので、
-`selectGame` → `startGame` → `gameView` → `endGame`、途中参加・切断・再接続・
-ホスト交代・キック・`minPlayers` 判定が**すべて既存実装のまま効く**。
+`selectGame` → `startGame` → `gameView` → 終了（ホストの `skipPhase`）、
+途中参加・切断・再接続・ホスト交代・キック・`minPlayers` 判定が**すべて既存実装のまま効く**。
 クライアント側も `public/room/games/<id>.js` を動的 import する既存経路
 （**実測**: `public/app.js:219` の動的 `import()`）に乗る。
 
@@ -321,11 +329,11 @@ payload 4KB / ソフト 30 件毎秒（破棄）/ ハード 150 件毎秒（切�
 
 **実測**（`server/tests/games/client_traffic_test.ts`。10人卓・実際の view を JSON 化して計測）:
 
-| ゲーム | `relayLogMax` | 中継の件数 | 配信 | 合計 | view 1通の最大 | 平均 |
-|---|---|---|---|---|---|---|
-| mogura | 12 | 1人1件（最終得点） | 100通 | 111KB | 1,409B | 3.7KB/秒（30秒換算） |
-| reflex | 24 | 1人1ラウンド1件 | 500通 | 979KB | 2,368B | 19.6KB/秒（50秒換算） |
-| emoawase | 12 | 1人1件（タイム） | 100通 | 113KB | 1,441B | 1.3KB/秒（90秒換算） |
+| ゲーム | `relayLogMax` | `payloadMaxBytes` | 中継の件数 | 配信 | 合計 | view 1通の最大 | 平均 |
+|---|---|---|---|---|---|---|---|
+| mogura | 12 | 64B | 1人1件（最終得点） | 100通 | 111KB | 1,409B | 3.7KB/秒（30秒換算） |
+| reflex | 24 | 64B | 1人1ラウンド1件 | 500通 | 979KB | 2,368B | 19.6KB/秒（50秒換算） |
+| emoawase | 12 | 64B | 1人1件（タイム） | 100通 | 113KB | 1,441B | 1.3KB/秒（90秒換算） |
 
 いずれも draw の実測より1桁小さいため、**配信をまとめる仕組み（コアレス）は入れない**。
 代わりに次を**制約として守る**（守れないゲームは書かない）。
@@ -336,10 +344,15 @@ payload 4KB / ソフト 30 件毎秒（破棄）/ ハード 150 件毎秒（切�
 3. **`relayLogMax` はゲームごとに絞る。** 「同時に飛び交いうる件数」に合わせる。
    既定 32 のまま放置しない。view 1通の大きさは `relayLogMax` にほぼ比例する。
 
-最悪ケース（**実測**: ログを上限まで 4KB 近い payload で埋めた場合）は
-`relayLogMax` 24 件で view 1通 **72.5KB**。10人卓なら1回の配信で 725KB になるため、
-**大きい payload を高頻度で送る設計は成立しない**。上の3点はこの数字から来ている。
-これらの数値は上のテストで上限として固定してあり、太ればテストが落ちる。
+上の3点は**正規のクライアントの作法**であって、改造クライアントには効かない。
+そこで**サーバー側でも `payloadMaxBytes` で上限を掛けている**（§2.8.1）。
+`relayLogMax × payloadMaxBytes` が view 1通の理論上限になるので、
+1台の細工でファンアウトを膨らませられる幅がここで閉じる。
+
+**実測**（reflex = `relayLogMax` 24 × `payloadMaxBytes` 64B で、ログを上限まで埋めた場合）:
+view 1通 **3.1KB** / 10人卓で1回の配信 **30.6KB**。
+上限を掛ける前（ルーム層の 4KB のみ）は view 1通 72.5KB・1配信 725KB だったので、
+**約24分の1**に収まっている。これらの数値は上のテストで固定してあり、太ればテストが落ちる。
 
 #### 2.8.3 得点 — 公式スコアには算入しない
 
@@ -463,7 +476,7 @@ C の挙動は `server/games/client.ts` の実装（**実測**）。
 | キック | `playerKicked`。痕跡の除去はモジュールの責務 | 名簿から外し、**当人が残した `events` も消す**（卓から痕跡を消す） |
 | 人数不足 | `meta.minPlayers` を下回ったらルーム層が終了させる | キックで名簿が `minPlayers` を割ったら `ended` にする（`clientGame` の引数で宣言する） |
 | ホストの skipPhase | モジュールが解釈する | **そのあそびを終わらせる**（`ended` / `hostEnded`）。C はフェーズを持たないので飛ばす先が無く、ここを無視扱いにすると卓が playing のまま二度とロビーへ戻れない（**実測**: ルーム層が C2S から流すホスト操作は `skipPhase` だけで、`endGame` を流す経路が無い） |
-| ホストの endGame | `ended` 効果 | `ended: true` にして `ended`（`hostEnded`）を返す |
+| ホストの endGame | `ended` 効果 | skipPhase と同じ扱い。ただし**ルーム層にこれを流す経路は無い**（介面としてだけ残っている） |
 | サーバー再起動 | ルームごと消滅（§8 共通規定のまま） | 同じ |
 
 ---

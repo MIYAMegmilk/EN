@@ -14,7 +14,7 @@
  */
 
 import { assert, assertEquals } from "@std/assert";
-import { randomFloat, shuffle } from "../../games/module.ts";
+import { randomFloat, randomInt, shuffle } from "../../games/module.ts";
 
 const client = await import("../../../public/room/games/_client.js");
 
@@ -130,12 +130,36 @@ Deno.test("createRng.shuffle: サーバーの shuffle と同じ並びになる",
   }
 });
 
-Deno.test("createRng.int: 範囲内に収まり、空の範囲では min を返す", () => {
+Deno.test("createRng.int: サーバーの randomInt と同じ値を同じ順に返す", () => {
+  for (const seed of [1, 20260826, 0xffff_ffff]) {
+    const rng = client.createRng(seed);
+    let s = seed;
+    for (let i = 0; i < 20; i++) {
+      const expected = randomInt(s, 1200, 4001);
+      s = expected.seed;
+      assertEquals(rng.int(1200, 4001), expected.value, `seed=${seed} の ${i} 番目がずれている`);
+    }
+  }
+});
+
+Deno.test("createRng.int: 範囲内に収まる", () => {
   const rng = client.createRng(20260826);
   for (let i = 0; i < 500; i++) {
     const v = rng.int(1200, 4001);
     assert(Number.isInteger(v) && v >= 1200 && v <= 4000, `範囲外: ${v}`);
   }
+});
+
+Deno.test("createRng.int: 空の範囲でも min を返し、種はサーバーと同じだけ進む", () => {
+  // サーバーの randomInt は空範囲でも nextSeed を1回進める。ここを揃えないと、
+  // 空範囲を1回通しただけで以降の乱数列が卓の全員で食い違う
   assertEquals(client.createRng(1).int(5, 5), 5);
   assertEquals(client.createRng(1).int(5, 1), 5);
+  for (const [min, max] of [[5, 5], [5, 1]] as const) {
+    const rng = client.createRng(20260826);
+    assertEquals(rng.int(min, max), min);
+    // 空範囲を1回通したあとの続きが、サーバー側の続きと一致する
+    const after = randomInt(20260826, min, max);
+    assertEquals(rng.float(), randomFloat(after.seed).value, `[${min},${max}) の後がずれている`);
+  }
 });

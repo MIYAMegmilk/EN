@@ -31,16 +31,18 @@ export const GAME_MODULES: readonly GameModule[] = [
   wordWolfModule,
   hayaoshiModule,
   // --- ここから下はクライアント専用ゲーム（サーバー側の実装は無い。設計書 §7.1）---
-  // relayLogMax は「同時に飛び交いうるイベント件数」に合わせる。大きくすると
-  // view 1通が太り、配信量がその分だけ増える
+  // relayLogMax は「同時に飛び交いうるイベント件数」、payloadMaxBytes は「1件の大きさ」。
+  // **この2つの積が view 1通の上限**になり、そのまま配信量（fan-out）に効くので、
+  // どちらもゲームが実際に必要とする分だけに絞る（設計書 §2.8.2 の実測を参照）
   clientGame({
     id: "mogura",
     title: "もぐらたたき",
     description: "3×3のマスに出るもぐらを叩く。30秒で得点を競う（点は付かない）",
     minPlayers: 1,
     maxPlayers: 10,
-    // 送るのは1人1回の最終得点だけ。10人ぶん入れば足りる
+    // 送るのは1人1回の最終得点 { k:"final", s } だけ。10人ぶん入れば足りる
     relayLogMax: 12,
+    payloadMaxBytes: 64,
   }),
   clientGame({
     id: "reflex",
@@ -48,8 +50,9 @@ export const GAME_MODULES: readonly GameModule[] = [
     description: "緑になったら押す。全5ラウンドで反応速度を競う（点は付かない）",
     minPlayers: 2,
     maxPlayers: 10,
-    // 1ラウンドに1人1件。10人が同時に押しても1ラウンドぶんは収まる
+    // 1ラウンドに1人1件 { k:"t", r, rt }。10人が同時に押しても1ラウンドぶんは収まる
     relayLogMax: 24,
+    payloadMaxBytes: 64,
   }),
   clientGame({
     id: "emoawase",
@@ -57,8 +60,9 @@ export const GAME_MODULES: readonly GameModule[] = [
     description: "同じ絵の札を2枚めくって取る。全員同じ盤で速さを競う（点は付かない）",
     minPlayers: 1,
     maxPlayers: 10,
-    // 送るのは1人1回のタイムだけ
+    // 送るのは1人1回のタイム { k:"done", ms } だけ
     relayLogMax: 12,
+    payloadMaxBytes: 64,
   }),
 ];
 

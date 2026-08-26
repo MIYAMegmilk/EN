@@ -232,9 +232,13 @@ export function mount(container, api) {
     }
   }
 
-  // 画像が揃ってから盤を出す（読み込み中に押されて空札が見えるのを避ける）
+  // 画像が揃ってから盤を出す（読み込み中に押されて空札が見えるのを避ける）。
+  // update は何度でも呼ばれるので、ここで .then を1本だけ張り、
+  // update 側は pendingSeed を更新するだけにする（コールバックを積み増さない）
   let pendingSeed = null;
+  let imagesReady = false;
   preloaded.then(() => {
+    imagesReady = true;
     if (g.disposed) return;
     if (pendingSeed !== null && g.cards === null) buildBoard(pendingSeed);
     updateStatus();
@@ -251,11 +255,11 @@ export function mount(container, api) {
       if (g.startedAt === 0 && startedAt > 0) g.startedAt = startedAt;
       if (g.cards === null) {
         pendingSeed = seed;
-        preloaded.then(() => {
-          if (g.disposed || g.cards !== null) return;
+        // 画像が既に揃っているなら、その場で盤を作る（読み込み後に届いた view）
+        if (imagesReady && !g.disposed) {
           buildBoard(seed);
           updateStatus();
-        });
+        }
       }
       // 他人から届く payload は形を確かめてから使う（想定外は黙って捨てる）
       for (const event of relay.take(view)) {

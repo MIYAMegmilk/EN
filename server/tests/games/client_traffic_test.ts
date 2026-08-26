@@ -140,24 +140,45 @@ Deno.test("emoawase の配信量（10人・1人1件のタイムだけ）", () =>
   assert(r.totalBytes < 120 * 1024, `emoawase の配信量が想定より多い: ${r.totalBytes}B`);
 });
 
-Deno.test("最悪ケース: 中継ログが上限まで詰まっても view は payload 上限で頭打ちになる", () => {
-  // relayLogMax いっぱいまで、4KB 上限すれすれの payload を詰める
+Deno.test("最悪ケース: ゲームごとの payload 上限がファンアウトを頭打ちにする", () => {
+  // 改造クライアントは任意の payload を送れる。ルーム層の上限（4KB）だけだと
+  // 「4KB × ログ件数 × 人数 × 30件/秒」まで1台で膨らませられるので、
+  // ゲームごとの payloadMaxBytes でもう一段絞っている。ここはその抑止の確認
   const module = moduleOf("reflex");
   const roster = players(SEATS);
-  let state = module.init({ players: roster, now: T0, seed: SEED }).state;
+  const started = module.init({ players: roster, now: T0, seed: SEED }).state;
+
+  // 上限を超える payload は棄却され、中継ログに入らない
   const blob = "あ".repeat(1000); // UTF-8 で 3KB
+  const rejected = module.reduce(started, {
+    t: "clientEvent",
+    playerId: roster[0].id,
+    payload: { k: "x", blob },
+    now: T0,
+  });
+  assertEquals(rejected.error, "INVALID_INPUT");
+  assertEquals((rejected.state as ClientGameState).events.length, 0);
+
+  // 上限ぎりぎりの payload でログを埋めても、view 1通は小さいままになる
+  const fill = "a".repeat(40); // {"k":"x","p":"…40文字…"} で 64B に収まる
+  let state = started;
   for (let i = 0; i < 40; i++) {
-    state = module.reduce(state, {
+    const r = module.reduce(state, {
       t: "clientEvent",
       playerId: roster[i % SEATS].id,
-      payload: { k: "x", blob },
+      payload: { k: "x", p: fill },
       now: T0,
-    }).state;
+    });
+    assertEquals(r.error, undefined, "上限内の payload が弾かれている");
+    state = r.state;
   }
   const bytes = viewBytes(module, state, roster[0].id);
   const log = (state as ClientGameState).events.length;
-  console.log(`  [実測] 最悪ケース: 中継ログ ${log}件 / view 1通 ${(bytes / 1024).toFixed(1)}KB`);
-  // relayLogMax(24) × payload 上限(4KB) が view の理論上限。1通 100KB を超えない
+  console.log(
+    `  [実測] 最悪ケース: 中継ログ ${log}件 / view 1通 ${(bytes / 1024).toFixed(1)}KB / ` +
+      `1配信（10人）${((bytes * SEATS) / 1024).toFixed(1)}KB`,
+  );
+  // relayLogMax(24) × payloadMaxBytes(64B) が view の理論上限。1通 8KB を超えない
   assertEquals(log, 24);
-  assert(bytes < 100 * 1024, `view 1通が想定より大きい: ${bytes}B`);
+  assert(bytes < 8 * 1024, `view 1通が想定より大きい: ${bytes}B`);
 });

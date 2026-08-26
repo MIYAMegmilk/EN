@@ -12,13 +12,15 @@
 import { assert, assertEquals } from "@std/assert";
 import type { EnginePlayerInput } from "../../engine.ts";
 import {
+  CLIENT_PAYLOAD_MAX_BYTES_DEFAULT,
   CLIENT_RELAY_LOG_DEFAULT,
   CLIENT_RELAY_LOG_MAX,
   clientGame,
   type ClientGameState,
   type ClientGameView,
 } from "../../games/client.ts";
-import type { ModuleEffect, ModuleResult } from "../../games/module.ts";
+import type { ModuleEffect, ModuleEvent, ModuleResult } from "../../games/module.ts";
+import { GAME_EVENT_PAYLOAD_MAX_BYTES } from "../../types.ts";
 import { findModuleGame, GAME_MODULES } from "../../games/index.ts";
 
 const T0 = 1_700_000_000_000;
@@ -311,4 +313,127 @@ Deno.test("移植した2本と画像サンプルがカタログに載ってい�
 Deno.test("カタログのIDは重複しない", () => {
   const ids = GAME_MODULES.map((m) => m.id);
   assertEquals(ids.length, new Set(ids).size, `重複がある: ${ids.join(",")}`);
+});
+
+// ---------------------------------------------------------------------------
+// payload の大きさ（ファンアウトの抑止）
+// ---------------------------------------------------------------------------
+
+Deno.test("payloadMaxBytes を超える中継は棄却する（1台でファンアウトを膨らませない）", () => {
+  const state = start(["a", "b"]);
+  // testgame は payloadMaxBytes を指定していないので既定（256B）
+  assertEquals(state.payloadMaxBytes, CLIENT_PAYLOAD_MAX_BYTES_DEFAULT);
+  const huge = { k: "x", blob: "あ".repeat(200) }; // UTF-8 で 600B 超
+  const r = game.reduce(state, { t: "clientEvent", playerId: "a", payload: huge, now: T0 });
+  assertEquals(r.error, "INVALID_INPUT");
+  assertEquals((r.state as ClientGameState).events.length, 0);
+  // 上限内はそのまま通る
+  const ok = game.reduce(state, {
+    t: "clientEvent",
+    playerId: "a",
+    payload: { k: "x", v: 1 },
+    now: T0,
+  });
+  assertEquals(ok.error, undefined);
+  assertEquals((ok.state as ClientGameState).events.length, 1);
+});
+
+Deno.test("payloadMaxBytes は 1..GAME_EVENT_PAYLOAD_MAX_BYTES に丸められる", () => {
+  const wide = clientGame({
+    id: "wide",
+    title: "ひろい",
+    description: "上限超え",
+    minPlayers: 1,
+    maxPlayers: 10,
+    payloadMaxBytes: 999_999,
+  });
+  assertEquals(start(["a"], wide).payloadMaxBytes, GAME_EVENT_PAYLOAD_MAX_BYTES);
+  const bad = clientGame({
+    id: "badbytes",
+    title: "こわれ",
+    description: "0以下",
+    minPlayers: 1,
+    maxPlayers: 10,
+    payloadMaxBytes: 0,
+  });
+  assertEquals(start(["a"], bad).payloadMaxBytes, CLIENT_PAYLOAD_MAX_BYTES_DEFAULT);
+});
+
+Deno.test("直列化できない payload（undefined を含む）は棄却する", () => {
+  const state = start(["a", "b"]);
+  const r = game.reduce(state, { t: "clientEvent", playerId: "a", payload: undefined, now: T0 });
+  assertEquals(r.error, "INVALID_INPUT");
+});
+
+// ---------------------------------------------------------------------------
+// 純粋関数であること（設計書 §7 のチェックリスト）
+// ---------------------------------------------------------------------------
+
+Deno.test("reduce はどのイベントでも入力の state を書き換えない", () => {
+  const events: ModuleEvent[] = [
+    { t: "clientEvent", playerId: "a", payload: { k: "x", v: 1 }, now: T0 },
+    { t: "chatMessage", playerId: "a", text: "やあ", now: T0 },
+    { t: "timeout", now: T0 },
+    { t: "playerJoined", playerId: "c", nickname: "しい", now: T0 },
+    { t: "playerLeft", playerId: "b", now: T0 },
+    { t: "playerRejoined", playerId: "b", now: T0 },
+    { t: "playerKicked", playerId: "b", now: T0 },
+    { t: "skipPhase", now: T0 },
+    { t: "endGame", now: T0 },
+  ];
+  for (const event of events) {
+    // 中継が1件入った状態から始める（events / players の両方を触らせる）
+    const base = game.reduce(start(["a", "b", "c"]), {
+      t: "clientEvent",
+      playerId: "b",
+      payload: { k: "x", v: 1 },
+      now: T0,
+    }).state as ClientGameState;
+    const before = JSON.stringify(base);
+    game.reduce(base, event);
+    assertEquals(JSON.stringify(base), before, `${event.t} が入力の state を書き換えている`);
+  }
+});
+
+Deno.test("view は state を書き換えない（同じ state から何度呼んでも同じ）", () => {
+  const state = game.reduce(start(["a", "b"]), {
+    t: "clientEvent",
+    playerId: "a",
+    payload: { k: "x" },
+    now: T0,
+  }).state as ClientGameState;
+  const before = JSON.stringify(state);
+  const first = JSON.stringify(viewOf(state, "a"));
+  const second = JSON.stringify(viewOf(state, "a"));
+  assertEquals(first, second);
+  assertEquals(JSON.stringify(state), before);
+});
+
+Deno.test("init / reduce は同じ入力から同じ結果を返す（決定的）", () => {
+  const a = game.init({ players: players("a", "b"), now: T0, seed: SEED });
+  const b = game.init({ players: players("a", "b"), now: T0, seed: SEED });
+  assertEquals(JSON.stringify(a.state), JSON.stringify(b.state));
+  const ra = game.reduce(a.state as ClientGameState, {
+    t: "clientEvent",
+    playerId: "a",
+    payload: { k: "x" },
+    now: T0 + 1,
+  });
+  const rb = game.reduce(b.state as ClientGameState, {
+    t: "clientEvent",
+    playerId: "a",
+    payload: { k: "x" },
+    now: T0 + 1,
+  });
+  assertEquals(JSON.stringify(ra.state), JSON.stringify(rb.state));
+});
+
+Deno.test("client.ts は Math.random / Date.now を呼ばない（ソースを走査して確認）", async () => {
+  const source = await Deno.readTextFile(
+    new URL("../../games/client.ts", import.meta.url),
+  );
+  // コメント中の言及に当たらないよう、呼び出しの形だけを探す
+  assert(!/Math\.random\s*\(/.test(source), "Math.random() を呼んでいる");
+  assert(!/Date\.now\s*\(/.test(source), "Date.now() を呼んでいる");
+  assert(!/await/.test(source), "await を使っている");
 });

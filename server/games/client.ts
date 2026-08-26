@@ -32,6 +32,7 @@
  */
 
 import type { EnginePlayerInput } from "../engine.ts";
+import { GAME_EVENT_PAYLOAD_MAX_BYTES } from "../types.ts";
 import type { GameModule, ModuleEvent, ModuleResult } from "./module.ts";
 import { moduleFail, moduleNoop, moduleOk } from "./module.ts";
 
@@ -40,6 +41,18 @@ export const CLIENT_RELAY_LOG_DEFAULT = 32;
 
 /** 中継ログの上限として指定できる最大件数。【暫定値】 */
 export const CLIENT_RELAY_LOG_MAX = 128;
+
+/**
+ * 中継 payload 1件の直列化サイズの既定上限（バイト）。【暫定値】
+ *
+ * ルーム層の `GAME_EVENT_PAYLOAD_MAX_BYTES`（4KB）より **ずっと小さくしてある**。
+ * この経路は `clientEvent` 1件ごとに接続数ぶんの `gameView` を配り、その1通に
+ * 中継ログ全件が載る（§2.8.2 の配信量）。4KB を許すと
+ * 「4KB × ログ件数 × 人数 × 30件/秒」まで**改造クライアント1台で**膨らませられる。
+ * 正規のクライアント専用ゲームが送るのは「自分の得点」「自分の反応時間」程度なので、
+ * 既定を 256B に絞り、必要なゲームだけ spec で明示的に広げる
+ */
+export const CLIENT_PAYLOAD_MAX_BYTES_DEFAULT = 256;
 
 /** クライアント専用ゲーム1本の宣言。index.ts に書くのはこれだけ */
 export type ClientGameSpec = {
@@ -59,6 +72,15 @@ export type ClientGameSpec = {
    * 省略時は CLIENT_RELAY_LOG_DEFAULT
    */
   relayLogMax?: number;
+  /**
+   * 中継 payload 1件の直列化サイズ上限（バイト）。
+   * 省略時は CLIENT_PAYLOAD_MAX_BYTES_DEFAULT（256B）。
+   * 上限は共通の GAME_EVENT_PAYLOAD_MAX_BYTES（4KB）で、それより大きい値は丸める。
+   *
+   * **「view 1通の最大 ≒ relayLogMax × payloadMaxBytes」** になるので、
+   * この2つの積がそのままファンアウトの上限になる。必要な分だけ広げること
+   */
+  payloadMaxBytes?: number;
 };
 
 /** 中継された1件。payload の中身はサーバーにとって不透明 */
@@ -94,6 +116,8 @@ export type ClientGameState = {
   ended: boolean;
   /** このゲームの中継ログ上限（spec のコピー。reduce を純粋関数のままにするため） */
   relayLogMax: number;
+  /** このゲームの中継 payload の上限（バイト。spec のコピー） */
+  payloadMaxBytes: number;
 };
 
 /** 表示側（public/room/games/<id>.js）へ配る view */
@@ -110,9 +134,28 @@ function toRelayPlayer(p: EnginePlayerInput): RelayPlayer {
   return { id: p.id, name: p.nickname, connected: p.connected };
 }
 
-/** 接続中の在籍者数。minPlayers 割れの判定に使う */
-function activeCount(players: readonly RelayPlayer[]): number {
+/**
+ * 在籍者数。**切断中（connected: false）の人も数える。**
+ *
+ * 切断には60秒の猶予があり（§3.2）、その間は席が残っている。
+ * 猶予が切れればルーム層が `playerKicked` を流してくるので、そのとき在籍から外れて
+ * minPlayers 割れの判定に掛かる。chicken.ts の `next.order.length` と同じ数え方
+ */
+function enrolledCount(players: readonly RelayPlayer[]): number {
   return players.length;
+}
+
+/** payload の直列化サイズが上限を超えるか。直列化できない値は超過と同じ扱いにする */
+function payloadExceedsLimit(payload: unknown, maxBytes: number): boolean {
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(payload);
+  } catch {
+    return true;
+  }
+  // undefined は JSON.stringify が undefined を返す。中継しても意味が無いので棄却する
+  if (typeof json !== "string") return true;
+  return new TextEncoder().encode(json).length > maxBytes;
 }
 
 /**
@@ -123,10 +166,11 @@ function activeCount(players: readonly RelayPlayer[]): number {
  */
 export function clientGame(spec: ClientGameSpec): GameModule<ClientGameState, ClientGameView> {
   const relayLogMax = clampRelayLogMax(spec.relayLogMax);
+  const payloadMaxBytes = clampPayloadMaxBytes(spec.payloadMaxBytes);
 
   /** minPlayers を割ったら中断する（設計書 §5） */
   function endIfTooFew(state: ClientGameState): ModuleResult<ClientGameState> | null {
-    if (activeCount(state.players) >= spec.minPlayers) return null;
+    if (enrolledCount(state.players) >= spec.minPlayers) return null;
     const next: ClientGameState = { ...state, ended: true };
     return moduleOk(next, [
       { t: "viewChanged" },
@@ -154,6 +198,7 @@ export function clientGame(spec: ClientGameSpec): GameModule<ClientGameState, Cl
           events: [],
           ended: false,
           relayLogMax,
+          payloadMaxBytes,
         },
         [{ t: "viewChanged" }],
       );
@@ -187,6 +232,13 @@ function clampRelayLogMax(value: number | undefined): number {
   return Math.min(value, CLIENT_RELAY_LOG_MAX);
 }
 
+/** payloadMaxBytes を 1..GAME_EVENT_PAYLOAD_MAX_BYTES に収める */
+function clampPayloadMaxBytes(value: number | undefined): number {
+  if (value === undefined) return CLIENT_PAYLOAD_MAX_BYTES_DEFAULT;
+  if (!Number.isInteger(value) || value < 1) return CLIENT_PAYLOAD_MAX_BYTES_DEFAULT;
+  return Math.min(value, GAME_EVENT_PAYLOAD_MAX_BYTES);
+}
+
 /**
  * イベントを1件処理する。clientGame の中に書くと入れ子が深くなるので外に出した。
  * spec / endIfTooFew を引数で受け取るだけで、外部の状態には触らない（純粋関数）
@@ -205,6 +257,11 @@ function reduceClientGame(
       // 在籍していない人からのイベントは中継しない（キック直後の取りこぼし対策）
       if (!state.players.some((p) => p.id === event.playerId)) {
         return moduleFail(state, "PHASE_MISMATCH", "この卓の参加者ではありません");
+      }
+      // ログ全件が view 1通に載るので、payload の大きさがそのままファンアウトに効く。
+      // ルーム層の 4KB とは別に、ゲームごとの上限でもう一段絞る
+      if (payloadExceedsLimit(event.payload, state.payloadMaxBytes)) {
+        return moduleFail(state, "INVALID_INPUT", "ゲーム内イベントが大きすぎます");
       }
       const n = state.seq + 1;
       const events = [...state.events, { n, from: event.playerId, payload: event.payload }];

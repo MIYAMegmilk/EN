@@ -8,9 +8,24 @@
  */
 
 import { assert, assertEquals, assertExists } from "@std/assert";
-import { asC2S, C2S_TYPES, clientIp, startServer, useKuromojiSenryu } from "../main.ts";
+import {
+  asC2S,
+  C2S_TYPES,
+  clientIp,
+  MessageRateLimiter,
+  startServer,
+  useKuromojiSenryu,
+} from "../main.ts";
 import type { ClientLink } from "../rooms.ts";
-import { type C2S, type ErrorCode, type PublicRoomSummary, type S2C } from "../types.ts";
+import {
+  type C2S,
+  type ErrorCode,
+  type PublicRoomSummary,
+  type S2C,
+  WS_GAME_EVENT_HARD_MAX,
+  WS_GAME_EVENT_RATE_MAX,
+  WS_RATE_MAX,
+} from "../types.ts";
 
 /** 受信内容を捨てるだけの接続。ルームを立てる副作用だけが要るテストで使う */
 class MockLink implements ClientLink {
@@ -551,5 +566,101 @@ Deno.test("GET / は正しいCookieでログイン済みなら従来どおり in
   } finally {
     await handle.shutdown();
     kv.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// gameEvent のレート制限（設計書 docs/design/games-unified.md §2.2 / §9.3）
+//
+// もとは sandboxSignal 枠のテストだった。サンドボックス撤去にあたって、同じ機構
+// （MessageRateLimiter による WS の別枠）を使う後継の gameEvent 枠へ移してある。
+// gameEvent はクライアント専用ゲームの主経路になったので、ここが一般枠（20件/秒）に
+// 落ちていると、アクションゲームの正当な送信でプレイヤーが切断される。
+// ---------------------------------------------------------------------------
+
+Deno.test("ユニット: gameEvent のレート上限はコンストラクタで受け取った値になる", () => {
+  const now = 1_000_000;
+  const soft = new MessageRateLimiter(WS_GAME_EVENT_RATE_MAX, () => now);
+  for (let i = 1; i <= WS_GAME_EVENT_RATE_MAX; i++) {
+    assertEquals(soft.accept(), true, `gameEvent ソフト枠の${i}件目は受理される`);
+  }
+  assertEquals(soft.accept(), false, `gameEvent ソフト枠の${WS_GAME_EVENT_RATE_MAX + 1}件目は違反`);
+
+  assert(
+    WS_GAME_EVENT_RATE_MAX < WS_GAME_EVENT_HARD_MAX,
+    "破棄で済ませる上限より切断の上限が大きくなければ破棄の余地がない",
+  );
+  const hard = new MessageRateLimiter(WS_GAME_EVENT_HARD_MAX, () => now);
+  for (let i = 1; i <= WS_GAME_EVENT_HARD_MAX; i++) {
+    assertEquals(hard.accept(), true, `gameEvent ハード枠の${i}件目は受理される`);
+  }
+  assertEquals(hard.accept(), false, `gameEvent ハード枠の${WS_GAME_EVENT_HARD_MAX + 1}件目は違反`);
+});
+
+Deno.test("結合: gameEvent はソフト上限を超えても切断されず、超過分だけ破棄される（別枠）", async () => {
+  const handle = startServer(0);
+  const client = await WsTestClient.connect(handle.port);
+  try {
+    // ルーム未参加なので受理された分だけ ROOM_NOT_FOUND が返る。これで受理件数を数えられる
+    const burst = WS_GAME_EVENT_RATE_MAX + 20;
+    for (let i = 0; i < burst; i++) client.send({ t: "gameEvent", payload: { i } });
+
+    await waitUntil(
+      () => client.countError("ROOM_NOT_FOUND") >= WS_GAME_EVENT_RATE_MAX,
+      "gameEvent ソフト上限までの受理",
+    );
+    // バースト後も通常メッセージは処理される（切断されていないことの確認）
+    client.send({ t: "join", roomCode: "000000", nickname: "x" });
+    await waitUntil(
+      () => client.countError("ROOM_NOT_FOUND") >= WS_GAME_EVENT_RATE_MAX + 1,
+      "バースト後のメッセージ処理",
+    );
+
+    assertEquals(client.closeCode, null, "ソフト上限の超過では切断されない");
+    assertEquals(
+      client.countError("ROOM_NOT_FOUND"),
+      WS_GAME_EVENT_RATE_MAX + 1,
+      "gameEvent はソフト上限までのみ受理され、後続の join 1件が加わる",
+    );
+    assertEquals(client.countError("RATE_LIMITED"), 1, "RATE_LIMITED の通知は判定窓につき1回");
+  } finally {
+    if (client.closeCode === null) {
+      client.send({ t: "leave" });
+    }
+    await handle.shutdown();
+  }
+});
+
+Deno.test("結合: gameEvent はハードキャップを超えると乱用とみなして切断される", async () => {
+  const handle = startServer(0);
+  const client = await WsTestClient.connect(handle.port);
+  try {
+    const burst = WS_GAME_EVENT_HARD_MAX + 1;
+    for (let i = 0; i < burst; i++) client.send({ t: "gameEvent", payload: { i } });
+
+    await Promise.race([client.closed, delay(WS_WAIT_TIMEOUT_MS)]);
+    assertEquals(client.closeCode, 1008, "policy violation の 1008 で切断される");
+    const last = client.received()[client.received().length - 1];
+    assertExists(last);
+    assert(last.t === "error" && last.code === "RATE_LIMITED", "切断前に RATE_LIMITED が届く");
+  } finally {
+    await handle.shutdown();
+  }
+});
+
+Deno.test("結合: gameEvent の連投は一般枠（20件/秒）を消費しない", async () => {
+  const handle = startServer(0);
+  const client = await WsTestClient.connect(handle.port);
+  try {
+    // 一般枠の上限を超える件数を gameEvent として送っても、一般枠は減らない
+    const burst = WS_RATE_MAX * 2;
+    for (let i = 0; i < burst; i++) client.send({ t: "gameEvent", payload: { i } });
+    await waitUntil(
+      () => client.countByType("error") >= WS_RATE_MAX,
+      "gameEvent バーストの処理完了",
+    );
+    assertEquals(client.closeCode, null, "一般枠の 20件/秒 では切断されていない");
+  } finally {
+    await handle.shutdown();
   }
 });
