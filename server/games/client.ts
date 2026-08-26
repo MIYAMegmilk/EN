@@ -266,10 +266,14 @@ function reduceClientGame(
       return moduleOk(next, [{ t: "viewChanged" }]);
     }
 
+    // ホストの「すすめる」と「終了」はどちらもゲームを終わらせる。
+    //
+    // クライアント専用ゲームはフェーズを持たないので、skipPhase に「飛ばす先」が無い。
+    // ここを何もしない扱いにすると、**卓が playing のまま二度とロビーへ戻れなくなる**
+    // （**実測**: rooms.ts が C2S から流すホスト操作は skipPhase だけで、endGame を
+    // 流す経路が無い。`grep -n '"endGame"' server/rooms.ts` は0件）。
+    // したがって skipPhase を「このあそびを終わる」と読み替える
     case "skipPhase":
-      // 進行を持っていないので飛ばす先が無い。ホストが終わらせたいときは endGame を使う
-      return moduleNoop(state);
-
     case "endGame":
       return moduleOk({ ...state, ended: true }, [
         { t: "viewChanged" },

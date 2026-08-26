@@ -15,7 +15,7 @@
  *   - 全5ラウンド。ラウンドが始まると画面が灰色になり、1.2〜4.0秒後に緑になる。
  *   - 緑になってから最も速く押した人が3点、2位が2点、3位以下は1点。
  *   - 緑になる前に押すとフライングで、そのラウンドは0点。
- *   - 全ラウンド後に総合順位を出す。終わらせるのはホストの「終了」ボタン。
+ *   - 全ラウンド後に総合順位を出す。終わらせるのはホストの「すすめる」（skipPhase）。
  *   - **ここでの得点は宴の公式スコアではない**（クライアント専用ゲームの定義2）。
  *
  * 通信（中継。1人1ラウンドにつき1件だけ）:
@@ -205,7 +205,7 @@ export function mount(container, api) {
     if (g.ended || r >= TOTAL_ROUNDS) {
       pad.style.background = "#2f3a4a";
       padText.textContent = "おわり";
-      shell.status.textContent = "全5ラウンド終了。ホストが終わらせるまで結果を出しています";
+      shell.status.textContent = "全5ラウンド終了。ホストが「すすめる」を押すまで結果を出しています";
       return;
     }
     const roundStart = g.startedAt + r * ROUND_MS;

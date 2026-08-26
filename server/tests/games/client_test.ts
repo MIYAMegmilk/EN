@@ -259,11 +259,10 @@ Deno.test("ホストの終了で ended になり、以後のイベントは受�
   assertEquals((kicked.state as ClientGameState).players.map((p) => p.id), ["a"]);
 });
 
-Deno.test("skipPhase / timeout / chatMessage は何もしない", () => {
+Deno.test("timeout / chatMessage は何もしない", () => {
   const state = start(["a", "b"]);
   for (
     const event of [
-      { t: "skipPhase", now: T0 } as const,
       { t: "timeout", now: T0 } as const,
       { t: "chatMessage", playerId: "a", text: "こんばんは", now: T0 } as const,
     ]
@@ -272,6 +271,17 @@ Deno.test("skipPhase / timeout / chatMessage は何もしない", () => {
     assertEquals(r.changed, false, `${event.t} が状態を変えている`);
     assertEquals(r.effects.length, 0);
   }
+});
+
+Deno.test("skipPhase はゲームを終わらせる（卓が playing のまま固まらない）", () => {
+  // ルーム層が C2S から流すホスト操作は skipPhase だけで、endGame を流す経路が無い。
+  // ここを何もしない扱いにすると、卓が二度とロビーへ戻れなくなる
+  const state = start(["a", "b"]);
+  const r = game.reduce(state, { t: "skipPhase", now: T0 + 1 });
+  assertEquals(kinds(r), ["viewChanged", "ended"]);
+  const ended = r.effects.find((e) => e.t === "ended");
+  assert(ended !== undefined && ended.t === "ended" && ended.reason === "hostEnded");
+  assert((r.state as ClientGameState).ended);
 });
 
 Deno.test("init は seed と startedAt を全員へ同じ値で配る（通信なしの同期の土台）", () => {
