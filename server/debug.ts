@@ -252,9 +252,9 @@ export class DebugApi {
     private readonly recorder: DebugRecorder,
     private readonly buildSummary: () => Record<string, unknown>,
     /**
-     * ログイン・登録のレート制限をリセットする関数。ip を指定すればそのIPの枠だけ、
-     * 省略すれば全IPの枠を消す。呼び出し元（main.ts）で AuthApi が無い（kv 未設定）
-     * ときは null を渡す。
+     * ログイン・登録・プロフィール保存のレート制限をリセットする関数。ip を指定すれば
+     * そのIPの枠だけ、省略すれば全IPの枠を消す。呼び出し元（main.ts）で AuthApi が
+     * 無い（kv 未設定）ときは null を渡す。
      */
     private readonly resetLimits: ((ip?: string) => ResetLimitsResult) | null = null,
   ) {}
