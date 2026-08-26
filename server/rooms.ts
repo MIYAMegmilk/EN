@@ -1184,6 +1184,11 @@ export class RoomManager {
       return;
     }
     room.blockedSessions.add(target.sessionToken);
+    // TODO(ノック実装者): 下の2つの掃除は sessionToken の突き合わせで動く。
+    // ノックを実装するときは、承認時に配ったトークンを入室した参加者へ
+    // 引き継がせること（player.sessionToken に入れる）。newPlayer() が毎回
+    // 新しい値を発行するため、引き継がないとここが何にもマッチせず、
+    // キックされた人が元のノック用トークンで再ノックできてしまう
     for (const [token, pending] of room.pendingEntries) {
       if (pending.sessionToken === target.sessionToken) room.pendingEntries.delete(token);
     }

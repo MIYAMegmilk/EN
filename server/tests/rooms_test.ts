@@ -1178,6 +1178,32 @@ Deno.test("キック: 同じ session では入り直せない（BLOCKED）", () 
   manager.dispose();
 });
 
+Deno.test("キック: session を積まない join でも戻れない（実クライアントの経路）", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
+  assertExists(guest.state);
+  const guestId = guest.state.snapshot.youId;
+  const session = guest.state.snapshot.session;
+  assertExists(session);
+
+  manager.handle(host.link, { t: "kick", playerId: guestId });
+
+  // 画面が session を積み忘れると、サーバーは前のトークンを見られないまま
+  // 新規参加として通してしまう。app.js は保存済みトークンを必ず積むので、
+  // ここでも同じ形を再現して塞がっていることを確かめる
+  const again = new MockLink();
+  manager.handle(again, {
+    t: "join",
+    roomCode: host.snapshot.code,
+    nickname: "ゲスト",
+    session,
+  });
+  assertEquals(last(again, "error")?.code, "BLOCKED");
+  assertEquals(last(again, "roomState"), undefined, "入室していない");
+  manager.dispose();
+});
+
 Deno.test("キック: 非ホストは実行できない（NOT_HOST）", () => {
   const { manager } = setup();
   const host = createRoom(manager);

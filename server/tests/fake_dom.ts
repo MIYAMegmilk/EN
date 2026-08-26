@@ -69,7 +69,25 @@ export class FakeElement {
     this.parent?.removeChild(this);
   }
 
-  addEventListener(): void {}
+  /**
+   * 登録された handler は捨てずに持つ。
+   * ボタンを押したときに何が送られるかを試したいテストがあるため（click 参照）
+   */
+  readonly handlers = new Map<string, ((event: unknown) => void)[]>();
+
+  addEventListener(type?: string, handler?: (event: unknown) => void): void {
+    if (typeof type !== "string" || typeof handler !== "function") return;
+    const bucket = this.handlers.get(type) ?? [];
+    bucket.push(handler);
+    this.handlers.set(type, bucket);
+  }
+
+  /** 押す。登録順に click の handler を呼ぶ */
+  click(): void {
+    for (const handler of this.handlers.get("click") ?? []) {
+      handler({ target: this, preventDefault: () => {}, stopPropagation: () => {} });
+    }
+  }
 
   /** 表示に関わる呼び出しは受け流す。テストで見るのは textContent と class */
   focus(): void {}

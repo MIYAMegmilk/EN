@@ -379,21 +379,20 @@ function confirmKick(player) {
   if (pendingKick !== null && pendingKick.playerId === player.id) {
     clearPendingKick();
     send({ t: "kick", playerId: player.id });
-    showError("");
+    renderAll();
     return;
   }
   clearPendingKick();
-  showNotice(
-    `${player.nickname} さんにお引き取りいただきます。` +
-      "よろしければもう一度押してください（この卓には戻れなくなります）",
-  );
   pendingKick = {
     playerId: player.id,
     timer: setTimeout(() => {
       pendingKick = null;
-      showError("");
+      renderAll();
     }, 6000),
   };
+  // ボタンのラベルを「本当に？」に変える。再描画されても pendingKick から
+  // 組み立て直すので、入室などで描き直されても armed のまま保たれる
+  renderAll();
 }
 
 /**
@@ -483,10 +482,16 @@ function receive(msg) {
     case "finalResult":
       renderScores("最終結果", msg.scores);
       break;
-    case "kicked":
+    case "kicked": {
+      // キックされた卓のトークンは残す。捨てると次に入り直すときに提示できず、
+      // サーバーがブロックを判定できなくなる（§3.1）。resetToEntry() は
+      // ふつうの退室と共通なので、ここで保存し直す
+      const kickedFrom = store.load();
       resetToEntry();
+      if (kickedFrom !== null) store.save(kickedFrom.code, kickedFrom.session);
       showError("ルームから退出しました");
       break;
+    }
     case "error":
       pendingRoomMeta = null;
       // 再起動からの復帰 join が失敗したときだけ、事実の通知として扱う。
@@ -572,7 +577,14 @@ function renderAll() {
     // お引き取り（§3.1）。ホストにだけ、自分以外の行に出す。
     // 押した相手はこの卓に戻れなくなるので、確認を1枚挟む
     if (snapshot.youAreHost && p.id !== snapshot.youId) {
-      const kick = el("button", "お引き取り", "btn btn-red btn-mini");
+      // 確認中かどうかはボタン自身に出す。共有の #error に出すと、誰かが入室した
+      // ときの showError("") で文言だけ消え、押せば飛ぶ状態が黙って残ってしまう
+      const armed = pendingKick !== null && pendingKick.playerId === p.id;
+      const kick = el(
+        "button",
+        armed ? "本当に？" : "お引き取り",
+        armed ? "btn btn-red btn-mini is-armed" : "btn btn-red btn-mini",
+      );
       kick.type = "button";
       kick.dataset.playerId = p.id;
       kick.addEventListener("click", () => confirmKick(p));
@@ -1368,6 +1380,13 @@ function bind() {
     const msg = { t: "join", roomCode: $("code").value };
     const nickname = $("nickname").value.trim();
     if (nickname.length > 0) msg.nickname = nickname;
+    // 同じ卓のトークンを持っていれば必ず積む。猶予内なら再接続として復帰でき、
+    // キックされていればサーバーが BLOCKED を返せる（§3.1）。
+    // 積まないと、追い出された人がコードを打ち直すだけで戻れてしまう
+    const saved = store.load();
+    if (saved !== null && String(saved.code) === msg.roomCode.trim()) {
+      msg.session = saved.session;
+    }
     send(msg);
   });
   $("game-open").addEventListener("click", () => toggleGamePlatform(true));
