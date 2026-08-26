@@ -428,6 +428,49 @@ function renderKnocks(snapshot) {
 }
 
 /**
+ * ランダムマッチ（§3.1.2）の待機状態。
+ * サーバーが唯一の状態機械なので、ここは表示のためだけに持つ。
+ */
+let queueWaiting = false;
+
+/** 待機表示を出し入れする */
+function renderQueue(text) {
+  queueWaiting = text !== null;
+  $("queue-waiting").classList.toggle("hidden", !queueWaiting);
+  $("queue-join").disabled = queueWaiting;
+  if (text !== null) $("queue-status").textContent = text;
+}
+
+/** 相席の待機列に並ぶ。あだ名は空欄でよい（しゅんぴが二つ名を付ける） */
+function joinQueue() {
+  state.rejoinAfterRestart = false;
+  pendingRoomMeta = null;
+  const msg = { t: "joinQueue" };
+  const nickname = $("nickname").value.trim();
+  if (nickname.length > 0) msg.nickname = nickname;
+  send(msg);
+  renderQueue("席を探しています…");
+}
+
+/** 待機列から抜ける */
+function leaveQueue() {
+  send({ t: "leaveQueue" });
+  renderQueue(null);
+  showError("");
+}
+
+/** 待っている人数の目安と、次に席が合うまでの見込みを出す */
+function handleQueueStatus(msg) {
+  if (!queueWaiting) return;
+  const seconds = Math.max(0, Math.round((msg.nextCheckAt - Date.now()) / 1000));
+  const others = Math.max(0, msg.waiting - 1);
+  const company = others === 0
+    ? "いまはあなただけです"
+    : `ほかに${others}人が探しています`;
+  renderQueue(`席を探しています…（${company}／次の見合わせまで約${seconds}秒）`);
+}
+
+/**
  * 卓から離れた状態に戻し、一覧の見える画面を描き直す。
  * #entry の hidden が外れると rooms.js が MutationObserver で一覧を取り直すので、
  * ここでは一覧の更新を明示的に呼ばなくてよい。
@@ -435,6 +478,7 @@ function renderKnocks(snapshot) {
  */
 function resetToEntry() {
   store.drop();
+  renderQueue(null);
   // 卓を出たらざわめきも止める。一覧に戻ったのに店内の音が続くと居場所が分からない
   Sound.stop("gaya");
   state.snapshot = null;
@@ -512,6 +556,14 @@ function receive(msg) {
       break;
     case "finalResult":
       renderScores("最終結果", msg.scores);
+      break;
+    case "queueStatus":
+      handleQueueStatus(msg);
+      break;
+    case "matched":
+      // 直後に roomState が続くので、ここでは待機表示を畳むだけでよい
+      renderQueue(null);
+      showNotice("相席が決まりました。入店します");
       break;
     case "knockResult":
       handleKnockResult(msg);
@@ -1404,6 +1456,9 @@ function bind() {
   };
   $("visibility").addEventListener("change", syncPassphraseField);
   syncPassphraseField();
+
+  $("queue-join").addEventListener("click", joinQueue);
+  $("queue-leave").addEventListener("click", leaveQueue);
 
   $("join-passphrase").addEventListener("click", () => {
     state.rejoinAfterRestart = false;

@@ -326,6 +326,15 @@ export type RoomEntryMode = "open" | "knock";
 /** 同一セッションから同一ルームへノックできる間隔（ミリ秒、§3.8） */
 export const KNOCK_RATE_WINDOW_MS = 10_000;
 
+/** ランダムマッチの成立判定の周期（ミリ秒、§3.1.2） */
+export const MATCH_INTERVAL_MS = 30_000;
+/** 1グループの上限人数（§3.1.2）。これを超える待機は次の周期へ回る */
+export const MATCH_GROUP_MAX = 4;
+/** 成立に必要な最少人数（§3.1.2） */
+export const MATCH_GROUP_MIN = 2;
+/** 待機列に並べる人数の上限（§3.1.2） */
+export const MATCH_QUEUE_MAX = 100;
+
 // ---------------------------------------------------------------------------
 // §3.5 ゲーム定義
 // ---------------------------------------------------------------------------
@@ -865,6 +874,13 @@ export type C2S =
   | { t: "sandboxEnd" }
   /** ゲーム内メッセージ。サーバーは payload を解釈せず同室へ中継する（rtcSignal と同じ扱い） */
   | { t: "sandboxSignal"; payload: unknown }
+  /**
+   * ランダムマッチの待機列に並ぶ（§3.1.2）。ゲスト可。
+   * あだ名を省略するとサーバーが しゅんぴ の二つ名を付ける（join と同じ扱い）
+   */
+  | { t: "joinQueue"; nickname?: string }
+  /** 待機列から抜ける（§3.1.2） */
+  | { t: "leaveQueue" }
   | { t: "leave" };
 
 /** サーバー → クライアント（§4.1） */
@@ -879,6 +895,13 @@ export type S2C =
     roomCode?: string;
     entryToken?: string;
   }
+  /**
+   * 待機列の様子（§3.1.2）。並んだ直後と、成立判定のたびに本人へ送る。
+   * waiting は自分を含む待機人数の目安
+   */
+  | { t: "queueStatus"; waiting: number; nextCheckAt: number }
+  /** マッチが成立した（§3.1.2）。直後に roomState が続く */
+  | { t: "matched"; roomCode: string }
   | { t: "kicked" }
   | { t: "playerKicked"; playerId: string }
   | { t: "phase"; phase: Phase; deadline?: number; view: PhaseView }

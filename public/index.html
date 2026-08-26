@@ -586,6 +586,30 @@
         overflow-wrap: anywhere;
       }
 
+      .queue-waiting {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-top: 7px;
+        padding: 8px 10px;
+        border: 1px solid var(--gold-3);
+        border-radius: var(--r-md);
+        background: rgba(230, 166, 63, 0.06);
+      }
+
+      .queue-waiting p {
+        margin: 0;
+        font-size: 12.5px;
+        color: var(--text);
+      }
+
+      .queue-waiting .btn {
+        flex: none;
+        padding: 5px 11px;
+        font-size: 12px;
+      }
+
       .knocks {
         margin-top: 10px;
         padding-top: 10px;
@@ -1738,6 +1762,17 @@
               autocomplete="off"
               placeholder="空欄ならこちらで付けます"
             />
+          </div>
+
+          <!-- いますぐ飲む（§3.1.2）。知らない人と自動で相席する -->
+          <div class="field">
+            <button id="queue-join" class="btn btn-gold btn-block" type="button">
+              いますぐ飲む（相席）
+            </button>
+            <div id="queue-waiting" class="queue-waiting hidden" role="status">
+              <p id="queue-status">席を探しています…</p>
+              <button id="queue-leave" class="btn btn-red" type="button">やめる</button>
+            </div>
           </div>
 
           <div class="field">

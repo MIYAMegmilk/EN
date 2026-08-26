@@ -31,6 +31,9 @@ import {
   ENTRY_TOKEN_TTL_MS,
   KNOCK_RATE_WINDOW_MS,
   KNOCK_TTL_MS,
+  MATCH_GROUP_MAX,
+  MATCH_INTERVAL_MS,
+  MATCH_QUEUE_MAX,
   ROOM_CAPACITY,
   ROOM_NAME_MAX,
   SANDBOX_PAYLOAD_MAX_BYTES,
@@ -1611,6 +1614,188 @@ Deno.test("ノック: キックされた相手は再ノックしても入れな�
   });
   // まだキックしていないので通る
   assertExists(last(host.link, "knockRequest"));
+  manager.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// ランダムマッチ（§3.1.2）
+// ---------------------------------------------------------------------------
+
+/** 待機列に1人並ばせる */
+function queueUp(manager: RoomManager, nickname?: string) {
+  const link = new MockLink();
+  manager.handle(link, nickname === undefined ? { t: "joinQueue" } : { t: "joinQueue", nickname });
+  return link;
+}
+
+Deno.test("相席: 2人そろうと30秒周期で成立し、同じ卓に入る", () => {
+  const { manager, clock } = setup();
+  const a = queueUp(manager, "あかね");
+  const b = queueUp(manager, "ほたる");
+
+  // 周期が来るまでは成立しない
+  clock.advance(MATCH_INTERVAL_MS - 1);
+  assertEquals(last(a, "matched"), undefined);
+
+  clock.advance(2);
+
+  const matchedA = last(a, "matched");
+  const matchedB = last(b, "matched");
+  assertExists(matchedA);
+  assertExists(matchedB);
+  assertEquals(matchedA.roomCode, matchedB.roomCode, "同じ卓に入る");
+
+  const stateA = last(a, "roomState");
+  assertExists(stateA);
+  assertEquals(stateA.snapshot.players.length, 2);
+  assert(stateA.snapshot.youAreHost, "先頭の1人がホスト");
+  const stateB = last(b, "roomState");
+  assertExists(stateB);
+  assertFalse(stateB.snapshot.youAreHost);
+  manager.dispose();
+});
+
+Deno.test("相席: 1人だけでは成立しない", () => {
+  const { manager, clock } = setup();
+  const a = queueUp(manager, "あかね");
+  clock.advance(MATCH_INTERVAL_MS * 3);
+  assertEquals(last(a, "matched"), undefined);
+  manager.dispose();
+});
+
+Deno.test("相席: 5人なら4人と1人に分かれ、余りは次の周期へ回る", () => {
+  const { manager, clock } = setup();
+  const links = [
+    queueUp(manager, "あ"),
+    queueUp(manager, "い"),
+    queueUp(manager, "う"),
+    queueUp(manager, "え"),
+    queueUp(manager, "お"),
+  ];
+
+  clock.advance(MATCH_INTERVAL_MS + 1);
+
+  const first = last(links[0], "roomState");
+  assertExists(first);
+  assertEquals(first.snapshot.players.length, MATCH_GROUP_MAX, "先頭の4人で成立する");
+  assertEquals(last(links[4], "matched"), undefined, "5人目は残る");
+
+  // もう1人来れば次の周期で成立する
+  const sixth = queueUp(manager, "か");
+  clock.advance(MATCH_INTERVAL_MS + 1);
+  assertExists(last(links[4], "matched"));
+  assertExists(last(sixth, "matched"));
+  manager.dispose();
+});
+
+Deno.test("相席: 待っている間は人数の目安が届く", () => {
+  const { manager } = setup();
+  const a = queueUp(manager, "あかね");
+  const first = last(a, "queueStatus");
+  assertExists(first);
+  assertEquals(first.waiting, 1);
+
+  queueUp(manager, "ほたる");
+  const second = last(a, "queueStatus");
+  assertExists(second);
+  assertEquals(second.waiting, 2, "増えたら配り直す");
+  manager.dispose();
+});
+
+Deno.test("相席: 同じ接続が二重に並べない（DUPLICATE）", () => {
+  const { manager } = setup();
+  const a = queueUp(manager, "あかね");
+  manager.handle(a, { t: "joinQueue", nickname: "あかね" });
+  assertEquals(last(a, "error")?.code, "DUPLICATE");
+  manager.dispose();
+});
+
+Deno.test("相席: キャンセルすると列から外れる", () => {
+  const { manager, clock } = setup();
+  const a = queueUp(manager, "あかね");
+  const b = queueUp(manager, "ほたる");
+  manager.handle(a, { t: "leaveQueue" });
+
+  clock.advance(MATCH_INTERVAL_MS + 1);
+  assertEquals(last(a, "matched"), undefined);
+  assertEquals(last(b, "matched"), undefined, "残った1人だけでは成立しない");
+  manager.dispose();
+});
+
+Deno.test("相席: 切断すると自動で列から外れる", () => {
+  const { manager, clock } = setup();
+  const a = queueUp(manager, "あかね");
+  const b = queueUp(manager, "ほたる");
+  manager.disconnect(a);
+
+  clock.advance(MATCH_INTERVAL_MS + 1);
+  assertEquals(last(b, "matched"), undefined);
+  manager.dispose();
+});
+
+Deno.test("相席: 待機列は100人まで", () => {
+  const { manager } = setup();
+  for (let i = 0; i < MATCH_QUEUE_MAX; i++) queueUp(manager, `ひと${i}`);
+  const over = new MockLink();
+  manager.handle(over, { t: "joinQueue", nickname: "あふれた人" });
+  assertEquals(last(over, "error")?.code, "RATE_LIMITED");
+  manager.dispose();
+});
+
+Deno.test("相席: 卓に入っている人は並べない", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  manager.handle(host.link, { t: "joinQueue", nickname: "ホスト" });
+  assertEquals(last(host.link, "error")?.code, "INVALID_INPUT");
+  manager.dispose();
+});
+
+Deno.test("相席: あだ名を省くと しゅんぴ が二つ名を付ける", () => {
+  const { manager, clock } = setup();
+  const a = queueUp(manager);
+  const b = queueUp(manager);
+  clock.advance(MATCH_INTERVAL_MS + 1);
+
+  const state = last(a, "roomState");
+  assertExists(state);
+  assertEquals(state.snapshot.players.length, 2);
+  for (const player of state.snapshot.players) {
+    assert(player.nickname.length > 0, "名無しのまま入らない");
+  }
+  // 同じ二つ名が2人に付かない
+  const names = new Set(state.snapshot.players.map((p) => p.nickname));
+  assertEquals(names.size, 2);
+  manager.dispose();
+});
+
+Deno.test("相席: 作られた卓は一覧に載らない（§3.1.2）", () => {
+  const { manager, clock } = setup();
+  queueUp(manager, "あかね");
+  queueUp(manager, "ほたる");
+  clock.advance(MATCH_INTERVAL_MS + 1);
+  assertEquals(manager.listPublicRooms().length, 0, "後から他人は入れない");
+  manager.dispose();
+});
+
+Deno.test("相席: 成立した卓は普通の卓と同じに扱える（チャットが通る）", () => {
+  const { manager, clock } = setup();
+  const a = queueUp(manager, "あかね");
+  const b = queueUp(manager, "ほたる");
+  clock.advance(MATCH_INTERVAL_MS + 1);
+
+  manager.handle(a, { t: "chat", text: "はじめまして" });
+  const received = humanChats(b);
+  assertEquals(received[received.length - 1]?.message.text, "はじめまして");
+  manager.dispose();
+});
+
+Deno.test("相席: 誰も待っていない間はタイマーを張らない", () => {
+  const { manager, clock } = setup();
+  assertEquals(clock.pending, 0);
+  const a = queueUp(manager, "あかね");
+  assert(clock.pending > 0, "並んだら判定を予約する");
+  manager.handle(a, { t: "leaveQueue" });
+  assertEquals(clock.pending, 0, "誰も居なくなったら畳む");
   manager.dispose();
 });
 

@@ -37,6 +37,10 @@ import {
   KNOCK_RATE_WINDOW_MS,
   KNOCK_TTL_MS,
   type KnockPublic,
+  MATCH_GROUP_MAX,
+  MATCH_GROUP_MIN,
+  MATCH_INTERVAL_MS,
+  MATCH_QUEUE_MAX,
   ok,
   PASSPHRASE_MAX,
   PASSPHRASE_MIN,
@@ -262,6 +266,14 @@ type LinkState = {
 /** 参加者をルームから外す理由 */
 type RemoveReason = "leave" | "graceExpired";
 
+/** 相席を待っている人（§3.1.2） */
+type Waiting = {
+  link: ClientLink;
+  /** 省略された場合は undefined。成立時に しゅんぴ が二つ名を付ける */
+  nickname: string | undefined;
+  joinedAt: number;
+};
+
 /** ノック中の申請者。返事を届けるのと、時間切れを畳むために持つ */
 type KnockerState = {
   link: ClientLink;
@@ -416,6 +428,12 @@ export class RoomManager {
    * 届けるためにここで持つ。返事を送ったら必ず消す
    */
   private readonly knockers = new Map<string, KnockerState>();
+  /** ランダムマッチの待機列（§3.1.2）。並んだ順を保つので配列で持つ */
+  private readonly queue: Waiting[] = [];
+  /** 成立判定のタイマー。誰も待っていない間は張らない */
+  private matchTimer: TimerHandle | null = null;
+  /** 次の成立判定の時刻。待っている人への表示に使う */
+  private matchDeadline: number | null = null;
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => TimerHandle;
   private readonly clearTimer: (handle: TimerHandle) => void;
@@ -519,6 +537,15 @@ export class RoomManager {
       this.handleKnock(link, msg);
       return;
     }
+    // 相席の待機列も卓の外の話（§3.1.2）
+    if (msg.t === "joinQueue") {
+      this.handleJoinQueue(link, msg);
+      return;
+    }
+    if (msg.t === "leaveQueue") {
+      this.handleLeaveQueue(link);
+      return;
+    }
     const state = this.links.get(link.id);
     if (state === undefined) {
       sendError(link, "ROOM_NOT_FOUND", "ルームに参加していません");
@@ -529,6 +556,8 @@ export class RoomManager {
 
   /** WebSocket が閉じたときの処理（§3.2: 60秒はセッションを保持する） */
   disconnect(link: ClientLink): void {
+    // 待機列に並んだまま切れた人を残さない（§3.1.2）
+    if (this.removeFromQueue(link)) this.sendQueueStatus();
     const state = this.links.get(link.id);
     if (state === undefined) return;
     this.links.delete(link.id);
@@ -577,6 +606,8 @@ export class RoomManager {
     // 残すとテストが「タイマーが片付いていない」で落ちるし、本番でも漏れになる
     for (const knocker of this.knockers.values()) this.clearTimer(knocker.timer);
     this.knockers.clear();
+    this.cancelMatchTimer();
+    this.queue.length = 0;
     this.rooms.clear();
     this.links.clear();
     this.passphrases.clear();
@@ -1503,6 +1534,186 @@ export class RoomManager {
     this.clearTimer(knocker.timer);
     this.knockers.delete(knockId);
     knocker.link.send(msg);
+  }
+
+  /**
+   * ランダムマッチの待機列に並ぶ（§3.1.2）。
+   *
+   * 卓の外から届くので join と同じ扱いにする。あだ名の扱いも join に合わせ、
+   * 省略されたら しゅんぴ の二つ名をマッチ成立時に付ける。
+   */
+  private handleJoinQueue(link: ClientLink, msg: Extract<C2S, { t: "joinQueue" }>): void {
+    if (this.links.has(link.id)) {
+      sendError(link, "INVALID_INPUT", "すでにルームに参加しています");
+      return;
+    }
+    if (this.queue.some((w) => w.link.id === link.id)) {
+      sendError(link, "DUPLICATE", "すでに相席を待っています");
+      return;
+    }
+    if (this.queue.length >= MATCH_QUEUE_MAX) {
+      sendError(link, "RATE_LIMITED", "いまは相席の待ちが多すぎます。時間をおいてください");
+      return;
+    }
+    let nickname: string | undefined;
+    if (msg.nickname !== undefined) {
+      const validated = validateNickname(msg.nickname);
+      if (!validated.ok) {
+        sendError(link, validated.code, validated.message);
+        return;
+      }
+      nickname = validated.value;
+    }
+    this.queue.push({ link, nickname, joinedAt: this.now() });
+    this.armMatchTimer();
+    this.sendQueueStatus();
+  }
+
+  /** 待機列から抜ける（§3.1.2）。並んでいなければ何もしない */
+  private handleLeaveQueue(link: ClientLink): void {
+    if (!this.removeFromQueue(link)) return;
+    this.sendQueueStatus();
+  }
+
+  /**
+   * 待機列から外す。切断時にも呼ぶ（§3.1.2「WS 切断で自動的に列から外れる」）。
+   * 実際に外れたときだけ true を返す
+   */
+  private removeFromQueue(link: ClientLink): boolean {
+    const at = this.queue.findIndex((w) => w.link.id === link.id);
+    if (at < 0) return false;
+    this.queue.splice(at, 1);
+    if (this.queue.length === 0) this.cancelMatchTimer();
+    return true;
+  }
+
+  /** 待っている人へいまの様子を配る。人数が変わるたびに送る */
+  private sendQueueStatus(): void {
+    const waiting = this.queue.length;
+    const nextCheckAt = this.matchDeadline ?? this.now() + MATCH_INTERVAL_MS;
+    for (const waiter of this.queue) {
+      waiter.link.send({ t: "queueStatus", waiting, nextCheckAt });
+    }
+  }
+
+  /** 成立判定のタイマーを張る。すでに動いていれば何もしない */
+  private armMatchTimer(): void {
+    if (this.matchTimer !== null) return;
+    this.matchDeadline = this.now() + MATCH_INTERVAL_MS;
+    this.matchTimer = this.setTimer(() => {
+      this.matchTimer = null;
+      this.matchDeadline = null;
+      this.runMatching();
+    }, MATCH_INTERVAL_MS);
+  }
+
+  private cancelMatchTimer(): void {
+    if (this.matchTimer === null) return;
+    this.clearTimer(this.matchTimer);
+    this.matchTimer = null;
+    this.matchDeadline = null;
+  }
+
+  /**
+   * 成立判定（§3.1.2）。
+   *
+   * 並んだ順に最大4人ずつ切り出し、2人以上そろったグループを成立させる。
+   * 端数（1人）は列に残して次の周期へ回す。待っている人が居る限りタイマーを張り直す。
+   */
+  private runMatching(): void {
+    while (this.queue.length >= MATCH_GROUP_MIN) {
+      const group = this.queue.splice(0, MATCH_GROUP_MAX);
+      // 途中で切れた接続を捨てる。捨てた結果1人になったら成立させない
+      // 待っている間に卓へ入った人は列から外す（切断は disconnect で外れている）
+      const alive = group.filter((w) => !this.links.has(w.link.id));
+      if (alive.length < MATCH_GROUP_MIN) {
+        // 生き残りは列の先頭へ戻して、次の周期でもう一度合わせる
+        this.queue.unshift(...alive);
+        break;
+      }
+      this.createMatchRoom(alive);
+    }
+    if (this.queue.length > 0) this.armMatchTimer();
+    this.sendQueueStatus();
+  }
+
+  /**
+   * マッチ専用ルームを作って全員を入れる（§3.1.2）。
+   *
+   * 一覧に載せず合言葉も持たないので、後から他人は入れない。ホストは先頭の1人。
+   * ownerUserId は空（システム生成）。それ以外は通常の卓と同じに扱う
+   */
+  private createMatchRoom(group: Waiting[]): void {
+    const code = this.allocateRoomCode();
+    if (code === null) {
+      for (const waiter of group) {
+        sendError(waiter.link, "INVALID_INPUT", "相席の席を用意できませんでした");
+      }
+      return;
+    }
+    const now = this.now();
+    const taken = new Set<string>();
+    const players = new Map<string, Player>();
+    const links = new Map<string, ClientLink>();
+    let hostId = "";
+    for (const waiter of group) {
+      // あだ名を省いた人には、ここで しゅんぴ の二つ名を付ける（§3.0 / §3.10）
+      const nickname = waiter.nickname ?? pickNickname(taken, this.rng);
+      taken.add(nickname);
+      const player = this.newPlayer(nickname);
+      if (hostId === "") hostId = player.id;
+      players.set(player.id, player);
+      links.set(player.id, waiter.link);
+    }
+    const room: Room = {
+      code,
+      // 一覧に載せない。載せると「後から他人が入れない」が守れない
+      visibility: "private",
+      entryMode: "open",
+      ownerUserId: "",
+      hostId,
+      players,
+      pendingKnocks: new Map(),
+      pendingEntries: new Map(),
+      blockedSessions: new Set(),
+      availableGames: new Map(OFFICIAL_GAMES.map((g) => [g.id, g])),
+      selectedGameId: null,
+      game: null,
+      chatHistory: [],
+      sandbox: null,
+      createdAt: now,
+      lastActiveAt: now,
+    };
+    const entry: RoomEntry = {
+      room,
+      links,
+      queue: [],
+      draining: false,
+      phaseTimer: null,
+      graceTimers: new Map(),
+      chatTimes: new Map(),
+      knockTimes: new Map(),
+      voiceTimes: new Map(),
+      bot: createBotState(now),
+      botTimer: null,
+      botPollTimer: null,
+    };
+    this.rooms.set(code, entry);
+    this.armBotTimer(entry);
+    for (const [playerId, link] of links) {
+      this.links.set(link.id, { link, roomCode: code, playerId });
+    }
+    // 先に成立を知らせてから中身を配る。roomState だけだと、待っていた人の画面で
+    // 「いつのまにか卓に居る」ことになって何が起きたか分からない
+    for (const link of links.values()) link.send({ t: "matched", roomCode: code });
+    for (const player of players.values()) {
+      this.sendSnapshot(entry, player);
+      this.applyBotEvent(entry, {
+        t: "playerJoined",
+        playerId: player.id,
+        nickname: player.nickname,
+      });
+    }
   }
 
   /** ホストの接続へ1件送る */
