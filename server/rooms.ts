@@ -16,7 +16,7 @@
  *
  * 軽量スコープ: createRoom の認証必須化（AUTH_REQUIRED）は実装済み。
  * 公開ルームは「オープン入室」まで実装済み（作成・一覧・コードだけでの入室）。
- * 承認制（ノック）・キック・importGame・24時間自動削除は未実装。
+ * 承認制（ノック）・importGame・24時間自動削除は未実装。
  * 接続点は `TODO(チーム分担)` として記してある。
  * VC は rtcSignal の中継のみを受け持つ（§3.6。接続の確立はクライアント側）。
  * §3.8 の WS レート制限（1接続あたり 20件/秒）は main.ts の WebSocket 層で実装済み。
@@ -249,7 +249,7 @@ type LinkState = {
 };
 
 /** 参加者をルームから外す理由 */
-type RemoveReason = "leave" | "graceExpired";
+type RemoveReason = "leave" | "graceExpired" | "kick";
 
 // ---------------------------------------------------------------------------
 // 入力検証
@@ -660,7 +660,13 @@ export class RoomManager {
       }
       // 猶予超過で退室済みなど、既知でないセッションは新規参加として扱う
     }
-    // TODO(チーム分担): §3.1 キック済み sessionToken（room.blockedSessions）の拒否（BLOCKED）
+    // キックされたセッションは戻れない（§3.1）。session は本人しか知らないサーバー発行の
+    // 値なので、これで「同じブラウザのまま入り直す」を塞げる。ブラウザを変えられると
+    // 抜けられるのは仕様どおりの割り切り（§3.1 に明記）
+    if (session !== undefined && room.blockedSessions.has(session)) {
+      sendError(link, "BLOCKED", "この卓には入れません");
+      return;
+    }
     // 公開ルームは「オープン入室」として扱い、コードだけで入れる（§3.1）。
     // TODO(チーム分担): §3.1.1 承認制（ノック → entryToken の検証・消費）。
     // 入室方式（open / knock）を Room に持たせたうえで、knock の側だけ必須にする
@@ -843,12 +849,13 @@ export class RoomManager {
       case "endPollVote":
         this.handleEndPollVote(entry, state, player, msg);
         return;
+      case "kick":
+        this.handleKick(entry, state, msg);
+        return;
       // TODO(チーム分担): §3.1.1 knock / approveKnock / rejectKnock（公開ルーム）
       case "knock":
       case "approveKnock":
       case "rejectKnock":
-      // TODO(チーム分担): §3.1 kick（blockedSessions への追加と entryToken 無効化を含む）
-      case "kick":
       // TODO(チーム分担): §3.5 importGame（共有コードから availableGames に追加）
       case "importGame":
         sendError(state.link, "INVALID_INPUT", NOT_IMPLEMENTED_MESSAGE);
@@ -1144,6 +1151,53 @@ export class RoomManager {
     });
   }
 
+  /**
+   * ホストが参加者を退出させる（§3.1）。
+   *
+   * 相手の sessionToken をブロックリストへ入れ、あわせて「発行済みで未使用の入室許可
+   * （entryToken）」と「保留中のノック」も潰す。ブロックだけでは、承認済みの許可を
+   * 握ったままの相手がすり抜けて入り直せてしまうため（§3.1.1 の最後の項）。
+   *
+   * ブラウザを変えられると抜けられるのは仕様どおりの割り切り（§3.1 に明記）。
+   * ここで守れるのは「同じブラウザのまま戻ってくる」経路だけ。
+   */
+  private handleKick(
+    entry: RoomEntry,
+    state: LinkState,
+    msg: Extract<C2S, { t: "kick" }>,
+  ): void {
+    if (!this.requireHost(entry, state)) return;
+    if (typeof msg.playerId !== "string") {
+      sendError(state.link, "INVALID_INPUT", "退出させる相手を指定してください");
+      return;
+    }
+    const room = entry.room;
+    const target = room.players.get(msg.playerId);
+    if (target === undefined) {
+      sendError(state.link, "INVALID_INPUT", "その人はこの卓にいません");
+      return;
+    }
+    if (target.id === state.playerId) {
+      // 自分を追い出す道は用意しない。ホストが抜けたいなら退室（leave）で、
+      // ホスト委譲まで含めた既存の経路を通す
+      sendError(state.link, "INVALID_INPUT", "自分は退出させられません");
+      return;
+    }
+    room.blockedSessions.add(target.sessionToken);
+    // TODO(ノック実装者): 下の2つの掃除は sessionToken の突き合わせで動く。
+    // ノックを実装するときは、承認時に配ったトークンを入室した参加者へ
+    // 引き継がせること（player.sessionToken に入れる）。newPlayer() が毎回
+    // 新しい値を発行するため、引き継がないとここが何にもマッチせず、
+    // キックされた人が元のノック用トークンで再ノックできてしまう
+    for (const [token, pending] of room.pendingEntries) {
+      if (pending.sessionToken === target.sessionToken) room.pendingEntries.delete(token);
+    }
+    for (const [knockId, knock] of room.pendingKnocks) {
+      if (knock.sessionToken === target.sessionToken) room.pendingKnocks.delete(knockId);
+    }
+    this.removePlayer(entry, target.id, "kick");
+  }
+
   /** bot の ON/OFF（ホストのみ、§3.10）。botId 省略で3体まとめて切り替える */
   private handleSetBot(
     entry: RoomEntry,
@@ -1427,14 +1481,23 @@ export class RoomManager {
     entry.links.delete(playerId);
     if (link !== undefined) {
       this.links.delete(link.id);
-      if (reason === "leave") link.close();
+      // キックされた本人には理由を伝えてから切る。黙って切ると通信不良と区別が付かない。
+      // 退室は本人の操作なので、そのまま閉じるだけでよい
+      if (reason === "kick") link.send({ t: "kicked" });
+      if (reason === "leave" || reason === "kick") link.close();
     }
     room.players.delete(playerId);
     room.lastActiveAt = now;
     this.applyEngineEvent(entry, { t: "playerKicked", playerId, now });
     // 退室が確定したので終了アンケートの票も無効にする（§3.10）
     this.applyBotEvent(entry, { t: "playerLeft", playerId });
-    this.broadcast(entry, { t: "playerLeft", player: this.toPublic(entry, player) });
+    // キックは playerKicked で伝える。受け取った各クライアントは、その相手との
+    // ピア接続を即座に閉じる（§3.6）。ふつうの退室と混ぜると切断の指示にならない
+    if (reason === "kick") {
+      this.broadcast(entry, { t: "playerKicked", playerId });
+    } else {
+      this.broadcast(entry, { t: "playerLeft", player: this.toPublic(entry, player) });
+    }
     if (room.hostId === playerId) {
       const successor = [...room.players.keys()][0];
       if (successor !== undefined) {

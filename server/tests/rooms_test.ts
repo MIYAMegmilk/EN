@@ -1124,6 +1124,129 @@ Deno.test("voice: 退室すると voiceTimes が掃除される（メモリリ�
 });
 
 // ---------------------------------------------------------------------------
+// キック（§3.1）
+// ---------------------------------------------------------------------------
+
+Deno.test("キック: ホストが参加者を退出させ、本人には kicked が届く", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
+  assertExists(guest.state);
+  const guestId = guest.state.snapshot.youId;
+
+  manager.handle(host.link, { t: "kick", playerId: guestId });
+
+  assertExists(last(guest.link, "kicked"));
+  assert(guest.link.closed, "キックされた接続は閉じる");
+  manager.dispose();
+});
+
+Deno.test("キック: 残った参加者には playerKicked が届く（playerLeft ではない）", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
+  const other = joinRoom(manager, host.snapshot.code, "べつの人");
+  assertExists(guest.state);
+  const guestId = guest.state.snapshot.youId;
+  const leftBefore = all(other.link, "playerLeft").length;
+
+  manager.handle(host.link, { t: "kick", playerId: guestId });
+
+  const kicked = last(other.link, "playerKicked");
+  assertExists(kicked);
+  assertEquals(kicked.playerId, guestId);
+  // ピア切断の指示になるよう、ふつうの退室とは混ぜない（§3.6 / §4.1）
+  assertEquals(all(other.link, "playerLeft").length, leftBefore);
+  manager.dispose();
+});
+
+Deno.test("キック: 同じ session では入り直せない（BLOCKED）", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
+  assertExists(guest.state);
+  const guestId = guest.state.snapshot.youId;
+  const session = guest.state.snapshot.session;
+  assertExists(session);
+
+  manager.handle(host.link, { t: "kick", playerId: guestId });
+
+  const again = new MockLink();
+  manager.handle(again, { t: "join", roomCode: host.snapshot.code, nickname: "ゲスト", session });
+  assertEquals(last(again, "error")?.code, "BLOCKED");
+  assertEquals(last(again, "roomState"), undefined, "入室していない");
+  manager.dispose();
+});
+
+Deno.test("キック: session を積まない join でも戻れない（実クライアントの経路）", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
+  assertExists(guest.state);
+  const guestId = guest.state.snapshot.youId;
+  const session = guest.state.snapshot.session;
+  assertExists(session);
+
+  manager.handle(host.link, { t: "kick", playerId: guestId });
+
+  // 画面が session を積み忘れると、サーバーは前のトークンを見られないまま
+  // 新規参加として通してしまう。app.js は保存済みトークンを必ず積むので、
+  // ここでも同じ形を再現して塞がっていることを確かめる
+  const again = new MockLink();
+  manager.handle(again, {
+    t: "join",
+    roomCode: host.snapshot.code,
+    nickname: "ゲスト",
+    session,
+  });
+  assertEquals(last(again, "error")?.code, "BLOCKED");
+  assertEquals(last(again, "roomState"), undefined, "入室していない");
+  manager.dispose();
+});
+
+Deno.test("キック: 非ホストは実行できない（NOT_HOST）", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
+  const other = joinRoom(manager, host.snapshot.code, "べつの人");
+  assertExists(other.state);
+
+  manager.handle(guest.link, { t: "kick", playerId: other.state.snapshot.youId });
+
+  assertEquals(last(guest.link, "error")?.code, "NOT_HOST");
+  assertEquals(last(other.link, "kicked"), undefined, "退出させられていない");
+  manager.dispose();
+});
+
+Deno.test("キック: 自分自身とその卓にいない相手は拒否する", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  const hostId = host.snapshot.youId;
+
+  manager.handle(host.link, { t: "kick", playerId: hostId });
+  assertEquals(last(host.link, "error")?.code, "INVALID_INPUT");
+  assertEquals(last(host.link, "kicked"), undefined, "自分は退出しない");
+
+  manager.handle(host.link, { t: "kick", playerId: "居ない人" });
+  assertEquals(last(host.link, "error")?.code, "INVALID_INPUT");
+  manager.dispose();
+});
+
+Deno.test("キック: ホストが抜けても委譲は今までどおり動く", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  const guest = joinRoom(manager, host.snapshot.code, "ゲスト");
+  assertExists(guest.state);
+
+  // ホストが自分以外を落としても、ホストは移らない
+  const other = joinRoom(manager, host.snapshot.code, "べつの人");
+  assertExists(other.state);
+  manager.handle(host.link, { t: "kick", playerId: other.state.snapshot.youId });
+  assertEquals(last(guest.link, "hostChanged"), undefined);
+  manager.dispose();
+});
+
+// ---------------------------------------------------------------------------
 // 未実装メッセージ
 // ---------------------------------------------------------------------------
 
@@ -1134,7 +1257,6 @@ Deno.test("未実装の C2S は INVALID_INPUT で拒否する", () => {
     { t: "knock", roomCode: host.snapshot.code, nickname: "x" },
     { t: "approveKnock", knockId: "x" },
     { t: "rejectKnock", knockId: "x" },
-    { t: "kick", playerId: "x" },
     { t: "importGame", shareCode: "ABCDEFGH" },
   ] as const;
   for (const msg of unsupported) {

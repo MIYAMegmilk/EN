@@ -577,6 +577,10 @@
       }
 
       #players li {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
         padding: 7px 10px;
         border: 1px solid var(--line-soft);
         border-radius: var(--r-md);
@@ -584,6 +588,29 @@
         font-size: 12.5px;
         line-height: 1.55;
         overflow-wrap: anywhere;
+      }
+
+      /*
+       * お引き取り（§3.1）。ホストの行にだけ出る。
+       * .btn そのままだと呑み手の一覧の中で大きすぎるので、ここだけ詰める。
+       */
+      /* あだ名が長くても行を横へ伸ばさない（flex の既定は min-width: auto のため） */
+      #players li > span {
+        min-width: 0;
+      }
+
+      #players .btn-mini {
+        flex: none;
+        padding: 4px 9px;
+        font-size: 11.5px;
+        font-weight: 400;
+        border-radius: var(--r-sm);
+      }
+
+      /* 確認中。次の一押しで飛ぶことが見て分かるようにする */
+      #players .btn-mini.is-armed {
+        font-weight: 700;
+        box-shadow: 0 0 0 2px var(--gold);
       }
 
       /* レールの足元。呑み手が何人いても、この操作だけは必ず見えている */

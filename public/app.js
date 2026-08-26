@@ -355,6 +355,47 @@ function connect() {
 }
 
 /**
+ * 「お引き取り」を押した相手と、その待ち受けを捨てるタイマー。
+ * 一度押しただけでは送らず、二度目で確定させる（§3.1）。
+ */
+let pendingKick = null;
+
+/** 待ち受けを畳む。確定・取り消し・卓を出たときのどれでも通る */
+function clearPendingKick() {
+  if (pendingKick === null) return;
+  clearTimeout(pendingKick.timer);
+  pendingKick = null;
+}
+
+/**
+ * ホストが参加者を退出させる（§3.1）。
+ *
+ * キックされた人は同じブラウザのままこの卓に戻れなくなる。取り消せない操作なので、
+ * 一度目は確認だけ出して、続けてもう一度押されたときに送る。
+ * ブラウザの confirm() は使わない。呼ぶと以降のイベントが止まるうえ、
+ * 卓の中では VC もゲームも同じタブで動いているので巻き添えが大きい。
+ */
+function confirmKick(player) {
+  if (pendingKick !== null && pendingKick.playerId === player.id) {
+    clearPendingKick();
+    send({ t: "kick", playerId: player.id });
+    renderAll();
+    return;
+  }
+  clearPendingKick();
+  pendingKick = {
+    playerId: player.id,
+    timer: setTimeout(() => {
+      pendingKick = null;
+      renderAll();
+    }, 6000),
+  };
+  // ボタンのラベルを「本当に？」に変える。再描画されても pendingKick から
+  // 組み立て直すので、入室などで描き直されても armed のまま保たれる
+  renderAll();
+}
+
+/**
  * 卓から離れた状態に戻し、一覧の見える画面を描き直す。
  * #entry の hidden が外れると rooms.js が MutationObserver で一覧を取り直すので、
  * ここでは一覧の更新を明示的に呼ばなくてよい。
@@ -362,6 +403,7 @@ function connect() {
  */
 function resetToEntry() {
   store.drop();
+  clearPendingKick();
   // 卓を出たらざわめきも止める。一覧に戻ったのに店内の音が続くと居場所が分からない
   Sound.stop("gaya");
   state.snapshot = null;
@@ -440,10 +482,16 @@ function receive(msg) {
     case "finalResult":
       renderScores("最終結果", msg.scores);
       break;
-    case "kicked":
+    case "kicked": {
+      // キックされた卓のトークンは残す。捨てると次に入り直すときに提示できず、
+      // サーバーがブロックを判定できなくなる（§3.1）。resetToEntry() は
+      // ふつうの退室と共通なので、ここで保存し直す
+      const kickedFrom = store.load();
       resetToEntry();
+      if (kickedFrom !== null) store.save(kickedFrom.code, kickedFrom.session);
       showError("ルームから退出しました");
       break;
+    }
     case "error":
       pendingRoomMeta = null;
       // 再起動からの復帰 join が失敗したときだけ、事実の通知として扱う。
@@ -524,7 +572,25 @@ function renderAll() {
     if (!p.connected) marks.push("切断中");
     if (p.id === snapshot.youId) marks.push("あなた");
     const suffix = marks.length > 0 ? `（${marks.join("・")}）` : "";
-    players.appendChild(el("li", `${p.nickname}${suffix} ${p.score}点`));
+    const row = el("li");
+    row.appendChild(el("span", `${p.nickname}${suffix} ${p.score}点`));
+    // お引き取り（§3.1）。ホストにだけ、自分以外の行に出す。
+    // 押した相手はこの卓に戻れなくなるので、確認を1枚挟む
+    if (snapshot.youAreHost && p.id !== snapshot.youId) {
+      // 確認中かどうかはボタン自身に出す。共有の #error に出すと、誰かが入室した
+      // ときの showError("") で文言だけ消え、押せば飛ぶ状態が黙って残ってしまう
+      const armed = pendingKick !== null && pendingKick.playerId === p.id;
+      const kick = el(
+        "button",
+        armed ? "本当に？" : "お引き取り",
+        armed ? "btn btn-red btn-mini is-armed" : "btn btn-red btn-mini",
+      );
+      kick.type = "button";
+      kick.dataset.playerId = p.id;
+      kick.addEventListener("click", () => confirmKick(p));
+      row.appendChild(kick);
+    }
+    players.appendChild(row);
   }
 
   const inLobby = state.phase === "lobby";
@@ -1314,6 +1380,13 @@ function bind() {
     const msg = { t: "join", roomCode: $("code").value };
     const nickname = $("nickname").value.trim();
     if (nickname.length > 0) msg.nickname = nickname;
+    // 同じ卓のトークンを持っていれば必ず積む。猶予内なら再接続として復帰でき、
+    // キックされていればサーバーが BLOCKED を返せる（§3.1）。
+    // 積まないと、追い出された人がコードを打ち直すだけで戻れてしまう
+    const saved = store.load();
+    if (saved !== null && String(saved.code) === msg.roomCode.trim()) {
+      msg.session = saved.session;
+    }
     send(msg);
   });
   $("game-open").addEventListener("click", () => toggleGamePlatform(true));
