@@ -193,7 +193,7 @@ $("show-login").addEventListener("click", () => showPanel("login-panel"));
 $("guest-link").addEventListener("click", async (e) => {
   e.preventDefault();
   await playEnterAnimation();
-  location.href = "/index.html";
+  location.href = "/entrance.html";
 });
 
 function showLoginError(message) {
@@ -231,8 +231,8 @@ async function callApi(path, options) {
 async function refreshMe() {
   const { ok, body } = await callApi("/api/me");
   if (ok && body && typeof body.userId === "string") {
-    // ログイン済みならこの画面に留まらず index.html へ進む
-    location.href = "/index.html";
+    // ログイン済みならこの画面に留まらず入り口選択画面へ進む
+    location.href = "/entrance.html";
     return;
   }
   $("me-result").textContent = "未ログイン";
@@ -249,7 +249,7 @@ $("register").addEventListener("click", async () => {
   if (ok) {
     showStatus(`登録・ログインしました（userId: ${body.userId}）`);
     await playEnterAnimation();
-    location.href = "/index.html";
+    location.href = "/entrance.html";
   } else {
     showRegisterError(`登録に失敗しました (${status}): ${body?.error ?? "unknown error"}`);
   }
@@ -266,7 +266,7 @@ $("login").addEventListener("click", async () => {
   if (ok) {
     showStatus(`ログインしました（userId: ${body.userId}）`);
     await playEnterAnimation();
-    location.href = "/index.html";
+    location.href = "/entrance.html";
   } else {
     showLoginError(`ログインに失敗しました (${status}): ${body?.error ?? "unknown error"}`);
   }

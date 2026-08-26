@@ -82,6 +82,24 @@ if (Sound !== null && detectPage(document) === "standalone") {
   Sound.loop("gaya", { volume: Sound.GAYA_CORRIDOR });
 }
 
+/**
+ * 扉が選ばれたときの入店経路。
+ *
+ * index.html（home）はもう corridor.js を読まない（3D をホームに埋め込むのをやめた）ため、
+ * ここで実質動くのは corridor.html（standalone）だけになった。standalone は入室の
+ * 送信経路を持たないので、その場で入店はできない。代わりに room-handoff.js
+ * （index.html・corridor.html 双方が読み込む window のグローバル）へ「この卓に入りたい」を
+ * 一度だけ書き込み、index.html に遷移する。index.html の app.js が接続確立時にこれを
+ * 読み取って自動で join する。
+ *
+ * corridor-ui.js の既定（home: Rooms.enterRoom / standalone: 表示のみ）を
+ * 上書きするため、onEnter を明示的に渡す。
+ */
+function handoffToIndex(code) {
+  RoomHandoff.setPendingJoinRoom({ roomCode: code });
+  location.href = "/index.html";
+}
+
 mountCorridor({
   createView: async () => (await import("/assets/3d/corridor-view.js")).createCorridorView,
   // 3D が出来たら足音を追い始める。view は corridor-ui.js の中で作られるので、
@@ -89,4 +107,5 @@ mountCorridor({
   onView: (view) => {
     if (Sound !== null) followFootsteps(view);
   },
+  onEnter: handoffToIndex,
 });

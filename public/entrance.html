@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>宴 -EN- 入り口</title>
+    <link rel="stylesheet" href="./assets/en.css" />
+    <style>
+      body {
+        min-height: 100vh;
+        min-height: 100svh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+      }
+
+      main {
+        width: 100%;
+        max-width: 960px;
+      }
+
+      h1 {
+        font-family: var(--serif);
+        font-size: 22px;
+        margin: 0 0 6px;
+        color: var(--cream);
+        text-align: center;
+      }
+
+      .lead {
+        margin: 0 0 24px;
+        color: var(--muted);
+        font-size: 13px;
+        text-align: center;
+      }
+
+      .entrance-choices {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 16px;
+      }
+
+      @media (max-width: 560px) {
+        .entrance-choices {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .entrance-card {
+        display: block;
+        padding: 18px;
+        color: var(--text);
+      }
+
+      .entrance-card:hover {
+        text-decoration: none;
+        border-color: var(--gold-3);
+      }
+
+      .entrance-card h2 {
+        font-size: 16px;
+        margin: 12px 0 4px;
+        color: var(--cream);
+      }
+
+      .entrance-card p {
+        margin: 0;
+        font-size: 12.5px;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      .entrance-preview {
+        height: 132px;
+        border-radius: var(--r-md);
+        background: var(--ink);
+        border: 1px solid var(--line-soft);
+        overflow: hidden;
+      }
+
+      /*
+       * いちらん（非3D）: index.html の骨組み（.appbar → 見出し → #rooms-list の
+       * カード群）を縮小して模したミニプレビュー。1枚のカードだけでなく画面全体の
+       * 構成が伝わるよう、帯・見出し・卓カード2枚を積む。
+       */
+      .preview-index {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .mini-appbar {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex: none;
+        padding: 5px 10px;
+        background: rgba(22, 16, 10, 0.82);
+        border-bottom: 1px solid var(--line-soft);
+      }
+
+      .mini-brand {
+        font-family: var(--serif);
+        font-size: 9px;
+        letter-spacing: 0.04em;
+        color: var(--cream);
+      }
+
+      .mini-account-pill {
+        padding: 2px 6px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-sm);
+        font-size: 7px;
+        color: var(--muted);
+      }
+
+      .mini-home-head {
+        flex: none;
+        padding: 6px 10px 4px;
+        font-family: var(--serif);
+        font-size: 10px;
+        color: var(--cream);
+      }
+
+      .mini-rooms-list {
+        flex: 1;
+        min-height: 0;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+        padding: 0 10px 8px;
+      }
+
+      .mini-room {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        border-radius: var(--r-sm);
+        background: linear-gradient(180deg, rgba(43, 32, 22, 0.93), rgba(36, 26, 17, 0.96));
+        overflow: hidden;
+      }
+
+      .mini-room-head {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 5px 6px 0;
+      }
+
+      .mini-room-code {
+        font-family: var(--serif);
+        font-size: 6.5px;
+        letter-spacing: 0.14em;
+        color: var(--muted);
+      }
+
+      .mini-badge {
+        padding: 1px 4px;
+        font-size: 6.5px;
+      }
+
+      .mini-room-name {
+        margin: 3px 6px 4px;
+        font-family: var(--serif);
+        font-size: 9px;
+        font-weight: 400;
+        color: var(--cream);
+      }
+
+      .mini-room-foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-top: auto;
+        padding: 3px 6px;
+        border-top: 1px solid var(--line-soft);
+        font-size: 6.5px;
+        color: var(--dim);
+      }
+
+      .mini-room-enter {
+        padding: 2px 6px;
+        border-radius: var(--r-sm);
+        background: linear-gradient(180deg, var(--gold-2), var(--gold-3));
+        color: var(--gold-ink);
+        font-family: var(--serif);
+        letter-spacing: 0.2em;
+        text-indent: 0.2em;
+        font-size: 6.5px;
+      }
+
+      /* 廊下（3D）: 奥へ伸びる通路と中心の照準のミニチュア */
+      .preview-corridor {
+        position: relative;
+        background: radial-gradient(60% 60% at 50% 100%, rgba(230, 166, 63, 0.12), transparent 70%);
+      }
+
+      .preview-corridor::before,
+      .preview-corridor::after {
+        content: "";
+        position: absolute;
+        bottom: 0;
+        width: 0;
+        height: 0;
+        border-style: solid;
+      }
+
+      .preview-corridor::before {
+        left: 50%;
+        border-width: 132px 60px 0 0;
+        border-color: var(--panel) transparent transparent transparent;
+        transform: translateX(-60px);
+      }
+
+      .preview-corridor::after {
+        left: 50%;
+        border-width: 132px 0 0 60px;
+        border-color: var(--panel) transparent transparent transparent;
+        transform: translateX(0);
+      }
+
+      .preview-aim {
+        position: absolute;
+        left: 50%;
+        top: 46%;
+        width: 12px;
+        height: 12px;
+        margin: -6px 0 0 -6px;
+        border: 1px solid rgba(230, 166, 63, 0.55);
+        border-radius: 50%;
+      }
+
+      .proto-badge {
+        margin-left: 6px;
+      }
+
+      .preview-create {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .preview-create-plus {
+        font-family: var(--serif);
+        font-size: 40px;
+        color: var(--gold-3);
+        opacity: 0.7;
+      }
+
+      .entrance-card-disabled {
+        cursor: default;
+        opacity: 0.55;
+      }
+
+      .entrance-card-disabled:hover {
+        border-color: var(--line-soft);
+      }
+
+      .entrance-profile {
+        margin-bottom: 18px;
+        padding: 14px 18px;
+      }
+
+      .entrance-profile-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-size: 13px;
+        color: var(--text);
+      }
+
+      #entrance-profile-toggle {
+        background: none;
+        border: none;
+        padding: 0;
+        color: var(--muted);
+        font-size: 13px;
+        cursor: pointer;
+      }
+
+      #entrance-profile-toggle:hover {
+        color: var(--cream);
+      }
+
+      .entrance-profile-form {
+        margin-top: 14px;
+        padding-top: 14px;
+        border-top: 1px solid var(--line-soft);
+      }
+
+      #entrance-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      #entrance-tags label {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 14px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-pill);
+        background: var(--panel-3);
+        color: var(--muted);
+        font-size: 12.5px;
+        cursor: pointer;
+        transition: border-color 0.15s, color 0.15s, background 0.15s;
+      }
+
+      #entrance-tags label:hover {
+        border-color: var(--gold-3);
+      }
+
+      #entrance-tags input[type="checkbox"] {
+        accent-color: var(--gold);
+      }
+
+      #entrance-tags label:has(input:checked) {
+        border-color: var(--gold-3);
+        background: linear-gradient(180deg, rgba(230, 166, 63, 0.16), rgba(200, 134, 42, 0.1));
+        color: var(--gold-2);
+      }
+
+      #entrance-profile-status {
+        margin: 10px 0 0;
+        color: #a8c58a;
+        font-size: 12.5px;
+      }
+
+      #entrance-profile-status:empty {
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body class="wood">
+    <main>
+      <h1>今夜はどちらから入りますか</h1>
+      <p class="lead">卓の見つけ方をえらんでください。</p>
+
+      <div class="entrance-profile card">
+        <div class="entrance-profile-row">
+          <span id="entrance-profile-summary">あだ名: 未設定</span>
+          <span class="spacer"></span>
+          <button id="entrance-profile-toggle" type="button" aria-expanded="false">
+            名札を整える ▾
+          </button>
+        </div>
+        <section id="entrance-profile-form" class="entrance-profile-form" hidden>
+          <div class="field">
+            <label for="entrance-nickname">あだ名（20文字以内）</label>
+            <input class="input" id="entrance-nickname" maxlength="20" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label>趣味タグ（最大5個・プリセットから選択）</label>
+            <div id="entrance-tags"></div>
+          </div>
+          <p id="entrance-profile-error" class="alert" role="alert"></p>
+          <p id="entrance-profile-status" role="status"></p>
+          <button id="entrance-profile-save" class="btn btn-gold" type="button">保存</button>
+        </section>
+      </div>
+
+      <div class="entrance-choices">
+        <a id="entrance-index" class="entrance-card card" href="/index.html">
+          <div class="entrance-preview preview-index" aria-hidden="true">
+            <div class="mini-appbar">
+              <span class="mini-brand">宴 -EN-</span>
+              <span class="spacer"></span>
+              <span class="mini-account-pill">名札</span>
+            </div>
+            <p class="mini-home-head">今夜、灯りのついている卓</p>
+            <div class="mini-rooms-list">
+              <div class="mini-room">
+                <div class="mini-room-head">
+                  <span class="dot"></span>
+                  <span class="mini-room-code">482913</span>
+                  <span class="spacer"></span>
+                  <span class="badge badge-gold mini-badge">空き</span>
+                </div>
+                <p class="mini-room-name">金曜の反省会</p>
+                <div class="mini-room-foot">
+                  <span>3 / 6 名</span>
+                  <span class="mini-room-enter">入店</span>
+                </div>
+              </div>
+              <div class="mini-room">
+                <div class="mini-room-head">
+                  <span class="dot"></span>
+                  <span class="mini-room-code">150726</span>
+                  <span class="spacer"></span>
+                  <span class="badge mini-badge">満席</span>
+                </div>
+                <p class="mini-room-name">深夜の作戦会議</p>
+                <div class="mini-room-foot">
+                  <span>6 / 6 名</span>
+                  <span class="mini-room-enter">入店</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <h2>お座敷いちらん</h2>
+          <p>灯りのついている卓を、一覧から見つけて入ります。</p>
+        </a>
+
+        <a id="entrance-corridor" class="entrance-card card" href="/corridor.html">
+          <div class="entrance-preview preview-corridor" aria-hidden="true">
+            <div class="preview-aim"></div>
+          </div>
+          <h2>廊下を歩く<span class="badge proto-badge">試作中</span></h2>
+          <p>3D の廊下を歩いて、灯りのついた扉を探して入ります。</p>
+        </a>
+
+        <a id="entrance-create" class="entrance-card card" href="/create-room.html">
+          <div class="entrance-preview preview-create" aria-hidden="true">
+            <span class="preview-create-plus">＋</span>
+          </div>
+          <h2>卓を建てる</h2>
+          <p id="entrance-create-desc">あなたが幹事になって、新しい卓を開きます。</p>
+        </a>
+      </div>
+    </main>
+    <script src="./guest-profile.js"></script>
+    <script src="./entrance.js"></script>
+  </body>
+</html>

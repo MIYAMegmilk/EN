@@ -27,9 +27,6 @@ function el(tag, text, className) {
   return node;
 }
 
-/** プリセット部屋タグの一覧（/api/room-tags の結果）。作成フォームの描画に使う */
-let presetRoomTags = [];
-
 /** VC への自動参加が進行中か（マイクの許可を待っている間だけ true） */
 let vcJoining = false;
 
@@ -43,25 +40,30 @@ const gameChoiceState = { choice: null, serverSelectedGameId: undefined };
 /** 作成直後に PATCH で反映する説明文・タグ。作成ボタン押下時にセットし、roomState 受信後にクリアする */
 let pendingRoomMeta = null;
 
-/** 卓を立てるフォームのタグ選択肢を描画する */
-function renderRoomTagsPicker(tags) {
-  const container = $("room-tags");
-  container.textContent = "";
-  for (const tag of tags) {
-    const label = document.createElement("label");
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.value = tag.id;
-    label.appendChild(checkbox);
-    label.appendChild(document.createTextNode(tag.label));
-    container.appendChild(label);
+/**
+ * createRoom を送る。create-room.html からの自動作成（RoomHandoff、
+ * connect() の ws.onopen 参照）が唯一の入口。
+ *
+ * 承認制（entryMode・§3.1.1）は一覧に出す卓にだけ、合言葉（passphrase・§3.1）は
+ * 招待制の卓にだけ付く。どちらもサーバー側で同じ条件を検査するので、ここで
+ * 混ぜて送るとエラーになる。create-room.js が入力欄を出し分けているが、
+ * 積むかどうかの最終判断はこの関数が持つ。
+ */
+function doCreateRoom({ nickname, visibility, roomName, description, tags, entryMode, passphrase }) {
+  state.rejoinAfterRestart = false;
+  const msg = { t: "createRoom", nickname, visibility };
+  if (visibility === "public") {
+    msg.roomName = roomName ?? "";
+    // 既定は open。knock のときだけ積む（サーバーの既定に合わせる）
+    if (entryMode === "knock") msg.entryMode = "knock";
+    pendingRoomMeta = { description: description ?? "", tags: Array.isArray(tags) ? tags : [] };
+  } else {
+    pendingRoomMeta = null;
+    // 空欄なら積まない。付けない卓が大半なので、既定を「無し」にしておく
+    const phrase = typeof passphrase === "string" ? passphrase.trim() : "";
+    if (phrase.length > 0) msg.passphrase = phrase;
   }
-}
-
-/** チェック済みのタグIDを取得する */
-function checkedRoomTagIds() {
-  return [...document.querySelectorAll('#room-tags input[type="checkbox"]:checked')]
-    .map((el) => el.value);
+  send(msg);
 }
 
 /** 卓作成の直後に説明文・タグを反映する。失敗しても卓自体は使えるので握りつぶしてエラー表示のみ行う */
@@ -85,19 +87,6 @@ async function applyPendingRoomMeta(code, meta) {
     }
   } catch {
     showError("説明文・タグの保存に失敗しました");
-  }
-}
-
-/** 起動時にプリセット部屋タグを読み込む */
-async function loadRoomTags() {
-  try {
-    const res = await fetch("/api/room-tags", { credentials: "same-origin" });
-    if (!res.ok) return;
-    const body = await res.json();
-    presetRoomTags = Array.isArray(body?.tags) ? body.tags : [];
-    renderRoomTagsPicker(presetRoomTags);
-  } catch {
-    // 読み込めなくてもタグなしで卓は作れるので無視する
   }
 }
 
@@ -259,6 +248,11 @@ async function refreshAccount() {
   // 保存済みのあだ名があれば入室欄に自動入力する（§3.0）。ユーザーが既に入力していたら上書きしない
   if (loggedIn && typeof body.nickname === "string" && $("nickname").value === "") {
     $("nickname").value = body.nickname;
+  } else if (!loggedIn && $("nickname").value === "") {
+    // ゲストの一時あだ名（entrance.html の簡易プロフィール編集で保存したもの、§3.0）
+    // があれば同様に自動入力する
+    const guest = GuestProfile.getGuestProfile();
+    if (guest.nickname !== "") $("nickname").value = guest.nickname;
   }
 }
 
@@ -288,6 +282,14 @@ function connect() {
     const afterRestart = state.restartRecovery;
     state.restartRecovery = false;
     const saved = store.load();
+    // create-room.html / corridor.html から渡された「これから建てる卓」「入りたい卓」が
+    // あれば読み出す。再接続すべきセッションがある場合（下の if 分岐）はそちらを優先するが、
+    // 読み出し自体は必ず行い sessionStorage から消しておく。そうしないと、
+    // 今回は再接続が勝って使わなかった pending が sessionStorage に残ったまま
+    // になり、この後の「退室 → 新規 onopen」など別の再接続のない機会に
+    // 意図せず自動作成・自動入室が発火してしまう
+    const pendingCreate = RoomHandoff.consumePendingCreateRoom();
+    const pendingJoin = RoomHandoff.consumePendingJoinRoom();
     if (saved !== null) {
       // 再接続を試す（60秒以内なら復帰できる）。session が生きていればサーバーは
       // あだ名を見ない（doJoin が reconnect で早期 return する）ので、あだ名を省略して
@@ -298,6 +300,13 @@ function connect() {
       if (nickname.length > 0) msg.nickname = nickname;
       state.rejoinAfterRestart = afterRestart;
       send(msg);
+    } else if (pendingCreate !== null) {
+      doCreateRoom(pendingCreate);
+    } else if (pendingJoin !== null) {
+      // corridor.html で扉を選んだ卓に入る。あだ名は集めていないので空欄のまま送る
+      // （join はあだ名省略可。サーバーが自動で二つ名を付ける、§3.10）
+      state.rejoinAfterRestart = false;
+      send({ t: "join", roomCode: pendingJoin.roomCode });
     }
   };
   ws.onclose = (event) => {
@@ -1489,40 +1498,6 @@ function bind() {
     await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
     location.href = "/login.html";
   });
-  $("create").addEventListener("click", () => {
-    state.rejoinAfterRestart = false;
-    // 公開ルームはルーム名必須（§3.1）。一覧（rooms.js）に載るのはこちらだけ
-    const visibility = $("visibility").value === "public" ? "public" : "private";
-    const msg = { t: "createRoom", nickname: $("nickname").value, visibility };
-    if (visibility === "public") {
-      msg.roomName = $("room-name").value;
-      // 承認制は一覧に出す卓にだけ付く（§3.1.1）
-      const entryMode = $("entry-mode").value === "knock" ? "knock" : "open";
-      if (entryMode === "knock") msg.entryMode = entryMode;
-      pendingRoomMeta = {
-        description: $("room-description").value,
-        tags: checkedRoomTagIds(),
-      };
-    } else {
-      pendingRoomMeta = null;
-      // 合言葉は招待制の卓にだけ付く（§3.1）。空欄なら積まない
-      const passphrase = $("new-passphrase").value.trim();
-      if (passphrase.length > 0) msg.passphrase = passphrase;
-    }
-    send(msg);
-  });
-
-  // 誰に見せるかに合わせて合言葉欄を出し入れする。公開の卓に出したままだと、
-  // 付けられるように見えてサーバーに弾かれるだけになる
-  const syncPassphraseField = () => {
-    const isPrivate = $("visibility").value === "private";
-    $("new-passphrase-field").classList.toggle("hidden", !isPrivate);
-    // 入店のしかたは一覧に出す卓だけの話。招待制ではコードか合言葉で入る
-    $("entry-mode-field").classList.toggle("hidden", isPrivate);
-  };
-  $("visibility").addEventListener("change", syncPassphraseField);
-  syncPassphraseField();
-
   $("queue-join").addEventListener("click", joinQueue);
   $("queue-leave").addEventListener("click", leaveQueue);
 
@@ -1613,7 +1588,6 @@ async function start() {
   Sound.mountControls();
   // 入室の音は鳴る間が決まっていて、その場で取りに行くと間に合わない
   Sound.preload("decide", "knock", "slidingScreen");
-  loadRoomTags();
   refreshAccount();
   bindVc(await fetchIceServers());
   connect();
