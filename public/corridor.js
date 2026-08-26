@@ -1,7 +1,9 @@
 /**
  * 廊下ビューの入口。corridor.html と index.html の両方がこの1本を読む。
  *
- * 中身は corridor-ui.js にある。ここがやるのは「3D 本体をいつ読むか」だけ。
+ * 中身は corridor-ui.js にある。ここがやるのは次の2つだけ。
+ *   1. 3D 本体をいつ読むか
+ *   2. 音（足音・店のざわめき・音量つまみ）をどのページで鳴らすか
  *
  * corridor-view.js は three.js（vendor だけで約 750KB）と GLB を引き連れてくるので、
  * 静的 import にするとホームを開いた全員がそれを待たされる。ホームの既定は一覧なので、
@@ -14,6 +16,77 @@
 
 import { mountCorridor } from "/assets/3d/corridor-ui.js";
 
+/**
+ * 歩いていると判定する1フレームあたりの移動量。
+ * corridor-view の速度上限は 3.2/秒なので、60fps なら全速で 0.053 前後になる。
+ * 0.002（≒0.12/秒）を境にすると、減速しきる直前まで足音が続いて自然に止まる。
+ */
+const WALK_EPSILON = 0.002;
+
+/**
+ * sound.js（classic script）が公開するグローバル。
+ *
+ * corridor.html と index.html はこのファイルより前に sound.js を読むが、テストや
+ * 将来の別ページでは読まれていないことがある。音が無いだけでページが壊れては困るので、
+ * 触る前に必ず有無を見る（corridor-ui.js が globalThis.Rooms を見ているのと同じ）。
+ */
+const Sound = globalThis.Sound ?? null;
+
+/**
+ * どちらのページに載っているかを見分ける。
+ *
+ * corridor-ui.js の detectPage と同じ見分け方（受け皿の id）を使う。ホーム
+ * （index.html）は #corridor-stage、単独ページ（corridor.html）は #stage を持つ。
+ * id は corridor-ui.js の PAGES 表が正なので、あちらを直すときはここも合わせること。
+ */
+function detectPage(doc) {
+  if (doc.getElementById("corridor-stage") !== null) return "home";
+  if (doc.getElementById("stage") !== null) return "standalone";
+  return null;
+}
+
+/**
+ * 歩いている間だけ足音を鳴らす。
+ *
+ * corridor-view は「歩き出した／止まった」を外へ知らせないので、公開されている
+ * position を毎フレーム見て自分で判定する。3D 側に手を入れずに済ませるための形。
+ */
+function followFootsteps(view) {
+  let last = view.position;
+  const tick = () => {
+    const now = view.position;
+    const moved = Math.hypot(now.x - last.x, now.z - last.z);
+    last = now;
+    Sound.setWalking(moved > WALK_EPSILON);
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+/**
+ * ざわめきと音量つまみは単独ページ（corridor.html）でだけ出す。
+ *
+ * ホーム（index.html）では app.js の start() がすでに bindButtons / mountControls を
+ * 呼んでいるので、ここでも呼ぶと二重になる。ざわめきも、app.js は「卓に入ってから
+ * GAYA_ROOM で鳴らす」設計なので、ここで GAYA_CORRIDOR を流すと一覧を眺めているだけで
+ * 店内の音が鳴ってしまう。
+ *
+ * ※ ホームで「店内を歩く」に切り替えたときにざわめきをどうするかは、まだ決めていない。
+ *   足音は両ページで鳴る（下の onView）。
+ */
+if (Sound !== null && detectPage(document) === "standalone") {
+  // 廊下にいる間ずっと店のざわめきを流す。3D が使えない環境でも、この画面に
+  // 立ち寄ったことは同じなので WebGL の判定より先に鳴らし始める
+  Sound.bindButtons();
+  Sound.mountControls();
+  Sound.loop("gaya", { volume: Sound.GAYA_CORRIDOR });
+}
+
 mountCorridor({
   createView: async () => (await import("/assets/3d/corridor-view.js")).createCorridorView,
+  // 3D が出来たら足音を追い始める。view は corridor-ui.js の中で作られるので、
+  // 出来た時点で渡してもらう（店内を選ばれるまで作られないページもある）
+  onView: (view) => {
+    if (Sound !== null) followFootsteps(view);
+  },
 });

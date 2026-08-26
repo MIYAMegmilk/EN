@@ -42,6 +42,9 @@ async function playEnterAnimation() {
   setControlsDisabled(true);
   document.body.classList.add("entering");
 
+  // 暖簾をくぐる衣ずれ。3D 演出と CSS フォールバックのどちらでも同じ間で鳴らす
+  void Sound.play("noren");
+
   const stage = $("noren-stage");
   let played3d = false;
   try {
@@ -153,5 +156,8 @@ $("login").addEventListener("click", async () => {
     showLoginError(`ログインに失敗しました (${status}): ${body?.error ?? "unknown error"}`);
   }
 });
+
+Sound.bindButtons();
+Sound.mountControls();
 
 refreshMe();
