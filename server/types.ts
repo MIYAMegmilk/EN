@@ -93,6 +93,31 @@ export const WS_SANDBOX_HARD_MAX = 150;
  */
 export const SANDBOX_PAYLOAD_MAX_BYTES = 4 * 1024;
 
+/**
+ * WS メッセージのレート制限: gameEvent（docs/design/games-unified.md §2.2 / §9.3）の
+ * 判定窓内最大件数。超過分は破棄する（切断しない）。判定窓は WS_RATE_WINDOW_MS を共用する。
+ * 【暫定値】。根拠: sandboxSignal 用に置いた WS_SANDBOX_RATE_MAX の値をそのまま引き継いだもの
+ * （設計書 §2.2）。サーバー側の負荷試験は未実施（設計書 §10-2）。
+ *
+ * **定義のみ。main.ts の専用レート枠への適用は後続 PR に回す。** それまで gameEvent は
+ * 一般枠（WS_RATE_MAX = 20件/秒）で判定される。一般枠のほうが厳しいため安全側だが、
+ * 描画中継（設計書 §2.7 は 10チャンク/秒 を想定）を実装する前に専用枠が要る。
+ */
+export const WS_GAME_EVENT_RATE_MAX = 30;
+/**
+ * gameEvent のハードキャップ。これを超える連投は乱用とみなして切断する。
+ * 【暫定値】。根拠は WS_GAME_EVENT_RATE_MAX と同じ（WS_SANDBOX_HARD_MAX の引き継ぎ）。
+ * **定義のみ。適用は後続 PR。**
+ */
+export const WS_GAME_EVENT_HARD_MAX = 150;
+/**
+ * gameEvent の payload の直列化サイズ上限（バイト、設計書 §9.3）。超過は棄却する。
+ * 【暫定値】。根拠は SANDBOX_PAYLOAD_MAX_BYTES の引き継ぎ。
+ * こちらは rooms.ts の gameEvent ハンドラで**すでに適用している**（レート枠と違い、
+ * ルーム層だけで完結するため）。
+ */
+export const GAME_EVENT_PAYLOAD_MAX_BYTES = 4 * 1024;
+
 // ---------------------------------------------------------------------------
 // §5 データモデル
 // ---------------------------------------------------------------------------
@@ -260,6 +285,26 @@ export type VoiceLine = {
   at: number;
 };
 
+/**
+ * 進行中のゲーム1本（docs/design/games-unified.md §2.1）。
+ *
+ * state の中身はモジュールごとに異なるため、ルーム層は unknown のまま持ち運び、
+ * 解釈は必ず moduleId で引いたモジュール（server/games/index.ts）に任せる。
+ * ここを特定の型（かつて GameState だった）に固定すると、専用モジュールの state を
+ * 載せるたびに型の嘘（キャスト）が要るため、意図的に unknown にしてある
+ */
+export type ActiveGame = {
+  /** カタログ上のモジュールID（server/games/index.ts の正本） */
+  moduleId: string;
+  /** モジュールが持つ状態。ルーム層は中身を解釈しない */
+  state: unknown;
+  /**
+   * 進行中か。モジュールが `ended` 効果を出した時点で false になる。
+   * 終了後も state を捨てないのは、最終結果の表示（view）を配り続けるため
+   */
+  running: boolean;
+};
+
 /** ルーム。プロセスメモリ上のみで保持し KV には置かない（§5） */
 export type Room = {
   /** 6桁の参加コード */
@@ -302,8 +347,8 @@ export type Room = {
   availableGames: Map<string, GameDefinition>;
   /** 選択中のゲームID */
   selectedGameId: string | null;
-  /** 進行中のゲーム状態。未開始は null */
-  game: GameState | null;
+  /** 進行中のゲーム。未開始は null（docs/design/games-unified.md §2.1） */
+  game: ActiveGame | null;
   /** チャット履歴。直近 CHAT_HISTORY_MAX 件のみ・古い順（§3.9） */
   chatHistory: ChatMessage[];
   /**
@@ -412,16 +457,30 @@ export type GameSummary = {
   title: string;
   /** 説明 */
   description?: string;
-  /** ラウンド数 */
-  rounds: number;
-  /** 入力方式 */
-  inputType: InputType;
-  /** 採点方式 */
-  scoring: ScoringMode;
-  /** 出題件数 */
-  promptCount: number;
+  /** ラウンド数。kind:"prompt" のみ */
+  rounds?: number;
+  /** 入力方式。kind:"prompt" のみ */
+  inputType?: InputType;
+  /** 採点方式。kind:"prompt" のみ */
+  scoring?: ScoringMode;
+  /** 出題件数。kind:"prompt" のみ */
+  promptCount?: number;
+  /** 開始に必要な最少人数。kind:"module" のみ（prompt はエンジン共通の MIN_PLAYERS） */
+  minPlayers?: number;
+  /** 参加できる最大人数。kind:"module" のみ */
+  maxPlayers?: number;
   /** 公式ゲームかどうか */
   official: boolean;
+  /**
+   * どの基盤で動くゲームか（docs/design/games-unified.md §4）。
+   * prompt … 宣言的データ（GameDefinition）を prompt モジュールが進行させる
+   * module … 専用のゲームモジュール（server/games/<id>.ts）
+   *
+   * 省略時は prompt とみなす。必須にすると gamedef.ts の toSummary（宣言的データ専用で、
+   * 常に prompt になる）まで書き換えが要るため、当面は任意フィールドにしてある。
+   * ルーム層（rooms.ts の buildSnapshot）は両方の種別に必ず明示して載せる
+   */
+  kind?: "prompt" | "module";
 };
 
 // ---------------------------------------------------------------------------
@@ -438,6 +497,16 @@ export type Phase =
   | "judge"
   | "roundResult"
   | "finalResult";
+
+/**
+ * 卓としてのフェーズ（docs/design/games-unified.md §3.2）。
+ *
+ * 専用モジュール型のゲームは内訳のフェーズを自前で持ち、表示は S2C `gameView` が担うので、
+ * 卓の外からは "playing"（遊んでいる最中）としか見えない。
+ * エンジン（engine.ts）が扱うのはあくまで上の Phase であり、この語彙は
+ * ルーム層とクライアントの間だけで使う
+ */
+export type RoomPhase = Phase | "playing";
 
 /** ゲーム内での役割。途中参加者はそのラウンド中は観戦のみ（§8） */
 export type ParticipantRole = "player" | "spectator";
@@ -712,6 +781,17 @@ export type FinalResultPhaseView = {
   scores: ScoreEntry[];
 };
 
+/**
+ * playing: 専用モジュール型ゲームの進行中（docs/design/games-unified.md §3.2）。
+ * 中身の表示データは S2C `gameView` / `RoomSnapshot.game` で別に配るため、
+ * ここには「どのゲームが動いているか」だけを載せる
+ */
+export type PlayingPhaseView = {
+  phase: "playing";
+  /** 進行中のモジュールID（ビューモジュールの読み込みに使う） */
+  gameId: string;
+};
+
 /** フェーズごとの表示データ。受信者ごとに内容が変わる（§3.2 原則3） */
 export type PhaseView =
   | LobbyPhaseView
@@ -721,7 +801,8 @@ export type PhaseView =
   | RevealPhaseView
   | JudgePhaseView
   | RoundResultPhaseView
-  | FinalResultPhaseView;
+  | FinalResultPhaseView
+  | PlayingPhaseView;
 
 /**
  * 公開ルーム一覧の1行（§2 公開ルーム一覧 / §4.0 `GET /api/rooms`）。
@@ -779,7 +860,7 @@ export type RoomSnapshot = {
   /** 選択中のゲームID */
   selectedGameId: string | null;
   /** 現在のフェーズ */
-  phase: Phase;
+  phase: RoomPhase;
   /** 現フェーズの期限（epoch ms）。期限なしは null */
   deadline: number | null;
   /** 現フェーズの表示データ */
@@ -798,6 +879,19 @@ export type RoomSnapshot = {
   serverTime: number;
   /** 稼働中のサンドボックスゲーム。無ければ null（docs/design/game-sandbox.md） */
   sandbox: SandboxGameState | null;
+  /**
+   * 進行中のモジュール型ゲームの表示データ（docs/design/games-unified.md §2.2）。
+   * 途中参加・再接続でフル状態を配るために載せる。既存の `phase` / `view` と並存する。
+   * kind:"prompt" のゲーム（＝現行の全ゲーム）では入らない
+   */
+  game?: {
+    /** カタログ上のゲームID */
+    gameId: string;
+    /** 受信者ごとの表示データ */
+    view: unknown;
+    /** カウントダウン表示用の期限（epoch ms）。期限なしは null */
+    deadline: number | null;
+  };
 };
 
 // ---------------------------------------------------------------------------
@@ -875,6 +969,12 @@ export type C2S =
   /** ゲーム内メッセージ。サーバーは payload を解釈せず同室へ中継する（rtcSignal と同じ扱い） */
   | { t: "sandboxSignal"; payload: unknown }
   /**
+   * ゲーム内イベント（docs/design/games-unified.md §2.2）。
+   * サーバー（ゲームモジュール）が payload を**検証・解釈**して状態を進める。
+   * payload を解釈せず中継するだけの sandboxSignal とは正反対の設計であることに注意
+   */
+  | { t: "gameEvent"; payload: unknown }
+  /**
    * ランダムマッチの待機列に並ぶ（§3.1.2）。ゲスト可。
    * あだ名を省略するとサーバーが しゅんぴ の二つ名を付ける（join と同じ扱い）
    */
@@ -904,7 +1004,7 @@ export type S2C =
   | { t: "matched"; roomCode: string }
   | { t: "kicked" }
   | { t: "playerKicked"; playerId: string }
-  | { t: "phase"; phase: Phase; deadline?: number; view: PhaseView }
+  | { t: "phase"; phase: RoomPhase; deadline?: number; view: PhaseView }
   | { t: "roundResult"; scores: ScoreEntry[] }
   | { t: "finalResult"; scores: ScoreEntry[] }
   | { t: "hostChanged"; playerId: string }
@@ -920,6 +1020,11 @@ export type S2C =
   | { t: "sandboxState"; game: SandboxGameState | null }
   /** 中継されたゲーム内メッセージ。送信者本人には返らない */
   | { t: "sandboxSignal"; from: string; payload: unknown }
+  /**
+   * モジュール型ゲームの表示データ（docs/design/games-unified.md §2.2）。
+   * 受信者ごとに内容が変わる（§3.2 原則3）。deadline はカウントダウン表示用
+   */
+  | { t: "gameView"; gameId: string; view: unknown; deadline: number | null }
   | { t: "error"; code: ErrorCode; message: string };
 
 // ---------------------------------------------------------------------------

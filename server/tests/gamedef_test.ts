@@ -116,10 +116,49 @@ Deno.test("validate: 公式ゲームはすべて仕様を満たす", () => {
   for (const g of OFFICIAL_GAMES) {
     const res = validateGameDefinition(g);
     assert(res.ok, `${g.title}: ${res.ok ? "" : res.errors.join(" / ")}`);
-    assert(g.prompts.length >= 8 && g.prompts.length <= 10);
+    assert(g.prompts.length >= 25, `${g.title}: お題は25件以上必要です`);
   }
-  assertEquals(OFFICIAL_GAMES.length, 3);
-  assertEquals(new Set(OFFICIAL_GAMES.map((g) => g.id)).size, 3);
+  assertEquals(OFFICIAL_GAMES.length, 4);
+  assertEquals(new Set(OFFICIAL_GAMES.map((g) => g.id)).size, 4);
+});
+
+Deno.test("validate: 公式ゲームのお題本文はゲーム内で重複しない", () => {
+  for (const g of OFFICIAL_GAMES) {
+    const texts = g.prompts.map((p) => p.text);
+    assertEquals(
+      new Set(texts).size,
+      texts.length,
+      `${g.title}: お題本文が重複しています`,
+    );
+  }
+});
+
+Deno.test("validate: choice ゲームの正解位置が特定の選択肢に偏っていない", () => {
+  // 「1番目（や特定の位置）を選べば当たる」パターンを機械的に検知する。
+  // 選択肢が n 択なら、正解位置ごとの理想比率は 1/n。
+  // 均等（1/n）から ±20 パーセントポイントまでの偏りは許容し、それを超えたら失敗させる。
+  const TOLERANCE = 0.2;
+  for (const g of OFFICIAL_GAMES) {
+    if (g.inputType !== "choice" || g.scoring !== "correct") continue;
+    const optionCounts = new Set(g.prompts.map((p) => (p as { options: string[] }).options.length));
+    for (const n of optionCounts) {
+      const targets = g.prompts.filter((p) => (p as { options: string[] }).options.length === n);
+      const counts = new Array(n).fill(0);
+      for (const p of targets) {
+        counts[(p as { answer: number }).answer]++;
+      }
+      const expected = 1 / n;
+      for (let i = 0; i < n; i++) {
+        const ratio = counts[i] / targets.length;
+        assert(
+          Math.abs(ratio - expected) <= TOLERANCE,
+          `${g.title}: ${n}択のうち正解位置${i}の比率が${(ratio * 100).toFixed(0)}%（期待値${
+            (expected * 100).toFixed(0)
+          }%±${TOLERANCE * 100}pt）に収まっていません。当てずっぽうで解けてしまう偏りです`,
+        );
+      }
+    }
+  }
 });
 
 // ---------------------------------------------------------------------------

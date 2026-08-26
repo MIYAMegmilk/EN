@@ -35,6 +35,8 @@ import {
   ENTRY_TOKEN_TTL_MS,
   err,
   type ErrorCode,
+  type GameState,
+  type GameSummary,
   type Knock,
   KNOCK_RATE_WINDOW_MS,
   KNOCK_TTL_MS,
@@ -60,6 +62,7 @@ import {
   ROOM_DESCRIPTION_MAX,
   ROOM_NAME_MAX,
   type RoomEntryMode,
+  type RoomPhase,
   type RoomSnapshot,
   type S2C,
   SANDBOX_PAYLOAD_MAX_BYTES,
@@ -68,16 +71,16 @@ import {
   VC_CAPACITY,
   type VoiceLine,
 } from "./types.ts";
+import { DEFAULT_PHASE_DURATIONS, type EnginePlayerInput } from "./engine.ts";
+import { findGameModule, findModuleGame, MODULE_GAMES } from "./games/index.ts";
 import {
-  buildPhaseView,
-  DEFAULT_PHASE_DURATIONS,
-  type EngineEffect,
-  type EngineEvent,
-  type EnginePlayerInput,
-  type EngineResult,
-  reduce,
-  startGame,
-} from "./engine.ts";
+  gameEventPayloadExceedsLimit,
+  type GameModule,
+  type ModuleEffect,
+  type ModuleEvent,
+  type ModuleResult,
+} from "./games/module.ts";
+import { PROMPT_MODULE_ID, type PromptConfig, promptModule } from "./games/prompt.ts";
 import {
   BOT_IDS,
   type BotEffect,
@@ -136,6 +139,7 @@ const GAME_ACTION_TYPES: ReadonlySet<C2S["t"]> = new Set<C2S["t"]>([
   "skipPhase",
   "submitInput",
   "submitVote",
+  "gameEvent",
 ]);
 
 /** 順位表から1位のあだ名を拾って bot の結果イベントにする。同点1位は先頭を採る */
@@ -239,6 +243,13 @@ type RoomEntry = {
   draining: boolean;
   /** 現フェーズの期限タイマー */
   phaseTimer: TimerHandle | null;
+  /**
+   * モジュールが予約した次の timeout 時刻（epoch ms、docs/design/games-unified.md §2.4）。
+   * schedule 効果で更新し、syncPhaseTimer がこの値に合わせてタイマーを張り直す。
+   * 既存エンジンの GameState.deadline を一般化したもので、prompt モジュールでは
+   * 常に GameState.deadline と同じ値になる
+   */
+  scheduledAt: number | null;
   /** 切断猶予タイマー（playerId → ハンドル） */
   graceTimers: Map<string, TimerHandle>;
   /** チャットのレート制限用。playerId → 判定窓内の発言時刻（古い順、§3.9） */
@@ -500,22 +511,19 @@ export class RoomManager {
     for (const entry of this.rooms.values()) {
       const room = entry.room;
       if (room.visibility !== "public" || room.roomName === undefined) continue;
-      const game = room.game;
       const summary: PublicRoomSummary = {
         code: room.code,
         roomName: room.roomName,
         playerCount: room.players.size,
         capacity: ROOM_CAPACITY,
-        playing: game !== null && game.phase !== "lobby",
+        playing: this.roomPhase(entry) !== "lobby",
         entryMode: room.entryMode,
         createdAt: room.createdAt,
       };
       // 選択中のゲームは「何をして遊んでいる卓か」の手がかりとして出す。
       // 進行内容（お題・回答・得点）は一覧には一切含めない
-      const selected = room.selectedGameId === null
-        ? undefined
-        : room.availableGames.get(room.selectedGameId);
-      if (selected !== undefined) summary.gameTitle = selected.title;
+      const title = room.selectedGameId === null ? undefined : selectedGameTitle(room);
+      if (title !== undefined) summary.gameTitle = title;
       if (room.description !== undefined) summary.description = room.description;
       if (room.tags !== undefined && room.tags.length > 0) summary.tags = room.tags;
       list.push(summary);
@@ -577,7 +585,7 @@ export class RoomManager {
       player.connected = false;
       player.disconnectedAt = now;
       entry.room.lastActiveAt = now;
-      this.applyEngineEvent(entry, { t: "playerLeft", playerId: player.id, now });
+      this.applyModuleEvent(entry, { t: "playerLeft", playerId: player.id, now });
       this.applyBotEvent(entry, { t: "playerDisconnected", playerId: player.id });
       this.broadcast(entry, { t: "playerLeft", player: this.toPublic(entry, player) });
       this.armGraceTimer(entry, player.id);
@@ -760,6 +768,7 @@ export class RoomManager {
       queue: [],
       draining: false,
       phaseTimer: null,
+      scheduledAt: null,
       graceTimers: new Map(),
       chatTimes: new Map(),
       knockTimes: new Map(),
@@ -909,7 +918,7 @@ export class RoomManager {
     room.lastActiveAt = now;
     entry.links.set(player.id, link);
     this.links.set(link.id, { link, roomCode: room.code, playerId: player.id });
-    this.applyEngineEvent(entry, {
+    this.applyModuleEvent(entry, {
       t: "playerJoined",
       playerId: player.id,
       nickname: player.nickname,
@@ -943,7 +952,7 @@ export class RoomManager {
     entry.room.lastActiveAt = now;
     entry.links.set(player.id, link);
     this.links.set(link.id, { link, roomCode: entry.room.code, playerId: player.id });
-    this.applyEngineEvent(entry, { t: "playerRejoined", playerId: player.id, now });
+    this.applyModuleEvent(entry, { t: "playerRejoined", playerId: player.id, now });
     this.applyBotEvent(entry, {
       t: "playerRejoined",
       playerId: player.id,
@@ -1012,16 +1021,23 @@ export class RoomManager {
         return;
       case "skipPhase":
         if (!this.requireHost(entry, state)) return;
-        this.applyEngineEvent(entry, { t: "skipPhase", now }, state.link);
+        this.applyModuleEvent(entry, { t: "skipPhase", now }, state.link);
         return;
       case "submitInput":
         if (typeof msg.value !== "string" && typeof msg.value !== "number") {
           sendError(state.link, "INVALID_INPUT", "回答の形式が正しくありません");
           return;
         }
-        this.applyEngineEvent(
+        // 既存の submitInput は prompt モジュールの clientEvent へ写像する。
+        // クライアントの見た目は変えず、サーバー側の経路だけを1本にする（§2.2）
+        this.applyModuleEvent(
           entry,
-          { t: "submitInput", playerId: player.id, value: msg.value, now },
+          {
+            t: "clientEvent",
+            playerId: player.id,
+            payload: { k: "submitInput", value: msg.value },
+            now,
+          },
           state.link,
         );
         return;
@@ -1030,9 +1046,14 @@ export class RoomManager {
           sendError(state.link, "INVALID_INPUT", "投票先の形式が正しくありません");
           return;
         }
-        this.applyEngineEvent(
+        this.applyModuleEvent(
           entry,
-          { t: "submitVote", voterId: player.id, targetPlayerId: msg.targetPlayerId, now },
+          {
+            t: "clientEvent",
+            playerId: player.id,
+            payload: { k: "submitVote", targetPlayerId: msg.targetPlayerId },
+            now,
+          },
           state.link,
         );
         return;
@@ -1049,6 +1070,9 @@ export class RoomManager {
       case "sandboxSignal":
         // 中継条件を満たさない場合は黙って破棄する（docs/design/game-sandbox.md §4.4）
         this.relaySandboxSignal(entry, player, msg);
+        return;
+      case "gameEvent":
+        this.handleGameEvent(entry, state, player, msg, now);
         return;
       case "chat":
         this.handleChat(entry, state, player, msg.text, now);
@@ -1127,11 +1151,12 @@ export class RoomManager {
       sendError(state.link, "PHASE_MISMATCH", "サンドボックスゲームの稼働中は変更できません");
       return;
     }
-    if (room.game !== null && room.game.phase !== "lobby") {
+    if (this.roomPhase(entry) !== "lobby") {
       sendError(state.link, "PHASE_MISMATCH", "ゲームの進行中は変更できません");
       return;
     }
-    if (typeof gameId !== "string" || !room.availableGames.has(gameId)) {
+    // 宣言的データのゲーム（availableGames）と専用モジュール型のゲームを同じ経路で選ぶ（§4）
+    if (typeof gameId !== "string" || !isSelectableGame(room, gameId)) {
       sendError(state.link, "INVALID_INPUT", "選択できるゲームではありません");
       return;
     }
@@ -1148,7 +1173,7 @@ export class RoomManager {
       sendError(state.link, "PHASE_MISMATCH", "サンドボックスゲームの稼働中は開始できません");
       return;
     }
-    if (room.game !== null && room.game.phase !== "lobby") {
+    if (this.roomPhase(entry) !== "lobby") {
       sendError(state.link, "PHASE_MISMATCH", "すでにゲームが進行中です");
       return;
     }
@@ -1157,7 +1182,8 @@ export class RoomManager {
       return;
     }
     const definition = room.availableGames.get(room.selectedGameId);
-    if (definition === undefined) {
+    const moduleGame = findModuleGame(room.selectedGameId);
+    if (definition === undefined && moduleGame === null) {
       sendError(state.link, "INVALID_INPUT", "選択できるゲームではありません");
       return;
     }
@@ -1166,14 +1192,57 @@ export class RoomManager {
       nickname: p.nickname,
       connected: p.connected,
     }));
-    const result = startGame(definition, players, now, phaseDurationsFor(definition.scoring));
+    // 宣言的データのゲームは prompt モジュールが、それ以外は専用モジュールが進行させる（§2.1 / §4）
+    const module: GameModule = moduleGame ?? promptModule;
+    const config: PromptConfig | undefined = definition === undefined ? undefined : {
+      definition,
+      durations: phaseDurationsFor(definition.scoring),
+    };
+    if (module.kind === "module" && players.length < module.meta.minPlayers) {
+      sendError(
+        state.link,
+        "PHASE_MISMATCH",
+        `このあそびは${module.meta.minPlayers}人から始められます`,
+      );
+      return;
+    }
+    const phaseBefore: RoomPhase = this.roomPhase(entry);
+    const result = module.init({
+      players,
+      now,
+      seed: gameSeed(room.code, now),
+      config,
+    });
     if (result.error !== undefined) {
       sendError(state.link, result.error, result.message ?? "ゲームを開始できません");
       return;
     }
-    room.game = result.state;
-    this.applyEffects(entry, result.effects);
+    this.startModule(entry, module.id, result.state);
+    this.applyEffects(entry, result.effects, phaseBefore);
     this.syncPhaseTimer(entry);
+  }
+
+  /**
+   * ゲーム内イベント（設計書 §2.2）。進行中のモジュールが payload を検証・解釈する。
+   * payload を解釈せず中継する sandboxSignal とは違い、上限超過は黙って捨てず
+   * INVALID_INPUT で返す（送信側に非があることを伝えるため。§2.3）
+   */
+  private handleGameEvent(
+    entry: RoomEntry,
+    state: LinkState,
+    player: Player,
+    msg: Extract<C2S, { t: "gameEvent" }>,
+    now: number,
+  ): void {
+    if (gameEventPayloadExceedsLimit(msg.payload)) {
+      sendError(state.link, "INVALID_INPUT", "ゲーム内イベントが大きすぎます");
+      return;
+    }
+    this.applyModuleEvent(
+      entry,
+      { t: "clientEvent", playerId: player.id, payload: msg.payload, now },
+      state.link,
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -1197,7 +1266,7 @@ export class RoomManager {
   ): void {
     if (!this.requireHost(entry, state)) return;
     const room = entry.room;
-    if (room.game !== null && room.game.phase !== "lobby") {
+    if (this.roomPhase(entry) !== "lobby") {
       sendError(
         state.link,
         "PHASE_MISMATCH",
@@ -1733,6 +1802,7 @@ export class RoomManager {
       queue: [],
       draining: false,
       phaseTimer: null,
+      scheduledAt: null,
       graceTimers: new Map(),
       chatTimes: new Map(),
       knockTimes: new Map(),
@@ -1980,46 +2050,127 @@ export class RoomManager {
   }
 
   // -------------------------------------------------------------------------
-  // エンジン連携
+  // ゲームモジュール連携（docs/design/games-unified.md §2.1）
   // -------------------------------------------------------------------------
 
-  /** エンジンにイベントを流し、結果を配信する。エラーは送信元にだけ返す */
-  private applyEngineEvent(
+  /**
+   * 進行中のゲームモジュールを引く。未開始・未知のIDは null。
+   *
+   * state の実体は `Room.game.state`（unknown）で、その解釈はここで引いた
+   * モジュールだけが行う。ルーム層が state の中身を型として知る必要があるのは
+   * prompt（既存のフェーズ UI を配るため）だけで、その1点は promptState() に閉じてある
+   */
+  private activeModule(entry: RoomEntry): GameModule | null {
+    const game = entry.room.game;
+    if (game === null) return null;
+    return findGameModule(game.moduleId);
+  }
+
+  /** 進行中のモジュールの state。未開始は null */
+  private activeState(entry: RoomEntry): unknown {
+    return entry.room.game?.state ?? null;
+  }
+
+  /** 進行中が prompt モジュールなら、その state を返す。prompt 以外は null（promptStateOf） */
+  private promptState(entry: RoomEntry): GameState | null {
+    return promptStateOf(entry.room);
+  }
+
+  /** 卓としてのフェーズ（roomPhaseOf） */
+  private roomPhase(entry: RoomEntry): RoomPhase {
+    return roomPhaseOf(entry.room);
+  }
+
+  /**
+   * カウントダウン表示用の期限。prompt はエンジンの deadline、専用モジュールは
+   * schedule 効果で予約された時刻（＝次に進む時刻）を使う
+   */
+  private gameDeadline(entry: RoomEntry): number | null {
+    const prompt = this.promptState(entry);
+    if (prompt !== null) return prompt.deadline;
+    if (entry.room.game === null || !entry.room.game.running) return null;
+    return entry.scheduledAt;
+  }
+
+  /** ゲームを開始し、モジュールと初期 state を卓に載せる（Room.game = ActiveGame） */
+  private startModule(entry: RoomEntry, moduleId: string, state: unknown): void {
+    entry.room.game = { moduleId, state, running: true };
+  }
+
+  /** モジュールが返した新しい state を保存する。開始前（game が無い）なら何もしない */
+  private storeState(entry: RoomEntry, state: unknown): void {
+    const game = entry.room.game;
+    if (game === null) return;
+    game.state = state;
+  }
+
+  /**
+   * 進行中のモジュールにイベントを流し、結果を配信する。エラーは送信元にだけ返す。
+   * 変換は行わず、モジュールの語彙（ModuleEvent / ModuleEffect）のまま受け渡す
+   */
+  private applyModuleEvent(
     entry: RoomEntry,
-    event: EngineEvent,
+    event: ModuleEvent,
     origin?: ClientLink,
-  ): EngineResult | null {
-    const room = entry.room;
-    if (room.game === null) {
+  ): ModuleResult<unknown> | null {
+    const module = this.activeModule(entry);
+    if (module === null) {
       if (origin !== undefined && isPlayerAction(event)) {
         sendError(origin, "PHASE_MISMATCH", "ゲームが進行していません");
       }
       return null;
     }
-    const result = reduce(room.game, event);
-    room.game = result.state;
+    const phaseBefore = this.roomPhase(entry);
+    const result = module.reduce(this.activeState(entry), event);
+    this.storeState(entry, result.state);
     if (result.error !== undefined) {
       if (origin !== undefined) {
         sendError(origin, result.error, result.message ?? "処理できませんでした");
       }
       return result;
     }
-    this.applyEffects(entry, result.effects);
-    // フェーズが変わらない変化（提出数・投票数・参加者の増減）も画面に反映する
-    if (result.changed && !result.effects.some((e) => e.t === "phaseChanged")) {
+    this.applyEffects(entry, result.effects, phaseBefore);
+    // 表示の作り直しを伴わない変化（提出数・投票数・参加者の増減）も画面に反映する
+    if (result.changed && !result.effects.some((e) => e.t === "viewChanged")) {
       this.broadcastPhase(entry);
     }
     this.syncPhaseTimer(entry);
     return result;
   }
 
-  /** EngineEffect を S2C に変換して配信する */
-  private applyEffects(entry: RoomEntry, effects: EngineEffect[]): void {
+  /**
+   * ModuleEffect を S2C・タイマー・加点に変換する。
+   * phaseBefore は効果を適用する前のフェーズ。bot への phaseChanged 通知を
+   * 「実際にフェーズが変わったときだけ」に絞るために使う（§3.10）
+   */
+  private applyEffects(entry: RoomEntry, effects: ModuleEffect[], phaseBefore: RoomPhase): void {
+    // schedule は「次にいつ起こすか」の予約であると同時に、専用モジュール型ゲームの
+    // カウントダウン表示（gameView の deadline）の出どころでもある。viewChanged より
+    // 先に反映しておかないと、画面に1つ前の期限が出てしまうので、まとめて先に消化する
+    for (const effect of effects) {
+      if (effect.t === "schedule") entry.scheduledAt = effect.at;
+    }
+    let previousPhase = phaseBefore;
     for (const effect of effects) {
       switch (effect.t) {
-        case "phaseChanged":
+        case "viewChanged": {
           this.broadcastPhase(entry);
-          this.applyBotEvent(entry, { t: "phaseChanged", phase: effect.phase });
+          const phase = this.roomPhase(entry);
+          if (phase !== previousPhase) {
+            this.applyBotEvent(entry, { t: "phaseChanged", phase: botPhase(phase) });
+            previousPhase = phase;
+          }
+          break;
+        }
+        case "schedule":
+          // 上で先に消化済み
+          break;
+        case "score":
+          // Player.score はゲーム横断の累計。1ゲーム分の合計をここで加算する
+          for (const row of effect.totals) {
+            const player = entry.room.players.get(row.playerId);
+            if (player !== undefined) player.score += row.totalScore;
+          }
           break;
         case "roundResult":
           this.broadcast(entry, { t: "roundResult", scores: effect.scores });
@@ -2027,34 +2178,46 @@ export class RoomManager {
           break;
         case "finalResult":
           this.broadcast(entry, { t: "finalResult", scores: effect.scores });
-          // Player.score はゲーム横断の累計。1ゲーム分の合計をここで加算する
-          for (const row of effect.scores) {
-            const player = entry.room.players.get(row.playerId);
-            if (player !== undefined) player.score += row.totalScore;
-          }
           this.applyBotEvent(entry, botResultEvent("finalResult", effect.scores));
           break;
-        case "ended":
+        case "ended": {
+          // state は捨てずに残す（最終結果を表示したままにするため）。
+          // 卓としては lobby に戻り、次のゲームを選べるようになる
+          if (entry.room.game !== null) entry.room.game.running = false;
+          // 専用モジュールは「終わった」ことがフェーズにしか出ないので、ここで配り直す。
+          // prompt はエンジンが lobby への phaseChanged を先に出しているため、
+          // この時点では既に previousPhase が lobby で、二重配信にはならない
+          const phase = this.roomPhase(entry);
+          if (phase !== previousPhase) {
+            this.broadcastPhase(entry);
+            this.applyBotEvent(entry, { t: "phaseChanged", phase: botPhase(phase) });
+            previousPhase = phase;
+          }
           break;
+        }
       }
     }
   }
 
-  /** 現フェーズの期限に合わせてタイマーを張り直す。古いタイマーは無効化する */
+  /**
+   * モジュールが予約した時刻に合わせてタイマーを張り直す。古いタイマーは無効化する。
+   * 予約が無ければ（schedule の at が null なら）タイマーを持たない
+   */
   private syncPhaseTimer(entry: RoomEntry): void {
     if (entry.phaseTimer !== null) {
       this.clearTimer(entry.phaseTimer);
       entry.phaseTimer = null;
     }
-    const game = entry.room.game;
-    if (game === null || game.deadline === null) return;
+    if (entry.room.game === null) entry.scheduledAt = null;
+    const at = entry.scheduledAt;
+    if (at === null) return;
     const code = entry.room.code;
-    const delay = Math.max(0, game.deadline - this.now());
+    const delay = Math.max(0, at - this.now());
     entry.phaseTimer = this.setTimer(() => {
       this.enqueue(code, () => {
         if (this.rooms.get(code) !== entry) return;
         entry.phaseTimer = null;
-        this.applyEngineEvent(entry, { t: "timeout", now: this.now() });
+        this.applyModuleEvent(entry, { t: "timeout", now: this.now() });
       });
     }, delay);
   }
@@ -2111,7 +2274,7 @@ export class RoomManager {
     }
     room.players.delete(playerId);
     room.lastActiveAt = now;
-    this.applyEngineEvent(entry, { t: "playerKicked", playerId, now });
+    this.applyModuleEvent(entry, { t: "playerKicked", playerId, now });
     // 退室が確定したので終了アンケートの票も無効にする（§3.10）
     this.applyBotEvent(entry, { t: "playerLeft", playerId });
     // キックは playerKicked で伝える。受け取った各クライアントは、その相手との
@@ -2181,11 +2344,15 @@ export class RoomManager {
     }
   }
 
-  /** phase は受信者ごとに view を作り分ける（§3.2 原則3） */
+  /**
+   * phase は受信者ごとに view を作り分ける（§3.2 原則3）。
+   * 専用モジュール型のゲームが動いている間は、続けて gameView も受信者ごとに配る
+   * （表示の本体はビューモジュールが描く。設計書 §2.2 / §3.2）
+   */
   private broadcastPhase(entry: RoomEntry): void {
-    const game = entry.room.game;
-    const phase: Phase = game?.phase ?? "lobby";
-    const deadline = game?.deadline ?? null;
+    const phase = this.roomPhase(entry);
+    const deadline = this.gameDeadline(entry);
+    const moduleView = this.moduleViewSource(entry);
     for (const [playerId, link] of entry.links) {
       const msg: Extract<S2C, { t: "phase" }> = {
         t: "phase",
@@ -2194,16 +2361,48 @@ export class RoomManager {
       };
       if (deadline !== null) msg.deadline = deadline;
       link.send(msg);
+      if (moduleView !== null) {
+        link.send({
+          t: "gameView",
+          gameId: moduleView.id,
+          view: moduleView.view(this.activeState(entry), playerId),
+          deadline,
+        });
+      }
     }
   }
 
-  /** 受信者向けの PhaseView。lobby は選択中ゲームをルーム層の値で埋める */
-  private viewFor(entry: RoomEntry, playerId: string): PhaseView {
+  /**
+   * 進行中が専用モジュール型のゲームならそのモジュールを返す。
+   * prompt・未開始・終了後は null（＝ gameView を配らない）
+   */
+  private moduleViewSource(entry: RoomEntry): GameModule | null {
     const game = entry.room.game;
-    if (game === null || game.phase === "lobby") {
+    if (game === null || !game.running) return null;
+    const module = this.activeModule(entry);
+    if (module === null || module.kind !== "module") return null;
+    return module;
+  }
+
+  /**
+   * 受信者向けの PhaseView。lobby は選択中ゲームをルーム層の値で埋める。
+   * 専用モジュール型のゲームの中身は PhaseView では表せないので、
+   * ここには「どのゲームが動いているか」だけを載せ、本体は gameView で配る
+   */
+  private viewFor(entry: RoomEntry, playerId: string): PhaseView {
+    const phase = this.roomPhase(entry);
+    if (phase === "lobby") {
       return { phase: "lobby", selectedGameId: entry.room.selectedGameId };
     }
-    return buildPhaseView(game, playerId);
+    if (phase === "playing") {
+      return { phase: "playing", gameId: entry.room.game?.moduleId ?? "" };
+    }
+    // ここまで来るのは prompt モジュールだけ（roomPhase の分岐と対応する）
+    const prompt = this.promptState(entry);
+    if (prompt === null) {
+      return { phase: "lobby", selectedGameId: entry.room.selectedGameId };
+    }
+    return promptModule.view(prompt, playerId);
   }
 
   /** 参加者にフルスナップショットを送る（§4.1 roomState） */
@@ -2216,7 +2415,7 @@ export class RoomManager {
   /** RoomSnapshot を組み立てる。session は本人にのみ入れる */
   private buildSnapshot(entry: RoomEntry, viewer: Player): RoomSnapshot {
     const room = entry.room;
-    const game = room.game;
+    const prompt = this.promptState(entry);
     const snapshot: RoomSnapshot = {
       code: room.code,
       visibility: room.visibility,
@@ -2224,14 +2423,12 @@ export class RoomManager {
       hostId: room.hostId,
       youId: viewer.id,
       youAreHost: room.hostId === viewer.id,
-      youAreSpectator: game?.participants[viewer.id]?.role === "spectator",
+      youAreSpectator: prompt?.participants[viewer.id]?.role === "spectator",
       players: [...room.players.values()].map((p) => this.toPublic(entry, p)),
-      availableGames: [...room.availableGames.values()].map((g) =>
-        toSummary(g, isOfficialGame(g.id))
-      ),
+      availableGames: availableGameSummaries(room),
       selectedGameId: room.selectedGameId,
-      phase: game?.phase ?? "lobby",
-      deadline: game?.deadline ?? null,
+      phase: this.roomPhase(entry),
+      deadline: this.gameDeadline(entry),
       view: this.viewFor(entry, viewer.id),
       chat: [...room.chatHistory],
       bots: { ...entry.bot.enabled },
@@ -2239,6 +2436,15 @@ export class RoomManager {
       serverTime: this.now(),
       sandbox: room.sandbox,
     };
+    // 進行中の専用モジュール型ゲームは、途中参加・再接続でも view を全量配って復元する（§5）
+    const moduleView = this.moduleViewSource(entry);
+    if (moduleView !== null) {
+      snapshot.game = {
+        gameId: moduleView.id,
+        view: moduleView.view(this.activeState(entry), viewer.id),
+        deadline: snapshot.deadline,
+      };
+    }
     if (room.roomName !== undefined) snapshot.roomName = room.roomName;
     // 集計中のアンケートは再接続でも復元する。締切だけ渡し、投票済みかは持たせない
     const poll = entry.bot.nabe.poll;
@@ -2275,6 +2481,88 @@ export class RoomManager {
 // 補助
 // ---------------------------------------------------------------------------
 
+/**
+ * 一覧に出すゲーム（設計書 §4）。宣言的データのゲームに続けて専用モジュール型を並べる。
+ * 並び順を「宣言的 → モジュール」で固定しているのは、既存の卓・既存テストが見ている
+ * 先頭の並びを動かさないため
+ */
+export function availableGameSummaries(room: Room): GameSummary[] {
+  const summaries: GameSummary[] = [...room.availableGames.values()].map((g) => ({
+    ...toSummary(g, isOfficialGame(g.id)),
+    kind: "prompt" as const,
+  }));
+  for (const module of MODULE_GAMES) {
+    summaries.push({
+      id: module.id,
+      title: module.meta.title,
+      description: module.meta.description,
+      minPlayers: module.meta.minPlayers,
+      maxPlayers: module.meta.maxPlayers,
+      // モジュール型のゲームはリポジトリ入りのコードなので、常に公式扱い（§4）
+      official: true,
+      kind: "module",
+    });
+  }
+  return summaries;
+}
+
+/**
+ * 進行中が prompt モジュールなら、その state を GameState として返す。prompt 以外は null。
+ *
+ * ルーム層に残る唯一の「モジュールの state の中身を知っている」場所。
+ * prompt の state がエンジンの GameState であることは prompt.ts の実装が保証しており、
+ * moduleId で絞ってから読むことで、その前提をこの1関数に閉じ込めている。
+ * 他のモジュールの state は unknown のまま持ち回り、解釈はモジュール自身に任せる
+ */
+export function promptStateOf(room: Room): GameState | null {
+  const game = room.game;
+  if (game === null || game.moduleId !== PROMPT_MODULE_ID) return null;
+  return game.state as GameState;
+}
+
+/**
+ * 卓としてのフェーズ。prompt はエンジンのフェーズをそのまま、
+ * 専用モジュールは進行中かどうかだけを "playing" / "lobby" で表す（設計書 §3.2）。
+ *
+ * **ルーム層の外（main.ts のデバッグ表示など）から「いま遊んでいるか」を知りたいときは、
+ * `room.game` の中身を直接読まずに必ずこの関数を通すこと。** `Room.game.state` の形は
+ * モジュールごとに違い、ルーム層とモジュールしか解釈できない（かつて main.ts が
+ * `room.game.phase`＝エンジン固有の形を直接読んでいたのが、層の乱れの元だった）
+ */
+export function roomPhaseOf(room: Room): RoomPhase {
+  const game = room.game;
+  if (game === null) return "lobby";
+  const prompt = promptStateOf(room);
+  if (prompt !== null) return prompt.phase;
+  return game.running ? "playing" : "lobby";
+}
+
+/**
+ * bot へ伝えるフェーズ（bot.ts の BotEvent はエンジンの語彙 Phase を使う）。
+ * bot が見ているのは「ロビーへ戻ったか」だけなので、専用モジュール型の "playing" は
+ * 進行中を表す intro に寄せて渡す。bot の判定（backToLobby）はこれで変わらない
+ */
+function botPhase(phase: RoomPhase): Phase {
+  return phase === "playing" ? "intro" : phase;
+}
+
+/** その gameId を選べるか（宣言的データのゲーム、または専用モジュール型のゲーム） */
+function isSelectableGame(room: Room, gameId: string): boolean {
+  return room.availableGames.has(gameId) || findModuleGame(gameId) !== null;
+}
+
+/**
+ * 選択中のゲームのタイトル。選ばれていない・引けない場合は undefined。
+ * 万一IDがぶつかったときは専用モジュールを優先する（handleStartGame と同じ順序にする）
+ */
+function selectedGameTitle(room: Room): string | undefined {
+  const id = room.selectedGameId;
+  if (id === null) return undefined;
+  const module = findModuleGame(id);
+  if (module !== null) return module.meta.title;
+  return room.availableGames.get(id)?.title;
+}
+
 /** ゲームの採点方式に応じたフェーズ秒数。vote 以外の judge は表示のみなので短い */
 export function phaseDurationsFor(scoring: ScoringMode): PhaseDurations {
   if (scoring === "vote") return DEFAULT_PHASE_DURATIONS;
@@ -2305,9 +2593,24 @@ export function sandboxPayloadExceedsLimit(payload: unknown): boolean {
   return new TextEncoder().encode(json).length > SANDBOX_PAYLOAD_MAX_BYTES;
 }
 
+/**
+ * ゲーム開始時にモジュールへ渡す乱数の種（設計書 §2.5）。
+ * ルームコードと開始時刻から決定的に作る。Math.random() を使わないのは、
+ * 同じ入力からは同じ進行を再現できるようにするため（テストと不具合の再現のため）
+ */
+export function gameSeed(roomCode: string, startedAt: number): number {
+  let h = 0x811c9dc5;
+  const source = `${roomCode}:${startedAt}`;
+  for (let i = 0; i < source.length; i++) {
+    h ^= source.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h >>> 0;
+}
+
 /** 参加者本人の操作によるイベントか（エラーを返すべき相手がいるか） */
-function isPlayerAction(event: EngineEvent): boolean {
-  return event.t === "submitInput" || event.t === "submitVote" || event.t === "skipPhase";
+function isPlayerAction(event: ModuleEvent): boolean {
+  return event.t === "clientEvent" || event.t === "skipPhase";
 }
 
 /** エラーを1件送る */

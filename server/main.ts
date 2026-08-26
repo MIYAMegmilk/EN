@@ -26,6 +26,7 @@ import {
 import {
   type ClientLink,
   RoomManager,
+  roomPhaseOf,
   SHUTDOWN_CLOSE_CODE,
   SHUTDOWN_CLOSE_REASON,
   validateRoomDescription,
@@ -85,6 +86,7 @@ export const C2S_TYPES: ReadonlySet<string> = new Set([
   "sandboxStart",
   "sandboxEnd",
   "sandboxSignal",
+  "gameEvent",
   "joinQueue",
   "leaveQueue",
   "leave",
@@ -733,7 +735,7 @@ function buildDebugSummary(manager: RoomManager, startedAt: number): Record<stri
     return {
       code: summary.code,
       playerCount: summary.playerCount,
-      phase: room?.game?.phase ?? "lobby",
+      phase: room === undefined ? "lobby" : roomPhaseOf(room),
       sandbox: room?.sandbox?.gameId ?? null,
     };
   });

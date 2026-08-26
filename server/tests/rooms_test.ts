@@ -11,6 +11,7 @@ import {
   normalizeRoomCode,
   NOT_IMPLEMENTED_MESSAGE,
   phaseDurationsFor,
+  promptStateOf,
   RoomManager,
   validateChatText,
   validateNickname,
@@ -21,6 +22,8 @@ import {
   VOICE_RATE_WINDOW_MS,
 } from "../rooms.ts";
 import { DEFAULT_PHASE_DURATIONS } from "../engine.ts";
+import { OFFICIAL_GAMES } from "../official_games.ts";
+import { MODULE_GAMES } from "../games/index.ts";
 import type { S2C } from "../types.ts";
 import {
   CHAT_HISTORY_MAX,
@@ -236,7 +239,8 @@ Deno.test("ルーム作成: 作成者がホストとして入室し、6桁コー
   assertEquals(snapshot.youAreHost, true);
   assertEquals(snapshot.hostId, snapshot.youId);
   assertEquals(snapshot.phase, "lobby");
-  assertEquals(snapshot.availableGames.length, 3);
+  // 一覧は「宣言的データのゲーム + 専用モジュール型のゲーム」（設計書 §4）
+  assertEquals(snapshot.availableGames.length, OFFICIAL_GAMES.length + MODULE_GAMES.length);
   assertExists(snapshot.session);
   assertEquals(manager.roomCount, 1);
   manager.dispose();
@@ -691,7 +695,10 @@ Deno.test("退室化: ゲーム中に在籍が2人未満になると中断して
 
   clock.advance(DISCONNECT_GRACE_MS);
   assertEquals(last(host.link, "phase")?.phase, "lobby");
-  assertEquals(manager.getRoom(host.snapshot.code)?.game?.phase, "lobby");
+  // サーバー側の state もロビーへ戻っていること（Room.game の中身は
+  // モジュールごとに違うので、prompt の state は promptStateOf 経由で読む）
+  const room = manager.getRoom(host.snapshot.code);
+  assertEquals(room === undefined ? null : promptStateOf(room)?.phase, "lobby");
   assertEquals(manager.getRoom(host.snapshot.code)?.players.size, 1);
   manager.dispose();
 });
