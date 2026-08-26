@@ -1,0 +1,199 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" width="1200" height="800"
+     preserveAspectRatio="xMidYMid slice">
+  <title>暖簾をくぐった先の店内</title>
+  <!--
+    「暖簾をくぐった先にある景色」の正本。3つの場所から同じ絵として使う。
+
+      1. noren-scene.js の背景板（歩き終わりに正面に見えるもの）
+      2. login.html の #enter-overlay（暗転の代わりに出す遷移画面）
+      3. entrance.html の到着（この絵から入り口の UI が浮かび上がる）
+
+    1枚にしてあるのは、3つがずれると「くぐった先」「遷移画面」「着いた先」が
+    別の店に見えてしまうため。色や配置を変えるときはこのファイルだけ直す。
+
+    ■ 切り取られても成立するように描くこと
+    3D は板の中央あたり（横 56% / 縦 44%）しか映さない。CSS 側は cover で
+    全体を出す。両者を画素まで合わせることは、ウィンドウの縦横比が変わる以上
+    そもそもできない。そこで「どこを切り取っても居酒屋の中に見える」ように、
+    梁・棚・カウンターは横いっぱいに通し、提灯は中央寄りにも置いてある。
+    四隅は暗く落としてあるので、引き伸ばされても継ぎ目に見えない。
+
+    ■ 目の高さ
+    3D のカメラは y=1.35m で止まる。その目線がこの絵の y=430 あたりに来る。
+    棚の瓶と提灯の下端をそこへ寄せているのは、正面に立ったときいちばん
+    見たいものが目の高さに来るようにするため。
+  -->
+  <defs>
+    <!-- 奥の空気。天井と床を落として、目の高さがいちばん明るい -->
+    <linearGradient id="air" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#120a05" />
+      <stop offset="0.22" stop-color="#2e1c0d" />
+      <stop offset="0.50" stop-color="#5b3a1b" />
+      <stop offset="0.70" stop-color="#4a2f16" />
+      <stop offset="0.88" stop-color="#241609" />
+      <stop offset="1" stop-color="#140c06" />
+    </linearGradient>
+
+    <!-- 提灯の灯り。芯は白に近く、外へ行くほど橙に落ちる -->
+    <radialGradient id="lampGlow">
+      <stop offset="0" stop-color="#ffdca8" stop-opacity="0.80" />
+      <stop offset="0.42" stop-color="#ff9f45" stop-opacity="0.30" />
+      <stop offset="1" stop-color="#ff8a2a" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="lampPaper" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#b9752f" />
+      <stop offset="0.36" stop-color="#ffe7bd" />
+      <stop offset="0.62" stop-color="#f6cf95" />
+      <stop offset="1" stop-color="#a96a29" />
+    </linearGradient>
+
+    <!-- 奥へ続く出入口。縁を硬く切ると黒い箱に見えるので、両端をぼかす -->
+    <linearGradient id="doorway" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#0d0805" stop-opacity="0" />
+      <stop offset="0.18" stop-color="#0d0805" stop-opacity="0.85" />
+      <stop offset="0.72" stop-color="#0d0805" stop-opacity="0.85" />
+      <stop offset="1" stop-color="#0d0805" stop-opacity="0.2" />
+    </linearGradient>
+    <!-- その奥にもう一つ灯りがある、という気配だけ -->
+    <radialGradient id="deepGlow">
+      <stop offset="0" stop-color="#ffb066" stop-opacity="0.30" />
+      <stop offset="1" stop-color="#ffb066" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- カウンター。天板は照り返しで明るく、前板は落とす -->
+    <linearGradient id="counterTop" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8f5e2c" />
+      <stop offset="1" stop-color="#5d3a18" />
+    </linearGradient>
+    <linearGradient id="counterFace" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3d2611" />
+      <stop offset="0.45" stop-color="#26170a" />
+      <stop offset="1" stop-color="#140c06" />
+    </linearGradient>
+    <!-- 天板に落ちる提灯の照り返し。楕円を塗ると輪郭が出るのでぼかす -->
+    <radialGradient id="sheen">
+      <stop offset="0" stop-color="#ffca85" stop-opacity="0.34" />
+      <stop offset="1" stop-color="#ffca85" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- 四隅を落とす。切り取り位置が変わっても縁が目立たない -->
+    <radialGradient id="vignette" cx="0.5" cy="0.5" r="0.74">
+      <stop offset="0.5" stop-color="#000000" stop-opacity="0" />
+      <stop offset="1" stop-color="#000000" stop-opacity="0.66" />
+    </radialGradient>
+
+    <!-- 提灯ひとつぶん。骨と口輪をまとめて置けるようにしておく -->
+    <g id="lantern">
+      <path d="M0 -96 V-70" stroke="#1d1208" stroke-width="3" />
+      <ellipse cx="0" cy="0" rx="46" ry="58" fill="url(#lampPaper)" />
+      <g stroke="#96631f" stroke-opacity="0.42" stroke-width="2" fill="none">
+        <path d="M-44 -26 H44" />
+        <path d="M-46 -4 H46" />
+        <path d="M-44 20 H44" />
+        <path d="M-38 40 H38" />
+      </g>
+      <rect x="-21" y="-70" width="42" height="11" rx="3" fill="#1d1208" />
+      <rect x="-25" y="54" width="50" height="12" rx="3" fill="#1d1208" />
+    </g>
+
+    <!-- 瓶。塗りは <use> 側から継ぐので、この中では fill を書かない -->
+    <g id="bottle" stroke="#0f0904" stroke-width="1.6" stroke-opacity="0.7">
+      <path d="M-11 0 V-40 C-11 -49 -4.5 -51 -4.5 -58 V-70 H4.5 V-58 C4.5 -51 11 -49 11 -40 V0 Z" />
+      <rect x="-6.5" y="-38" width="3.4" height="30" rx="1.7"
+            fill="#ffe6bd" fill-opacity="0.34" stroke="none" />
+    </g>
+  </defs>
+
+  <rect width="1200" height="800" fill="url(#air)" />
+
+  <!-- 奥の板壁。縦の目地だけで木に見せる（面を増やすと切り取ったとき煩い） -->
+  <g stroke="#100a04" stroke-opacity="0.32" stroke-width="3">
+    <path d="M92 96 V548" />
+    <path d="M252 92 V548" />
+    <path d="M432 88 V548" />
+    <path d="M620 86 V548" />
+    <path d="M808 88 V548" />
+    <path d="M980 92 V548" />
+    <path d="M1128 96 V548" />
+  </g>
+
+  <!-- 天井の梁。上の余白が空いたままだと「屋内」に見えない -->
+  <rect x="0" y="44" width="1200" height="46" fill="#1a1006" />
+  <rect x="0" y="88" width="1200" height="5" fill="#6a4520" opacity="0.45" />
+
+  <!-- いちばん奥へ続く出入口。ここが抜けていると「まだ先がある」に見えない -->
+  <rect x="1000" y="150" width="200" height="398" fill="url(#doorway)" />
+  <circle cx="1104" cy="330" r="150" fill="url(#deepGlow)" />
+  <rect x="996" y="150" width="8" height="398" fill="#3d2611" opacity="0.8" />
+
+  <!-- 品書き。壁が板だけだと寂しいので、灯りの届く範囲にだけ下げる -->
+  <g opacity="0.9">
+    <rect x="470" y="150" width="34" height="130" rx="2" fill="#d8c39a" />
+    <rect x="516" y="150" width="34" height="130" rx="2" fill="#cdb68d" />
+    <g fill="#2a1a0c" opacity="0.75">
+      <rect x="481" y="168" width="12" height="12" rx="2" />
+      <rect x="481" y="190" width="12" height="12" rx="2" />
+      <rect x="481" y="212" width="12" height="12" rx="2" />
+      <rect x="527" y="168" width="12" height="12" rx="2" />
+      <rect x="527" y="190" width="12" height="12" rx="2" />
+    </g>
+  </g>
+
+  <!-- 棚と瓶。目の高さ（y≒430）に瓶の胴が来るように置いてある -->
+  <rect x="0" y="436" width="1200" height="15" fill="#3a2410" />
+  <rect x="0" y="436" width="1200" height="4" fill="#8a5a2a" opacity="0.35" />
+  <rect x="0" y="430" width="1200" height="7" fill="#0f0904" opacity="0.35" />
+  <rect x="0" y="318" width="1200" height="11" fill="#33200e" />
+  <g>
+    <use href="#bottle" x="58" y="436" fill="#1e3019" />
+    <use href="#bottle" x="88" y="436" fill="#2b1a0b" />
+    <use href="#bottle" x="120" y="436" fill="#16242e" />
+    <use href="#bottle" x="152" y="436" fill="#33240f" />
+    <use href="#bottle" x="184" y="436" fill="#1e3019" />
+    <use href="#bottle" x="296" y="436" fill="#16242e" />
+    <use href="#bottle" x="328" y="436" fill="#2b1a0b" />
+    <use href="#bottle" x="360" y="436" fill="#1e3019" />
+    <use href="#bottle" x="392" y="436" fill="#33240f" />
+    <use href="#bottle" x="424" y="436" fill="#16242e" />
+    <use href="#bottle" x="600" y="436" fill="#2b1a0b" />
+    <use href="#bottle" x="632" y="436" fill="#1e3019" />
+    <use href="#bottle" x="664" y="436" fill="#16242e" />
+    <use href="#bottle" x="696" y="436" fill="#33240f" />
+    <use href="#bottle" x="728" y="436" fill="#2b1a0b" />
+    <use href="#bottle" x="800" y="436" fill="#1e3019" />
+    <use href="#bottle" x="832" y="436" fill="#16242e" />
+    <use href="#bottle" x="864" y="436" fill="#33240f" />
+    <use href="#bottle" x="896" y="436" fill="#2b1a0b" />
+    <use href="#bottle" x="928" y="436" fill="#1e3019" />
+  </g>
+
+  <!-- 提灯。中央寄りの1つは、3D が切り取る範囲に必ず入る位置に置いてある -->
+  <g>
+    <circle cx="352" cy="228" r="165" fill="url(#lampGlow)" />
+    <use href="#lantern" x="352" y="228" />
+  </g>
+  <g transform="translate(864 206) scale(0.84)">
+    <circle cx="0" cy="0" r="168" fill="url(#lampGlow)" />
+    <use href="#lantern" x="0" y="0" />
+  </g>
+  <g transform="translate(104 268) scale(0.6)" opacity="0.82">
+    <circle cx="0" cy="0" r="168" fill="url(#lampGlow)" />
+    <use href="#lantern" x="0" y="0" />
+  </g>
+
+  <!-- カウンター。横いっぱいに通すので、どこを切り取っても手前が締まる -->
+  <rect x="0" y="548" width="1200" height="36" fill="url(#counterTop)" />
+  <ellipse cx="352" cy="566" rx="250" ry="34" fill="url(#sheen)" />
+  <ellipse cx="864" cy="566" rx="210" ry="30" fill="url(#sheen)" />
+  <rect x="0" y="578" width="1200" height="7" fill="#c08a45" opacity="0.5" />
+  <rect x="0" y="585" width="1200" height="215" fill="url(#counterFace)" />
+  <!-- 前板の縦の継ぎ目。無地だと板に見えない -->
+  <g stroke="#0d0805" stroke-opacity="0.4" stroke-width="3">
+    <path d="M186 585 V800" />
+    <path d="M492 585 V800" />
+    <path d="M798 585 V800" />
+    <path d="M1050 585 V800" />
+  </g>
+
+  <rect width="1200" height="800" fill="url(#vignette)" />
+</svg>

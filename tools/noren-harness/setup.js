@@ -90,10 +90,31 @@ globalThis.WebGLRenderingContext = class {};
 globalThis.devicePixelRatio = 1;
 globalThis.innerWidth = 1280;
 globalThis.innerHeight = 720;
+/**
+ * 画像の代わり。three の TextureLoader は <img> を建てて src を入れ、
+ * load / error を待つ。ここでは何も届かないので、テクスチャは空のまま。
+ * 演出は絵を待たずに始まる作りなので、それで通る（本物も同じ経路）。
+ */
+function makeImage() {
+  return {
+    style: {},
+    addEventListener() {},
+    removeEventListener() {},
+    setAttribute() {},
+    removeAttribute() {},
+  };
+}
+
 globalThis.document = {
   documentElement: {},
   createElement(tag) {
-    return tag === "canvas" ? makeCanvas() : { style: {} };
+    if (tag === "canvas") return makeCanvas();
+    if (tag === "img") return makeImage();
+    return { style: {} };
+  },
+  // three は img を createElementNS（XHTML 名前空間）で建てる
+  createElementNS(_ns, tag) {
+    return this.createElement(tag);
   },
 };
 // 布のテクスチャが en.css の --serif を読みに来る。Deno には CSS が無いので
