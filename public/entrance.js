@@ -1,0 +1,137 @@
+/**
+ * entrance.html の簡易プロフィール編集（帯状UI）の配線。
+ *
+ * ログイン中はアカウントの軽量プロフィール（GET /api/me・PUT /api/profile）を、
+ * ゲストはブラウザセッション限定の一時プロフィール（guest-profile.js）を編集する。
+ *
+ * 表示規約（§3.8）: ユーザー由来・サーバー由来を問わずテキストは必ず textContent
+ * で描画し、innerHTML は使わない。
+ */
+
+"use strict";
+
+const TAGS_MAX = 5;
+
+/** プリセット趣味タグの一覧（/api/tags の結果）。保存成功後の再描画にも使う */
+let presetTags = [];
+
+/** ログイン中かどうか。保存ボタンの送信先（PUT /api/profile か sessionStorage か）の分岐に使う */
+let isLoggedIn = false;
+
+function $(id) {
+  return document.getElementById(id);
+}
+
+function showError(message) {
+  $("entrance-profile-error").textContent = message;
+  $("entrance-profile-status").textContent = "";
+}
+
+function showStatus(message) {
+  $("entrance-profile-status").textContent = message;
+  $("entrance-profile-error").textContent = "";
+}
+
+async function callApi(path, options) {
+  const res = await fetch(path, {
+    credentials: "same-origin",
+    ...options,
+  });
+  let body = null;
+  try {
+    body = await res.json();
+  } catch {
+    body = null;
+  }
+  return { ok: res.ok, status: res.status, body };
+}
+
+function checkedTagIds() {
+  return [...document.querySelectorAll('#entrance-tags input[type="checkbox"]:checked')]
+    .map((el) => el.value);
+}
+
+function renderTags(tags, selectedIds) {
+  const container = $("entrance-tags");
+  container.textContent = "";
+  for (const tag of tags) {
+    const label = document.createElement("label");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = tag.id;
+    checkbox.checked = selectedIds.includes(tag.id);
+    label.appendChild(checkbox);
+    label.appendChild(document.createTextNode(tag.label));
+    container.appendChild(label);
+  }
+}
+
+function updateSummary(nickname) {
+  $("entrance-profile-summary").textContent = `あだ名: ${nickname === "" ? "未設定" : nickname}`;
+}
+
+$("entrance-profile-toggle").addEventListener("click", () => {
+  const form = $("entrance-profile-form");
+  const opening = form.hidden;
+  form.hidden = !opening;
+  $("entrance-profile-toggle").setAttribute("aria-expanded", String(opening));
+});
+
+async function init() {
+  const tagsRes = await callApi("/api/tags");
+  presetTags = tagsRes.ok && tagsRes.body !== null ? tagsRes.body.tags : [];
+
+  const me = await callApi("/api/me");
+  isLoggedIn = me.ok && me.body !== null && typeof me.body.userId === "string";
+
+  let nickname = "";
+  let tags = [];
+  if (isLoggedIn) {
+    nickname = typeof me.body.nickname === "string" ? me.body.nickname : "";
+    tags = Array.isArray(me.body.tags) ? me.body.tags : [];
+  } else {
+    const guest = GuestProfile.getGuestProfile();
+    nickname = guest.nickname;
+    tags = guest.tags;
+  }
+
+  $("entrance-nickname").value = nickname;
+  renderTags(presetTags, tags);
+  updateSummary(nickname);
+}
+
+$("entrance-profile-save").addEventListener("click", async () => {
+  const nickname = $("entrance-nickname").value;
+  const tags = checkedTagIds();
+  if (tags.length > TAGS_MAX) {
+    showError(`趣味タグは${TAGS_MAX}個以内で選んでください`);
+    return;
+  }
+
+  if (isLoggedIn) {
+    const { ok, status, body } = await callApi("/api/profile", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ nickname, tags }),
+    });
+    if (ok) {
+      const savedNickname = typeof body?.nickname === "string" ? body.nickname : nickname;
+      const savedTags = Array.isArray(body?.tags) ? body.tags : tags;
+      $("entrance-nickname").value = savedNickname;
+      renderTags(presetTags, savedTags);
+      updateSummary(savedNickname);
+      showStatus("プロフィールを保存しました");
+    } else {
+      showError(`保存に失敗しました (${status}): ${body?.error ?? "unknown error"}`);
+    }
+    return;
+  }
+
+  const trimmed = nickname.trim();
+  GuestProfile.setGuestProfile({ nickname: trimmed, tags });
+  $("entrance-nickname").value = trimmed;
+  updateSummary(trimmed);
+  showStatus("名札を保存しました");
+});
+
+init();

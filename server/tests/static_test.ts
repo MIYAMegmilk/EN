@@ -22,6 +22,44 @@ Deno.test("login.html: ゲストとして進むリンクが index.html を指し
   }
 });
 
+Deno.test("entrance.html: いちらん・廊下それぞれへのリンクが存在する", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/entrance.html`);
+    assertEquals(res.status, 200);
+    const html = await res.text();
+    assert(
+      html.includes('id="entrance-index"') && html.includes('href="/index.html"'),
+      "entrance.html に index.html へのリンクが必要です",
+    );
+    assert(
+      html.includes('id="entrance-corridor"') && html.includes('href="/corridor.html"'),
+      "entrance.html に corridor.html へのリンクが必要です",
+    );
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("entrance.html: 簡易プロフィール編集の帯・フォームが存在する", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/entrance.html`);
+    const html = await res.text();
+    assert(html.includes('id="entrance-profile-summary"'), "あだ名の要約表示が必要です");
+    assert(html.includes('id="entrance-profile-toggle"'), "編集フォームの開閉ボタンが必要です");
+    assert(html.includes('id="entrance-nickname"'), "あだ名入力欄が必要です");
+    assert(html.includes('id="entrance-tags"'), "タグ一覧を描画するコンテナが必要です");
+    assert(html.includes('id="entrance-profile-save"'), "保存ボタンが必要です");
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
 Deno.test("index.html: ログインリンクが login.html を指している（初期状態は隠れている）", async () => {
   const kv = await Deno.openKv(":memory:");
   const server = startServer(0, "127.0.0.1", kv);
