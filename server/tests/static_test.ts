@@ -60,6 +60,40 @@ Deno.test("entrance.html: 簡易プロフィール編集の帯・フォームが
   }
 });
 
+Deno.test("index.html・entrance.html: guest-profile.js が本体スクリプトより前に読み込まれている", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const indexRes = await fetch(`http://127.0.0.1:${server.port}/index.html`);
+    const indexHtml = await indexRes.text();
+    const indexGuestProfileIndex = indexHtml.indexOf('<script src="./guest-profile.js">');
+    const indexAppIndex = indexHtml.indexOf('<script src="./app.js">');
+    assert(indexGuestProfileIndex >= 0, "index.html に guest-profile.js の script タグが必要です");
+    assert(indexAppIndex >= 0, "index.html に app.js の script タグが必要です");
+    assert(
+      indexGuestProfileIndex < indexAppIndex,
+      "index.html では guest-profile.js が app.js より前に読み込まれている必要があります",
+    );
+
+    const entranceRes = await fetch(`http://127.0.0.1:${server.port}/entrance.html`);
+    const entranceHtml = await entranceRes.text();
+    const entranceGuestProfileIndex = entranceHtml.indexOf('<script src="./guest-profile.js">');
+    const entranceEntranceJsIndex = entranceHtml.indexOf('<script src="./entrance.js">');
+    assert(
+      entranceGuestProfileIndex >= 0,
+      "entrance.html に guest-profile.js の script タグが必要です",
+    );
+    assert(entranceEntranceJsIndex >= 0, "entrance.html に entrance.js の script タグが必要です");
+    assert(
+      entranceGuestProfileIndex < entranceEntranceJsIndex,
+      "entrance.html では guest-profile.js が entrance.js より前に読み込まれている必要があります",
+    );
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
 Deno.test("index.html: ログインリンクが login.html を指している（初期状態は隠れている）", async () => {
   const kv = await Deno.openKv(":memory:");
   const server = startServer(0, "127.0.0.1", kv);

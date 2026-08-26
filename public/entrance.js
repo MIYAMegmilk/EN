@@ -18,6 +18,12 @@ let presetTags = [];
 /** ログイン中かどうか。保存ボタンの送信先（PUT /api/profile か sessionStorage か）の分岐に使う */
 let isLoggedIn = false;
 
+/** GET /api/tags の取得に失敗したかどうか。true の間はチェックボックスが描画できないため、保存時に checkedTagIds() を使わない */
+let tagsLoadFailed = false;
+
+/** init() 時点でユーザー/ゲストが持っていたタグ一覧。tagsLoadFailed が true のときの保存に使う */
+let loadedTags = [];
+
 function $(id) {
   return document.getElementById(id);
 }
@@ -33,10 +39,15 @@ function showStatus(message) {
 }
 
 async function callApi(path, options) {
-  const res = await fetch(path, {
-    credentials: "same-origin",
-    ...options,
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      credentials: "same-origin",
+      ...options,
+    });
+  } catch {
+    return { ok: false, status: 0, body: null };
+  }
   let body = null;
   try {
     body = await res.json();
@@ -80,6 +91,10 @@ $("entrance-profile-toggle").addEventListener("click", () => {
 async function init() {
   const tagsRes = await callApi("/api/tags");
   presetTags = tagsRes.ok && tagsRes.body !== null ? tagsRes.body.tags : [];
+  tagsLoadFailed = !tagsRes.ok || tagsRes.body === null;
+  if (tagsLoadFailed) {
+    showError("趣味タグ一覧の取得に失敗しました");
+  }
 
   const me = await callApi("/api/me");
   isLoggedIn = me.ok && me.body !== null && typeof me.body.userId === "string";
@@ -95,6 +110,8 @@ async function init() {
     tags = guest.tags;
   }
 
+  loadedTags = tags;
+
   $("entrance-nickname").value = nickname;
   renderTags(presetTags, tags);
   updateSummary(nickname);
@@ -102,7 +119,10 @@ async function init() {
 
 $("entrance-profile-save").addEventListener("click", async () => {
   const nickname = $("entrance-nickname").value;
-  const tags = checkedTagIds();
+  // /api/tags の取得に失敗している間はチェックボックスが1つも描画されておらず、
+  // checkedTagIds() は常に空配列になる。それをそのまま保存すると既存のタグを
+  // 消してしまうため、その場合は init() 時点で読み込んだタグをそのまま使う。
+  const tags = tagsLoadFailed ? loadedTags : checkedTagIds();
   if (tags.length > TAGS_MAX) {
     showError(`趣味タグは${TAGS_MAX}個以内で選んでください`);
     return;
