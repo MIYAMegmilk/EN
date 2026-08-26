@@ -1329,7 +1329,15 @@ function renderVc() {
   $("vc-camera").disabled = !vc.active;
   // 文言は「押すとどうなるか」、絵は「いまどうなっているか」を出す（Zoom と同じ流儀）
   setVcControl($("vc-mute"), !vc.muted, vc.muted ? "ミュート解除" : "ミュート");
-  setVcControl($("vc-camera"), vc.camera, vc.camera ? "カメラOFF" : "カメラON");
+  // 画面共有中はカメラを実際に止めている（LED を消すため）。それでも
+  // 「やめたら戻る」なら入として描く。押せば約束のほうが切り替わる
+  const cameraOn = vc.camera === true || vc.cameraResumes === true;
+  setVcControl($("vc-camera"), cameraOn, cameraOn ? "カメラOFF" : "カメラON");
+  $("vc-camera").title = vc.screen !== true
+    ? ""
+    : cameraOn
+    ? "画面共有中はカメラを止めています。共有をやめると自動で戻します"
+    : "画面共有をやめてもカメラは戻しません";
   renderVcScreen(vc);
   const peers = vc.peers
     .map((p) => `${p.nickname}: ${p.connectionState}${p.degraded === true ? "（品質低下）" : ""}`)
@@ -1368,7 +1376,7 @@ function renderVcScreen(vc) {
   } else if (vc.screen === true) {
     button.title = "画面共有をやめます";
   } else {
-    button.title = "自分の画面を共有します（共有中は自分のカメラ映像は止まります）";
+    button.title = "自分の画面を共有します（共有中はカメラを止めます）";
   }
   setVcControl(button, vc.screen === true, vc.screen === true ? "共有をやめる" : "画面共有");
   // 種類は開始時に決まる。共有中に切り替えられるかのように見せない

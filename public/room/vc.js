@@ -137,6 +137,15 @@
   /** 利用者に出す「内容の種類」の既定（§10。前回値は覚えない） */
   const SCREEN_DEFAULT_KIND = "text";
 
+  /**
+   * カメラの取り込み制約。ON にするときと、画面共有をやめて戻すときの
+   * 両方から使うので1か所にまとめてある（取り直しで画質が変わらないように）。
+   */
+  const CAMERA_CONSTRAINTS = {
+    audio: false,
+    video: { width: { ideal: 640 }, height: { ideal: 360 } },
+  };
+
   /** 外から注入される設定 */
   const config = {
     send: null,
@@ -195,6 +204,12 @@
       gen: 0,
       /** TURN リレーを検知したか（§6.6）。検知したら軽い案へ落とす */
       relay: false,
+      /**
+       * 共有をやめたときにカメラへ戻すか（オーナー判断）。
+       * 共有中はカメラを実際に止めるので、「戻す約束」だけをここに残す。
+       * 共有中のカメラ操作（setCamera）は、この約束の入り切りとして働く。
+       */
+      cameraWasOn: false,
       /** 品質劣化で軽い案へ降格したか（§8.2 の一段目） */
       demoted: false,
       /** 降格した時刻（Date.now()）。最小保持時間を測る */
@@ -448,7 +463,7 @@
       video.className = "vc-video";
       video.hidden = true;
       // 共有中は顔が出ない（§4.1）ので、不具合と誤解されないよう札で断る（§9-3）
-      const share = createShareBadge("画面を共有中（カメラ映像は停止中）", () => {
+      const share = createShareBadge("画面を共有中（カメラは停止中）", () => {
         if (state.selfId !== null) requestZoom(state.selfId);
       });
       share.root.classList.add("vc-share-self");
@@ -1353,6 +1368,8 @@
     stopScreenShare({
       message: "この端末で画面を送り出せなかったため、画面共有を止めました",
       isError: true,
+      // 送り出せない端末でカメラを掴み直しても同じことになる（音声優先・§3.6）
+      restore: false,
     });
     return true;
   }
@@ -1992,9 +2009,22 @@
     return state.muted;
   }
 
-  /** カメラを切り替える。戻り値は切り替え後の状態 */
+  /**
+   * カメラを切り替える。戻り値は切り替え後の状態。
+   * 共有中はカメラを掴んでいないので、裏返すのは「やめたら戻す約束」のほう。
+   */
   function toggleCamera() {
-    return setCamera(state.camStream === null);
+    return setCamera(!cameraIntended());
+  }
+
+  /**
+   * 利用者から見た「カメラは入っているか」。
+   * 共有中は実際には止めているが、やめたら戻る約束があるなら入と見なす
+   * （ボタンの文言をこれで描く。§10 の「DOM から状態を読み戻さない」流儀）。
+   */
+  function cameraIntended() {
+    if (currentVideoSource() === "screen") return state.screen.cameraWasOn;
+    return state.camStream !== null;
   }
 
   /**
@@ -2011,13 +2041,26 @@
       notify("error", "先に VC に参加してください");
       return false;
     }
+    // ------------------------------------------------------------------
+    // 画面共有中のカメラ操作は「共有をやめたらカメラに戻すか」の入り切りとして
+    // 働く。共有中はカメラを実際に止めているので、ここで掴み直すと LED だけが
+    // 点いて何も送らない、という利用者を欺く状態になるため触らない。
+    // 戻り値は「いまカメラが動いているか」なので、どちらの操作でも false。
+    // ------------------------------------------------------------------
+    if (currentVideoSource() === "screen") {
+      state.screen.cameraWasOn = on === true;
+      notify(
+        "vcState",
+        on === true
+          ? "画面共有をやめたらカメラに戻します"
+          : "画面共有をやめてもカメラは戻しません",
+      );
+      return false;
+    }
     if (on === true) {
       if (state.camStream !== null) return true;
       try {
-        state.camStream = await global.navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: { width: { ideal: 640 }, height: { ideal: 360 } },
-        });
+        state.camStream = await global.navigator.mediaDevices.getUserMedia(CAMERA_CONSTRAINTS);
       } catch (e) {
         console.error("VC camera failed:", e);
         notify("error", "カメラを使用できませんでした");
@@ -2029,19 +2072,13 @@
         state.camStream = null;
         return false;
       }
-      const sharing = currentVideoSource() === "screen";
-      if (!sharing) {
-        // 自動停止で外した sender は使い回す（再ネゴシエーションを避ける）
-        await applyVideoTrackAll(track);
-        markVideoSourceChanged(track);
-        announceVideoState();
-      }
+      // 自動停止で外した sender は使い回す（再ネゴシエーションを避ける）
+      await applyVideoTrackAll(track);
+      markVideoSourceChanged(track);
+      announceVideoState();
       renderLocalVideo();
       syncQualityMonitor();
-      notify(
-        "vcState",
-        sharing ? "カメラを ON にしました（送出は画面共有のままです）" : "カメラを ON にしました",
-      );
+      notify("vcState", "カメラを ON にしました");
       return true;
     }
     if (state.camStream === null) {
@@ -2161,6 +2198,16 @@
       // 共有中に対象を切り替えられたら、申告値を読み直して伝える（surfaceSwitching）
       track.addEventListener("configurationchange", onScreenConfigurationChange);
     }
+    // ------------------------------------------------------------------
+    // 共有中はカメラを**実際に止める**（オーナー判断）。
+    // LED は利用者にとって「撮られているかどうか」のハードウェア的な信号で、
+    // 送出していないのにランプが点いたままだと、その信号が嘘をつくことになる。
+    // 「カメラは停止中」と札に出しながら点灯している状態はいちばん不信感を招く。
+    // 共有をやめたときに戻せるよう、ON だったことだけを覚えておく。
+    // ------------------------------------------------------------------
+    state.screen.cameraWasOn = state.camStream !== null;
+    stopStream(state.camStream);
+    state.camStream = null;
     // 取り込み側だけ先に絞る。送出パラメータは差し替えの後に当てる（§4.2 の順序）
     applyCaptureProfile(track, profileName);
     await applyVideoTrackAll(track);
@@ -2191,8 +2238,16 @@
    */
   async function stopScreenShare(options) {
     if (state.screenStream === null) return false;
+    // 「戻す約束」は releaseScreenStream() が消すので、先に控える。
+    // restore: false（エンコード不成立での停止）のときは戻さない。この端末が
+    // 映像を送り出せなかったのだから、カメラを掴み直すのは筋が通らない
+    const restore = options === undefined || options.restore !== false;
+    const resume = restore && state.screen.cameraWasOn;
     releaseScreenStream();
-    // カメラを持っていればそちらへ戻る。持っていなければ replaceTrack(null)
+    // 共有前にカメラが ON だったなら取り直す（開始時に実際に止めているため）。
+    // 失敗しても VC 全体は壊さず、カメラ OFF として整合させて進む
+    const restored = resume ? await reacquireCamera() : true;
+    // カメラへ戻れたならそちらへ、戻れなければ replaceTrack(null)
     const next = activeVideoTrack();
     await applyVideoTrackAll(next);
     markVideoSourceChanged(next);
@@ -2204,7 +2259,44 @@
       ? "画面共有を止めました"
       : options.message;
     notify(options !== undefined && options.isError === true ? "error" : "vcState", message);
+    if (!restored) {
+      // 何が起きたかを必ず出す。黙って切のままだと不具合にしか見えない
+      notify("error", "カメラに戻せませんでした。カメラは切のままです");
+    }
     return false;
+  }
+
+  /**
+   * 画面共有をやめた後にカメラを取り直す。
+   *
+   * 【未実測】権限は VC 参加中に一度許可されているので、取り直しで許可の
+   * 問い合わせが再び出ることはない**はず**だが、実ブラウザで確かめていない
+   * （画面共有の開始にネイティブの選択ダイアログが要るため自動化できない）。
+   *
+   * 他のアプリがカメラを掴んでいる等で失敗し得る。呼び出し側が「カメラ OFF」
+   * として整合を保てるよう、例外は外へ出さず真偽値だけを返す。
+   */
+  async function reacquireCamera() {
+    if (state.camStream !== null) return true;
+    // 卓を離れた後に戻しても意味が無い（ランプだけが点く）
+    if (!state.active) return false;
+    let stream = null;
+    try {
+      stream = await global.navigator.mediaDevices.getUserMedia(CAMERA_CONSTRAINTS);
+    } catch (e) {
+      console.error("VC camera restore failed:", e);
+      return false;
+    }
+    if (!state.active) {
+      stopStream(stream);
+      return false;
+    }
+    if (stream.getVideoTracks()[0] === undefined) {
+      stopStream(stream);
+      return false;
+    }
+    state.camStream = stream;
+    return true;
   }
 
   /**
@@ -2218,6 +2310,9 @@
     state.screen.profile = state.screen.kind;
     state.screen.demoted = false;
     state.screen.demotedAt = null;
+    // 約束は stopScreenShare() が先に控えている。ここで消しておかないと、
+    // 品質劣化による停止や退室のあとにカメラを掴み直してしまう
+    state.screen.cameraWasOn = false;
     // 選択待ちの開始処理が走っていたら、それを無効にする（世代を進める）
     state.screen.gen += 1;
     if (stream === null) return;
@@ -2318,6 +2413,12 @@
       active: state.active,
       muted: state.muted,
       camera: state.camStream !== null,
+      /**
+       * 共有をやめたらカメラに戻るか（共有中のみ意味を持つ）。
+       * 共有中はカメラを実際に止めているので camera は false になる。
+       * ボタンの文言はこちらを見て描く
+       */
+      cameraResumes: currentVideoSource() === "screen" && state.screen.cameraWasOn,
       /** 自分が画面を共有中か */
       screen: state.screenStream !== null,
       /** いま送出している映像の出どころ。"none" | "camera" | "screen" */

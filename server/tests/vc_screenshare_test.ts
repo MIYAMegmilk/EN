@@ -195,6 +195,8 @@ type ScreenPlan = {
   displaySurface?: string;
   /** true にすると、releaseDisplay() を呼ぶまで getDisplayMedia が返らない */
   hold?: boolean;
+  /** 与えると、以降の getUserMedia（カメラ）が reject する */
+  cameraError?: { name: string };
 };
 
 type Sent = { t: string; to?: string; payload?: Record<string, unknown> };
@@ -209,6 +211,8 @@ type Harness = {
   screens: FakeStream[];
   /** getDisplayMedia に渡された制約 */
   displayCalls: Record<string, unknown>[];
+  /** getUserMedia が呼ばれた回数（カメラの取り直しを数えるのに使う） */
+  cameraCalls(): number;
   /** 次の getDisplayMedia の振る舞い */
   plan: ScreenPlan;
   liveTimers(): number;
@@ -236,6 +240,7 @@ function load(options: { getStats?: () => Promise<Map<string, unknown>> } = {}):
   /** setInterval で仕掛けられた中身。tick() から呼ぶ */
   const intervals = new Map<number, () => unknown>();
   let pendingDisplay: (() => void) | null = null;
+  let cameraCalls = 0;
   let seq = 1;
   const { document } = createFakeDocument();
 
@@ -262,9 +267,12 @@ function load(options: { getStats?: () => Promise<Map<string, unknown>> } = {}):
     navigator: {
       mediaDevices: {
         getUserMedia: (constraints: { video?: unknown }) => {
-          const stream = new FakeStream([
-            new FakeTrack(constraints.video === false ? "audio" : "video"),
-          ]);
+          const isCamera = constraints.video !== false;
+          if (isCamera) {
+            cameraCalls += 1;
+            if (plan.cameraError !== undefined) return Promise.reject(plan.cameraError);
+          }
+          const stream = new FakeStream([new FakeTrack(isCamera ? "video" : "audio")]);
           streams.push(stream);
           return Promise.resolve(stream);
         },
@@ -341,6 +349,7 @@ function load(options: { getStats?: () => Promise<Map<string, unknown>> } = {}):
     streams,
     screens,
     displayCalls,
+    cameraCalls: () => cameraCalls,
     plan,
     liveTimers: () => timers.size,
     tick: async () => {
@@ -469,15 +478,18 @@ Deno.test("N5: 停止するとカメラへ戻る。カメラが切なら replace
   const withCamera = load();
   await joinWith(withCamera, ["a"]);
   await withCamera.vc.setCamera(true);
-  const camTrack = withCamera.streams[1].getVideoTracks()[0];
   await withCamera.vc.startScreenShare("text");
 
   await withCamera.vc.stopScreenShare();
 
   const sender = FakePeerConnection.instances[0].videoSender();
   assertExists(sender);
-  assertEquals(sender.track, camTrack, "カメラへ戻っていない");
+  // 共有中はカメラを実際に止めているので、戻るときは取り直したトラックになる
+  const restored = withCamera.streams[withCamera.streams.length - 1].getVideoTracks()[0];
+  assertEquals(sender.track, restored, "カメラへ戻っていない");
+  assertFalse(restored.stopped, "戻したカメラが止まっている");
   assertEquals(withCamera.vc.getState().videoSource, "camera");
+  assertEquals(withCamera.vc.getState().camera, true);
   const payload = lastVideoPayload(withCamera, "a");
   assertExists(payload);
   assertEquals(payload.on, true);
@@ -640,6 +652,124 @@ Deno.test("再接続でピアを張り直しても、画面共有が載ったま
   assertEquals(payload.source, "screen");
   // 共有そのものは切れていない
   assertFalse(screenTrack.stopped);
+});
+
+// ---------------------------------------------------------------------------
+// 共有中のカメラ（オーナー判断: 共有中はカメラを実際に止める）
+// ---------------------------------------------------------------------------
+
+Deno.test("共有を始めるとカメラのトラックが止まる（LED を消す）", async () => {
+  const h = load();
+  await joinWith(h, ["a"]);
+  await h.vc.setCamera(true);
+  const camTrack = h.streams[1].getVideoTracks()[0];
+  assertFalse(camTrack.stopped);
+
+  await h.vc.startScreenShare("text");
+
+  // 送出しないだけでは足りない。ランプが点いたままだと
+  // 「撮られているか」の信号が嘘をつく
+  assert(camTrack.stopped, "共有中もカメラが動いたまま");
+  assertEquals(h.vc.getState().camera, false);
+  // やめたら戻す約束は残る
+  assertEquals(h.vc.getState().cameraResumes, true);
+});
+
+Deno.test("共有をやめるとカメラを取り直して戻す", async () => {
+  const h = load();
+  await joinWith(h, ["a"]);
+  await h.vc.setCamera(true);
+  const callsBefore = h.cameraCalls();
+  await h.vc.startScreenShare("text");
+
+  await h.vc.stopScreenShare();
+
+  assertEquals(h.cameraCalls(), callsBefore + 1, "カメラを取り直していない");
+  assertEquals(h.vc.getState().camera, true);
+  assertEquals(h.vc.getState().videoSource, "camera");
+  const payload = lastVideoPayload(h, "a");
+  assertExists(payload);
+  assertEquals(payload.on, true);
+  assertEquals(payload.source, "camera");
+});
+
+Deno.test("カメラに戻せなければ、理由を出してカメラ切として整合させる", async () => {
+  const h = load();
+  await joinWith(h, ["a"]);
+  await h.vc.setCamera(true);
+  await h.vc.startScreenShare("text");
+  // 他のアプリがカメラを掴んでいる、といった失敗を模す
+  h.plan.cameraError = { name: "NotReadableError" };
+  h.notices.length = 0;
+
+  await h.vc.stopScreenShare();
+
+  assert(
+    h.notices.some((n) => n.kind === "error" && n.message.includes("戻せませんでした")),
+    "失敗が利用者に出ていない",
+  );
+  // 例外が漏れて VC ごと壊れない。状態はカメラ切でそろっている
+  assertEquals(h.vc.getState().active, true);
+  assertEquals(h.vc.getState().camera, false);
+  assertEquals(h.vc.getState().videoSource, "none");
+  const sender = FakePeerConnection.instances[0].videoSender();
+  assertExists(sender);
+  assertEquals(sender.track, null, "送出が畳まれていない");
+  const payload = lastVideoPayload(h, "a");
+  assertExists(payload);
+  assertEquals(payload.on, false);
+});
+
+Deno.test("共有前にカメラが切なら、やめてもカメラを取りに行かない", async () => {
+  const h = load();
+  await joinWith(h, ["a"]);
+  await h.vc.startScreenShare("text");
+  const callsBefore = h.cameraCalls();
+
+  await h.vc.stopScreenShare();
+
+  assertEquals(h.cameraCalls(), callsBefore, "頼んでいないカメラを掴んでいる");
+  assertEquals(h.vc.getState().camera, false);
+  assertEquals(h.vc.getState().videoSource, "none");
+});
+
+Deno.test("共有中のカメラ操作は「やめたら戻すか」の入り切りになる", async () => {
+  const h = load();
+  await joinWith(h, ["a"]);
+  await h.vc.setCamera(true);
+  await h.vc.startScreenShare("text");
+  const callsBefore = h.cameraCalls();
+
+  // 共有中に切る → 戻さない約束に変わる。カメラは掴み直さない
+  assertEquals(await h.vc.toggleCamera(), false);
+  assertEquals(h.vc.getState().cameraResumes, false);
+  assertEquals(h.cameraCalls(), callsBefore, "共有中にカメラを掴んでいる");
+
+  // もう一度押すと戻す約束に戻る（ここでも掴まない）
+  assertEquals(await h.vc.toggleCamera(), false);
+  assertEquals(h.vc.getState().cameraResumes, true);
+  assertEquals(h.cameraCalls(), callsBefore);
+
+  // 約束を切ってからやめれば、カメラは戻らない
+  await h.vc.setCamera(false);
+  await h.vc.stopScreenShare();
+  assertEquals(h.cameraCalls(), callsBefore, "戻さない約束なのに掴んでいる");
+  assertEquals(h.vc.getState().camera, false);
+});
+
+Deno.test("品質劣化で共有が止まったときはカメラを取り直さない（音声優先）", async () => {
+  const h = load({ getStats: stalledStats() });
+  await joinWith(h, ["a"]);
+  await h.vc.setCamera(true);
+  await h.vc.startScreenShare("text");
+  const callsBefore = h.cameraCalls();
+
+  // エンコード不成立の検出で共有が畳まれる（§8.4）
+  for (let i = 0; i < 3; i += 1) await h.tick();
+
+  assertEquals(h.vc.getState().screen, false);
+  assertEquals(h.cameraCalls(), callsBefore, "映像を畳んだ直後にカメラを掴み直している");
+  assertEquals(h.vc.getState().videoSource, "none");
 });
 
 // ---------------------------------------------------------------------------
