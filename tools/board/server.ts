@@ -200,6 +200,9 @@ export function normalizePath(raw: string): string | null {
   for (const segment of unified.split("/")) {
     if (segment === "" || segment === ".") continue;
     if (segment === "..") {
+      // ルートを越える `..`（例: `../../etc/passwd`）は、リポジトリ内の別のパスに
+      // 化けて誤検出のもとになるので、正規化不能として捨てる
+      if (out.length === 0) return null;
       out.pop();
       continue;
     }
@@ -937,17 +940,31 @@ export class BoardServer {
     if (prNumber.value !== undefined) claim.prNumber = prNumber.value;
     if (note.value !== undefined && note.value !== "") claim.note = note.value;
 
-    // sessionId の索引を「まだ無いこと」を条件に立てる。同時に2回来ても片方しか通らない
+    // sessionId の索引を versionstamp 条件付きで立てる。同時に2回来ても片方しか通らない。
+    // 既存の表明が working のときだけ 409 にする（§4「1セッション1表明」は「作業中の
+    // 表明は同時に1つ」の意味に取る）。done / paused なら同じセッションからの
+    // 表明し直しを許し、索引を新しい表明へ付け替える。古い表明は消さない（§5）。
     const sessionKey = [KV_CLAIM_SESSION_PREFIX, claim.member, claim.sessionId];
+    const existing = await this.#kv.get<string>(sessionKey);
+    if (existing.value !== null) {
+      const current = await this.#kv.get<Claim>([KV_PREFIX.claim, existing.value]);
+      if (current.value !== null && current.value.status === "working") {
+        return jsonError(
+          409,
+          "このセッションには作業中の表明があります（1セッション1表明）。更新は PATCH /api/claims/:id を使ってください",
+        );
+      }
+    }
     const commit = await this.#kv.atomic()
-      .check({ key: sessionKey, versionstamp: null })
+      .check(existing)
       .set(sessionKey, claim.id)
       .set([KV_PREFIX.claim, claim.id], claim)
       .commit();
     if (!commit.ok) {
+      // 読んでから書くまでに同じセッションの別の POST が通った
       return jsonError(
         409,
-        "このセッションには既に表明があります（1セッション1表明）。更新は PATCH /api/claims/:id を使ってください",
+        "このセッションには既に表明があります（1セッション1表明）。もう一度やり直してください",
       );
     }
     const names = await this.#memberNames();
@@ -1022,6 +1039,9 @@ export class BoardServer {
    *   - PR 索引は**キャッシュから**返す（必要なら §9 の間隔で取り直す）
    */
   async #checkClaims(url: URL, memberId: string, now: number): Promise<Response> {
+    // CLI（tools/board/board.ts）は `?paths=a,b` のカンマ結合1本で送ってくるため、
+    // カンマ区切りを受ける（§6 の表記もこの形）。既知の制約として、カンマを含む
+    // ファイル名はこのクエリでは表現できない（`?paths=` を複数回指定しても同じ）。
     const raw: string[] = [];
     for (const value of url.searchParams.getAll("paths")) {
       for (const item of value.split(",")) raw.push(item);

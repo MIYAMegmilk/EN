@@ -246,10 +246,12 @@ Deno.test("認証: 誤ったトークンでは全エンドポイントが401（G
 
 Deno.test("認証: Bearer 以外のスキームや空の値も401", async () => {
   await withBoard(async (ctx) => {
-    for (const raw of ["", "Basic abc", "Bearer", "Bearer    ", "token abc"]) {
+    const cases = ["", "Basic abc", "Bearer", "Bearer    ", "token abc"];
+    for (const [i, raw] of cases.entries()) {
       const headers = new Headers({ authorization: raw });
       const req = new Request(new URL("/api/claims", ORIGIN), { headers });
-      const res = await ctx.board.handle(req, "198.51.100.200");
+      // AUTH_FAIL_LIMIT にちょうど達して 429 に化けないよう、IP をケースごとに変える
+      const res = await ctx.board.handle(req, `198.51.100.${200 + i}`);
       assertEquals(res.status, 401, raw);
       await res.body?.cancel();
     }
@@ -567,6 +569,53 @@ Deno.test("表明: PATCH で member / sessionId を送っても書き換えら�
     assertEquals(updated.member, ctx.memberId, "member は不変");
     assertEquals(updated.sessionId, "s", "sessionId は不変");
     assertEquals(updated.title, "書き換え");
+  });
+});
+
+Deno.test("表明: done / paused にした後は同じセッションから表明し直せる", async () => {
+  await withBoard(async (ctx) => {
+    const first = await createClaim(ctx, { sessionId: "sess-1", title: "1回目" });
+    const done = await ctx.call("PATCH", `/api/claims/${first.id}`, { body: { status: "done" } });
+    await done.body?.cancel();
+
+    // done の後は同じ sessionId で表明できる。古い表明は消えない（§5）
+    const second = await createClaim(ctx, { sessionId: "sess-1", title: "2回目" });
+    assert(second.id !== first.id);
+    const list = (await (await ctx.call("GET", "/api/claims")).json()) as ClaimListResponse;
+    assertEquals(list.claims.length, 2, "古い表明は残る");
+
+    // working の間はやはり 409
+    const blocked = await ctx.call("POST", "/api/claims", {
+      body: { sessionId: "sess-1", title: "3回目" },
+    });
+    assertEquals(blocked.status, 409);
+    assertStringIncludes((await blocked.json()).error, "作業中の表明");
+
+    // paused に落とした後も表明し直せる（SessionEnd フック → 再開のケース）
+    const paused = await ctx.call("PATCH", `/api/claims/${second.id}`, {
+      body: { status: "paused" },
+    });
+    await paused.body?.cancel();
+    await createClaim(ctx, { sessionId: "sess-1", title: "再開" });
+  });
+});
+
+Deno.test("正規化: ルートを越える .. は正規化不能として捨てる", () => {
+  assertEquals(normalizePath("../../etc/passwd"), null);
+  assertEquals(normalizePath("../a.ts"), null);
+  assertEquals(normalizePath("a/../../b.ts"), null);
+  // リポジトリ内で収まる .. は解決する
+  assertEquals(normalizePath("server/a/../b.ts"), "server/b.ts");
+});
+
+Deno.test("check: ルートを越えるパスしか無ければ400", async () => {
+  await withBoard(async (ctx) => {
+    const res = await ctx.call(
+      "GET",
+      "/api/claims/check?paths=" + encodeURIComponent("../../etc/passwd"),
+    );
+    assertEquals(res.status, 400);
+    await res.body?.cancel();
   });
 });
 
