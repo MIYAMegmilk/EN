@@ -1359,7 +1359,8 @@ function renderVcScreen(vc) {
   // 同時に共有できるのは1人（§4.4）。他の人が共有中は自分から始められない
   const otherSharing = vc.sharingPeerId !== null && vc.screen !== true;
   const canStart = vc.active === true && vc.screenSupported === true && !otherSharing;
-  button.disabled = !(canStart || vc.screen === true);
+  const cooling = Date.now() < vcScreenCooldownUntil;
+  button.disabled = cooling || !(canStart || vc.screen === true);
   if (vc.screenSupported !== true) {
     button.title = "この端末では画面共有を始められません（他の人の共有は見られます）";
   } else if (otherSharing) {
@@ -1463,6 +1464,12 @@ function autoStartVoice(msg) {
  */
 let vcZoomPlayerId = null;
 
+/** 画面共有の開始・停止を押した直後、この時間はボタンを閉じる（§9-4）【暫定値】 */
+const VC_SCREEN_COOLDOWN_MS = 2000;
+
+/** そのボタンが再び押せるようになる時刻（Date.now()） */
+let vcScreenCooldownUntil = 0;
+
 /**
  * 共有画面を拡大表示する（§7.2）。
  *
@@ -1548,6 +1555,9 @@ function bindVc(iceServers) {
     VC.toggleCamera().then(renderVc);
   });
   $("vc-screen").addEventListener("click", () => {
+    // 開始・停止の連打を抑える（§9-4）。押した直後は数秒ボタンを閉じる
+    vcScreenCooldownUntil = Date.now() + VC_SCREEN_COOLDOWN_MS;
+    setTimeout(renderVc, VC_SCREEN_COOLDOWN_MS);
     if (VC.getState().screen === true) {
       // 種類は毎回「文字」から始める（共有の中身は毎回違うので前回値は当たらない）
       Promise.resolve(VC.stopScreenShare()).then(renderVc, renderVc);
