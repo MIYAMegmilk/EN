@@ -193,6 +193,8 @@ type ScreenPlan = {
   audioTracks?: number;
   /** getSettings().displaySurface が返す値 */
   displaySurface?: string;
+  /** true にすると、releaseDisplay() を呼ぶまで getDisplayMedia が返らない */
+  hold?: boolean;
 };
 
 type Sent = { t: string; to?: string; payload?: Record<string, unknown> };
@@ -210,6 +212,10 @@ type Harness = {
   /** 次の getDisplayMedia の振る舞い */
   plan: ScreenPlan;
   liveTimers(): number;
+  /** 品質監視の1周期を進める（setInterval の中身を1回呼ぶ） */
+  tick(): Promise<void>;
+  /** 選択ダイアログを閉じた（＝ getDisplayMedia が返る）ことにする */
+  releaseDisplay(): void;
   notices: Array<{ kind: string; message: string }>;
   /** onZoom で頼まれた開閉。null は「閉じて」 */
   zooms: Array<{ view: unknown; playerId: unknown }>;
@@ -217,7 +223,7 @@ type Harness = {
 };
 
 /** vc.js を偽の環境で読み込む */
-function load(): Harness {
+function load(options: { getStats?: () => Promise<Map<string, unknown>> } = {}): Harness {
   FakePeerConnection.instances = [];
   const sent: Sent[] = [];
   const streams: FakeStream[] = [];
@@ -227,6 +233,9 @@ function load(): Harness {
   const zooms: Array<{ view: unknown; playerId: unknown }> = [];
   const plan: ScreenPlan = {};
   const timers = new Set<number>();
+  /** setInterval で仕掛けられた中身。tick() から呼ぶ */
+  const intervals = new Map<number, () => unknown>();
+  let pendingDisplay: (() => void) | null = null;
   let seq = 1;
   const { document } = createFakeDocument();
 
@@ -235,12 +244,18 @@ function load(): Harness {
     timers.add(id);
     return id;
   };
+  const addInterval = (fn: () => unknown) => {
+    const id = addTimer();
+    intervals.set(id, fn);
+    return id;
+  };
   const dropTimer = (id: number) => {
     timers.delete(id);
+    intervals.delete(id);
   };
 
   const win = {
-    setInterval: addTimer,
+    setInterval: addInterval,
     clearInterval: dropTimer,
     setTimeout: addTimer,
     clearTimeout: dropTimer,
@@ -256,22 +271,31 @@ function load(): Harness {
         getDisplayMedia: (constraints: Record<string, unknown>) => {
           displayCalls.push(constraints);
           if (plan.error !== undefined) return Promise.reject(plan.error);
-          const tracks: FakeTrack[] = [];
-          const videoCount = plan.videoTracks === undefined ? 1 : plan.videoTracks;
-          for (let i = 0; i < videoCount; i += 1) {
-            tracks.push(
-              new FakeTrack("video", {
-                frameRate: 10,
-                displaySurface: plan.displaySurface ?? "window",
-              }),
-            );
+          const build = () => {
+            const tracks: FakeTrack[] = [];
+            const videoCount = plan.videoTracks === undefined ? 1 : plan.videoTracks;
+            for (let i = 0; i < videoCount; i += 1) {
+              tracks.push(
+                new FakeTrack("video", {
+                  frameRate: 10,
+                  displaySurface: plan.displaySurface ?? "window",
+                }),
+              );
+            }
+            for (let i = 0; i < (plan.audioTracks ?? 0); i += 1) {
+              tracks.push(new FakeTrack("audio"));
+            }
+            const stream = new FakeStream(tracks);
+            screens.push(stream);
+            return stream;
+          };
+          // 利用者が画面を選ぶまで返らない、という実物の性質を再現する
+          if (plan.hold === true) {
+            return new Promise<FakeStream>((resolve) => {
+              pendingDisplay = () => resolve(build());
+            });
           }
-          for (let i = 0; i < (plan.audioTracks ?? 0); i += 1) {
-            tracks.push(new FakeTrack("audio"));
-          }
-          const stream = new FakeStream(tracks);
-          screens.push(stream);
-          return Promise.resolve(stream);
+          return Promise.resolve(build());
         },
       },
     },
@@ -307,6 +331,8 @@ function load(): Harness {
     container,
     onStatus: (event: { kind: string; message: string }) => notices.push(event),
     onZoom: (view: unknown, playerId: unknown) => zooms.push({ view, playerId }),
+    // 既定のままだと FakePeerConnection の空の統計が返る
+    getStats: options.getStats,
   });
 
   return {
@@ -317,6 +343,16 @@ function load(): Harness {
     displayCalls,
     plan,
     liveTimers: () => timers.size,
+    tick: async () => {
+      for (const fn of [...intervals.values()]) await fn();
+      // 統計の読み取りは非同期なので、片付くまで待つ
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    },
+    releaseDisplay: () => {
+      const resolve = pendingDisplay;
+      pendingDisplay = null;
+      if (resolve !== null) resolve();
+    },
     notices,
     zooms,
     container,
@@ -715,6 +751,76 @@ Deno.test("E7: 1本の replaceTrack が失敗しても、他のピアの処理�
   assertEquals(second.track, h.screens[0].getVideoTracks()[0], "2本目まで巻き添えで止まっている");
 });
 
+/** 統計の偽物。framesEncoded が増えない（エンコード不成立）状態を作る */
+function stalledStats(): () => Promise<Map<string, unknown>> {
+  return () =>
+    Promise.resolve(
+      new Map<string, unknown>([
+        ["out", { type: "outbound-rtp", kind: "video", framesEncoded: 0, timestamp: 1 }],
+      ]),
+    );
+}
+
+Deno.test("E8: エンコードが1フレームも成立しなければ共有を止める（§8.4）", async () => {
+  const h = load({ getStats: stalledStats() });
+  await joinWith(h, ["a"]);
+  await h.vc.startScreenShare("text");
+  h.notices.length = 0;
+
+  for (let i = 0; i < 3; i += 1) await h.tick();
+
+  assertEquals(h.vc.getState().screen, false, "エンコード不成立を拾えていない");
+  assert(
+    h.notices.some((n) => n.message.includes("送り出せなかった")),
+    "理由が利用者に出ていない",
+  );
+  assert(h.screens[0].getVideoTracks()[0].stopped, "画面トラックが止まっていない");
+});
+
+Deno.test("E8: まだ繋がっていないだけのピアでは共有を止めない", async () => {
+  const h = load({ getStats: stalledStats() });
+  await joinWith(h, ["a"]);
+  // 接続が張れるまではエンコーダが動かず framesEncoded は 0 のまま。
+  // ここで止めてしまうと、回線が遅いだけの正常系で共有が落ちる
+  FakePeerConnection.instances[0].connectionState = "connecting";
+  await h.vc.startScreenShare("text");
+
+  for (let i = 0; i < 5; i += 1) await h.tick();
+
+  assertEquals(h.vc.getState().screen, true, "繋がる前に共有を止めている");
+});
+
+Deno.test("開始の選択中に相手が始めていたら、掴んだ画面を捨てて断る（§4.4）", async () => {
+  const h = load();
+  await joinWith(h, ["a"]);
+  // getDisplayMedia は利用者が画面を選ぶまで返らない。この窓は数十秒あり得る
+  h.plan.hold = true;
+  const starting = h.vc.startScreenShare("text");
+  // 選んでいるあいだに相手が共有を始めた
+  remoteShares(h, "a");
+  h.releaseDisplay();
+
+  assertFalse(await starting, "相手が共有中なのに開始扱いになっている");
+
+  assertEquals(h.vc.getState().screen, false);
+  assertEquals(h.vc.getState().sharingPeerId, "a");
+  assert(h.screens[0].getVideoTracks()[0].stopped, "掴んだ画面を捨てていない");
+});
+
+Deno.test("開始の選択中に卓を離れたら、掴んだ画面を捨てる", async () => {
+  const h = load();
+  await joinWith(h, ["a"]);
+  h.plan.hold = true;
+  const starting = h.vc.startScreenShare("text");
+  h.vc.leave();
+  h.releaseDisplay();
+
+  assertFalse(await starting);
+
+  assert(h.screens[0].getVideoTracks()[0].stopped, "ブラウザの共有中バーが残る");
+  assertEquals(h.vc.getState().screen, false);
+});
+
 // ---------------------------------------------------------------------------
 // 境界値（設計書 §11 の B1〜B6）
 // ---------------------------------------------------------------------------
@@ -831,6 +937,33 @@ Deno.test("B6: TURN リレー時は軽い案へ落とす", () => {
   assertEquals(h.vc.pickProfile({ requested: "motion", relay: true }), "light");
   assertEquals(h.vc.pickProfile({ requested: "text", relay: false }), "text");
   assertEquals(h.vc.pickProfile({ requested: "motion", relay: false }), "motion");
+});
+
+Deno.test("B7: ピアが1人だけ（majority = 1）でも判定が働く", () => {
+  const h = load();
+  const samples = [];
+  for (let i = 0; i < 5; i += 1) {
+    samples.push({
+      at: i,
+      warmedUp: true,
+      videoActive: true,
+      screenShare: false,
+      // 経路側の遅延は過半数で止める。1人なら ⌈1/2⌉ = 1 で足りる
+      limitationReason: "bandwidth",
+      fpsRatio: 1,
+      rtt: 1.2,
+      outgoingBitrate: 2000000,
+    });
+  }
+  const decision = h.vc.evaluateQuality(new Map([["a", samples]]), 1, 0, {
+    autoStopped: false,
+    reason: null,
+    stoppedAt: null,
+    autoStopCount: 0,
+  });
+  assert(decision.shouldStop);
+  assertEquals(decision.reason, "bandwidth");
+  assertEquals(decision.degradedPeerCount, 1);
 });
 
 // ---------------------------------------------------------------------------

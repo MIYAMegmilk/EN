@@ -187,6 +187,12 @@
       surface: null,
       /** getDisplayMedia の応答待ちか（開始の連打よけ・§9-4） */
       starting: false,
+      /**
+       * 開始処理の世代。開始は getDisplayMedia の選択待ちで数十秒かかり得るので、
+       * その最中に停止・競合が割り込んだことを await の後で見分けるために持つ。
+       * 共有を手放すたびに進める。
+       */
+      gen: 0,
       /** TURN リレーを検知したか（§6.6）。検知したら軽い案へ落とす */
       relay: false,
       /** 品質劣化で軽い案へ降格したか（§8.2 の一段目） */
@@ -927,7 +933,11 @@
       connected: player.connected === true,
     });
     const peer = state.peers.get(player.id);
-    if (peer !== undefined) peer.view.label.textContent = player.nickname;
+    if (peer !== undefined) {
+      peer.view.label.textContent = player.nickname;
+      // 拡大ボタンの読み上げ名も一緒に直す（古い名前が読まれないように）
+      updatePeerShareView(peer);
+    }
   }
 
   /** VC 参加中であることを対象者全員へ告知する */
@@ -1002,9 +1012,12 @@
         params.encodings = [{}];
       }
       if (profile === null) {
+        // 画面共有で入れた上限と方針を「外す」。カメラ側に別の値を積極的に
+        // 指定はしない（この機能の前はカメラで setParameters を呼んでおらず、
+        // ブラウザの既定に任せていた。その挙動を変えないため）
         delete params.encodings[0].maxBitrate;
         delete params.encodings[0].maxFramerate;
-        params.degradationPreference = "maintain-framerate";
+        delete params.degradationPreference;
       } else {
         params.encodings[0].maxBitrate = profile.maxBitrate;
         params.encodings[0].maxFramerate = profile.frameRate;
@@ -1258,6 +1271,7 @@
       const peers = [...state.peers.values()];
       const now = Date.now();
       let relay = false;
+      let relayKnown = false;
       const reports = await Promise.all(peers.map((peer) => readStats(peer)));
       for (let i = 0; i < peers.length; i += 1) {
         const peer = peers[i];
@@ -1266,11 +1280,15 @@
         if (report === null || peer.closed) continue;
         const raw = extractRawStats(report, now);
         trackEncodeStall(peer, raw);
-        if (raw.relay === true) relay = true;
+        if (raw.relay !== null) {
+          relayKnown = true;
+          if (raw.relay === true) relay = true;
+        }
         pushSample(peer.id, buildSample(peer, raw, now));
         state.quality.prev.set(peer.id, raw);
       }
-      if (relay) noteRelayDetected();
+      // 判定できたときだけ更新する（取れないブラウザで勝手に落とさない）
+      if (relayKnown) updateRelayState(relay);
       if (detectEncodeFailure()) return;
       applyQualityDecision(evaluateQuality(state.quality.window, state.peers.size, Date.now(), {
         autoStopped: state.quality.autoStopped,
@@ -1304,7 +1322,11 @@
    * 静止画面の誤検知は原理的に起きない。
    */
   function trackEncodeStall(peer, raw) {
-    if (currentVideoSource() !== "screen" || raw.framesEncoded !== 0) {
+    // 接続が張れるまで（特に TURN 経由・参加直後）エンコーダは動かず
+    // framesEncoded は 0 のままになる。ここに門を置かないと、回線が遅いだけの
+    // 正常系で 6 秒後に共有が勝手に止まる
+    const connected = peer.pc.connectionState === "connected";
+    if (!connected || currentVideoSource() !== "screen" || raw.framesEncoded !== 0) {
       peer.stallCount = 0;
       return;
     }
@@ -1340,15 +1362,22 @@
    * relay は in と out の両方が VPS を通るので、標準案のままだと
    * 共有者1人で VPS に 7 Mbps 乗る。共有者単位で軽い案へ落とす。
    */
-  function noteRelayDetected() {
-    if (state.screen.relay) return;
-    state.screen.relay = true;
+  function updateRelayState(relay) {
+    if (relay === state.screen.relay) return;
+    state.screen.relay = relay;
     if (currentVideoSource() !== "screen") return;
-    if (state.screen.profile === "light") return;
-    applyScreenProfile("light");
-    // 640×360 では文字が読めない（§6.3）。黙って落とすと「画面共有は
-    // 使いものにならない」という誤った印象だけが残る
-    notify("quality", "回線の都合（中継経由）で画質を落としています");
+    if (relay) {
+      if (state.screen.profile === "light") return;
+      applyScreenProfile("light");
+      // 640×360 では文字が読めない（§6.3）。黙って落とすと「画面共有は
+      // 使いものにならない」という誤った印象だけが残る
+      notify("quality", "回線の都合（中継経由）で画質を落としています");
+      return;
+    }
+    // 中継が外れたら戻す。品質劣化で落としたぶん（demoted）はそのまま
+    if (state.screen.demoted || state.screen.profile !== "light") return;
+    applyScreenProfile(state.screen.kind);
+    notify("quality", "回線が直接つながったので、共有の画質を戻しました");
   }
 
   /**
@@ -1359,26 +1388,29 @@
     const profile = SCREEN_PROFILES[name];
     if (profile === undefined) return;
     state.screen.profile = name;
-    const track = activeVideoTrack();
-    if (track !== null) {
-      try {
-        track.contentHint = profile.contentHint;
-      } catch (e) {
-        console.error("VC contentHint failed:", e);
-      }
-      if (typeof track.applyConstraints === "function") {
-        const applied = track.applyConstraints({
-          width: { max: profile.width },
-          height: { max: profile.height },
-          frameRate: { max: profile.frameRate },
-        });
-        if (applied !== undefined && typeof applied.catch === "function") {
-          applied.catch((e) => console.error("VC applyConstraints failed:", e));
-        }
-      }
-    }
+    applyCaptureProfile(activeVideoTrack(), name);
     for (const peer of state.peers.values()) {
       applyEncodingProfile(peer.videoSender, profile);
+    }
+  }
+
+  /** 取り込み側だけを絞る（contentHint と applyConstraints）。§6.4 の一段目 */
+  function applyCaptureProfile(track, name) {
+    const profile = SCREEN_PROFILES[name];
+    if (profile === undefined || track === null) return;
+    try {
+      track.contentHint = profile.contentHint;
+    } catch (e) {
+      console.error("VC contentHint failed:", e);
+    }
+    if (typeof track.applyConstraints !== "function") return;
+    const applied = track.applyConstraints({
+      width: { max: profile.width },
+      height: { max: profile.height },
+      frameRate: { max: profile.frameRate },
+    });
+    if (applied !== undefined && typeof applied.catch === "function") {
+      applied.catch((e) => console.error("VC applyConstraints failed:", e));
     }
   }
 
@@ -1602,7 +1634,11 @@
       // 画面共有は会話の対象そのものなので、いきなり消すと話が成立しなくなる。
       // まず画質を落として繋ぎ、それでも直らなければ止める（§8.2 の二段構え）。
       // 終着点（停止＝音声優先）は §3.6 のまま変えていない。
-      if (currentVideoSource() === "screen" && !state.screen.demoted) {
+      if (
+        currentVideoSource() === "screen" && !state.screen.demoted &&
+        state.screen.profile !== "light"
+      ) {
+        // 既に軽い案なら落とす先が無いので、段を挟まずに停止へ進む
         demoteScreenShare();
         return;
       }
@@ -2071,6 +2107,9 @@
     }
     const requested = kind === "motion" ? "motion" : SCREEN_DEFAULT_KIND;
     const profileName = pickProfile({ requested, relay: state.screen.relay });
+    // この開始処理の世代。await から戻るたびに、割り込まれていないかを見る
+    state.screen.gen += 1;
+    const gen = state.screen.gen;
     state.screen.starting = true;
     let stream = null;
     try {
@@ -2086,8 +2125,17 @@
     state.screen.starting = false;
     // 選択ダイアログを出しているあいだに卓を離れていたら、掴んだものを捨てる。
     // ここで取りこぼすとブラウザの「共有中」バーだけが残る
-    if (!state.active) {
+    if (!state.active || state.screen.gen !== gen) {
       stopStream(stream);
+      return false;
+    }
+    // **もう一度**他の人の共有を見る。開始前の確認から、利用者が画面を選ぶまでの
+    // 数秒〜数十秒が空いている。この窓は設計書が想定する片道 RTT よりずっと長く、
+    // ここを見ないと2人が同時に共有したまま収束しない（§4.4）
+    const late = sharingPeerIds();
+    if (late.length > 0) {
+      stopStream(stream);
+      notify("error", `${nicknameOf(late[0])} さんが画面を共有中です`);
       return false;
     }
     // 音声トラックは常に0本として扱う（§6.5）。万一返ってきたら捨てる
@@ -2100,6 +2148,7 @@
     }
     state.screenStream = stream;
     state.screen.kind = requested;
+    state.screen.profile = profileName;
     state.screen.demoted = false;
     state.screen.demotedAt = null;
     // 実際に何が選ばれたかは事後にしか分からない（displaySurface は希望の
@@ -2109,13 +2158,24 @@
     // stop() しても ended は発火しないので、そちらは明示的に後始末を呼ぶ（§9-1）
     if (typeof track.addEventListener === "function") {
       track.addEventListener("ended", onScreenTrackEnded);
+      // 共有中に対象を切り替えられたら、申告値を読み直して伝える（surfaceSwitching）
+      track.addEventListener("configurationchange", onScreenConfigurationChange);
     }
-    applyScreenProfile(profileName);
+    // 取り込み側だけ先に絞る。送出パラメータは差し替えの後に当てる（§4.2 の順序）
+    applyCaptureProfile(track, profileName);
     await applyVideoTrackAll(track);
+    if (state.screen.gen !== gen || state.screenStream !== stream) {
+      // 待っているあいだに止められた。送出を今の状態へそろえ直して抜ける
+      await applyVideoTrackAll(activeVideoTrack());
+      return false;
+    }
     markVideoSourceChanged(track);
     renderLocalVideo();
     syncQualityMonitor();
     announceVideoState();
+    // 告知が行き違って相手も同時に始めていたら、ここで1人に収束させる
+    resolveShareConflict();
+    if (state.screenStream === null) return false;
     notify("vcState", "画面共有を始めました");
     if (state.screen.surface === "monitor") {
       // 止めはしない（利用者の選択を機械が覆さない）。強めに知らせるだけ
@@ -2158,10 +2218,13 @@
     state.screen.profile = state.screen.kind;
     state.screen.demoted = false;
     state.screen.demotedAt = null;
+    // 選択待ちの開始処理が走っていたら、それを無効にする（世代を進める）
+    state.screen.gen += 1;
     if (stream === null) return;
     for (const track of stream.getTracks()) {
       if (typeof track.removeEventListener === "function") {
         track.removeEventListener("ended", onScreenTrackEnded);
+        track.removeEventListener("configurationchange", onScreenConfigurationChange);
       }
     }
     stopStream(stream);
@@ -2170,6 +2233,24 @@
   /** ブラウザ側（共有バー）から止められたときの合流点（§9-1・E6） */
   function onScreenTrackEnded() {
     stopScreenShare({ message: "画面共有を止めました" });
+  }
+
+  /**
+   * 共有中に対象が切り替えられたとき（surfaceSwitching: "include"）。
+   * displaySurface は開始時の一度きりでは古くなるので読み直し、
+   * 画面全体へ切り替わったのなら §9-1 の警告を出し直す。
+   */
+  function onScreenConfigurationChange() {
+    if (state.screenStream === null) return;
+    const track = activeVideoTrack();
+    if (track === null) return;
+    const surface = readDisplaySurface(track);
+    if (surface === state.screen.surface) return;
+    state.screen.surface = surface;
+    announceVideoState();
+    if (surface === "monitor") {
+      notify("error", "画面全体を共有しています。通知やパスワード入力も映ります");
+    }
   }
 
   /** getDisplayMedia が返したストリームから音声を落とす（§6.5） */

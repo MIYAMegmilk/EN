@@ -1469,6 +1469,20 @@
         background: rgba(176, 42, 36, 0.28);
       }
 
+      /*
+       * 画面共有だけは「入」の側を目立たせる（vc-screenshare.md §10）。
+       * マイクと逆で、出しっぱなしにする事故のほうが重いため。
+       */
+      #vc-screen[data-state="on"]:not(:disabled) {
+        color: var(--cream);
+        background: rgba(176, 42, 36, 0.22);
+        border-color: #6d2420;
+      }
+
+      #vc-screen[data-state="on"]:not(:disabled):hover {
+        background: rgba(176, 42, 36, 0.34);
+      }
+
       .vc-ctl-label {
         display: block;
       }
