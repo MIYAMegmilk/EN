@@ -1371,7 +1371,7 @@ function renderVcScreen(vc) {
   }
   setVcControl(button, vc.screen === true, vc.screen === true ? "共有をやめる" : "画面共有");
   // 種類は開始時に決まる。共有中に切り替えられるかのように見せない
-  kind.disabled = !canStart;
+  kind.disabled = !canStart || vc.screen === true;
 }
 
 /**
