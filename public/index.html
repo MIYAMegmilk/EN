@@ -1235,6 +1235,114 @@
         display: none;
       }
 
+      /*
+       * 共有中のタイルだけ contain に切り替える（vc-screenshare.md §7.3）。
+       * cover は縦横比の合わない部分を切り落とすので、画面共有では
+       * ツールバーやコードの行頭など、まさに読みたい部分が消える。
+       * 上下の黒帯は .vc-video の background: #000 がそのまま受け持つ。
+       */
+      .vc-video-screen {
+        object-fit: contain;
+      }
+
+      /* 共有中であることの明示（§9-3）。誰が何を共有しているかを画面から分かるように */
+      .vc-share-badge {
+        position: absolute;
+        top: 6px;
+        left: 6px;
+        right: 6px;
+        z-index: 3;
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 6px;
+        padding: 4px 6px;
+        border-radius: var(--r-md);
+        background: rgba(0, 0, 0, 0.6);
+        font-size: 10.5px;
+        color: var(--cream);
+      }
+
+      .vc-share-badge[hidden] {
+        display: none;
+      }
+
+      .vc-share-text {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      /* 自分の枠は、出しっぱなしの事故を避けるために赤い点を添えて目立たせる */
+      .vc-share-self::before {
+        content: "";
+        flex: none;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #e05a4e;
+      }
+
+      .vc-share-zoom,
+      .vc-share-stop {
+        flex: none;
+        margin-left: auto;
+        padding: 2px 8px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-sm, 4px);
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--cream);
+        font-size: 10.5px;
+        cursor: pointer;
+      }
+
+      .vc-share-stop {
+        margin-left: 0;
+        border-color: #6d2420;
+        background: rgba(176, 42, 36, 0.28);
+      }
+
+      .vc-share-zoom:hover,
+      .vc-share-stop:hover {
+        background: rgba(255, 255, 255, 0.18);
+      }
+
+      /* 共有する内容の種類（§6.3 / §10）。共有ボタンの脇の小さな選択 */
+      .vc-screen-kind {
+        flex: none;
+        padding: 4px 6px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        background: rgba(0, 0, 0, 0.25);
+        color: var(--text);
+        font-size: 11px;
+      }
+
+      .vc-screen-kind:disabled {
+        opacity: 0.35;
+        cursor: not-allowed;
+      }
+
+      /* 共有画面の拡大表示（§7.2）。覆いそのものは .platform を使い回す */
+      .vc-zoom-stage {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 10px;
+        background: #000;
+      }
+
+      .vc-zoom-video {
+        max-width: 100%;
+        max-height: 100%;
+        /* 端を切らない。読ませるための拡大なので、全体が入ることが最優先 */
+        object-fit: contain;
+        background: #000;
+      }
+
       .vc-peer-label {
         position: relative;
         z-index: 2;
@@ -1807,6 +1915,35 @@
                 </svg>
                 <span class="vc-ctl-label">カメラON</span>
               </button>
+              <!--
+                画面共有（docs/design/vc-screenshare.md §10）。カメラの隣に置く。
+                共有中は自分のカメラ映像が送出されなくなる（§4.1 の不変条件）。
+                非対応の端末（iOS Safari / Android Chrome）でも消さずに
+                disabled + title にする。消すと「壊れている」と誤解されるため。
+              -->
+              <button id="vc-screen" class="vc-ctl" type="button" data-state="off">
+                <svg class="vc-ctl-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <g class="vc-ctl-ico-on">
+                    <rect x="2.5" y="4.5" width="19" height="13" rx="2.5" />
+                    <path d="M9 21h6M12 17.5V21" />
+                    <path d="M12 14V8M9.2 10.8 12 8l2.8 2.8" />
+                  </g>
+                  <g class="vc-ctl-ico-off">
+                    <rect x="2.5" y="4.5" width="19" height="13" rx="2.5" />
+                    <path d="M9 21h6M12 17.5V21" />
+                    <path d="M4 3.5 20 20.5" />
+                  </g>
+                </svg>
+                <span class="vc-ctl-label">画面共有</span>
+              </button>
+              <!--
+                共有する内容の種類（§6.3）。文字向けは解像度を守って fps を捨て、
+                動き向けは逆。既定は「文字」で、前回値は覚えない（中身が毎回違うため）。
+              -->
+              <select id="vc-screen-kind" class="vc-screen-kind" aria-label="共有する内容の種類">
+                <option value="text">文字を見せる</option>
+                <option value="motion">動きを見せる</option>
+              </select>
               <button id="vc-transcribe" class="vc-ctl" type="button" data-state="off">
                 <svg class="vc-ctl-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                   <g class="vc-ctl-ico-on">
@@ -1897,6 +2034,34 @@
           <p id="platform-pick" class="muted"></p>
           <span class="spacer"></span>
           <button id="platform-start" class="btn btn-gold" type="button">これではじめる</button>
+        </div>
+      </div>
+    </div>
+
+    <!--
+      共有画面の拡大表示（docs/design/vc-screenshare.md §7）。
+      タイルの中では 1920px 幅の画面が 1/8 に縮み、14px の文字が 1.75px に
+      なって読めない。拡大表示は「あると便利」ではなく、この機能が成立する
+      ための前提条件である。覆いの作法は品書き（#game-platform）に揃えてある。
+      中の video には共有者のタイルと同じ MediaStream を張る（デコードは1回、
+      描画が2回になるだけで、追加の受信帯域はゼロ）。
+    -->
+    <div
+      id="vc-zoom"
+      class="platform hidden"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="vc-zoom-title"
+    >
+      <div class="platform-sheet card">
+        <div class="platform-head">
+          <h2 id="vc-zoom-title">共有画面</h2>
+          <span class="spacer"></span>
+          <button id="vc-zoom-full" class="btn" type="button">端末の全画面</button>
+          <button id="vc-zoom-close" class="btn" type="button">閉じる</button>
+        </div>
+        <div id="vc-zoom-stage" class="vc-zoom-stage">
+          <video id="vc-zoom-video" class="vc-zoom-video" autoplay playsinline muted></video>
         </div>
       </div>
     </div>

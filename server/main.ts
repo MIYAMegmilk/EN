@@ -109,6 +109,16 @@ const SECURITY_HEADERS: ReadonlyArray<[string, string]> = [
   ],
   ["x-content-type-options", "nosniff"],
   ["referrer-policy", "no-referrer"],
+  /*
+   * 画面取得・カメラ・マイクを自分のオリジンにだけ許す
+   * （docs/design/vc-screenshare.md §9-2）。
+   * display-capture の既定の許可リストはもともと self なので、この行は
+   * 挙動を変えない。**変えないことに意味がある**: 明示しておけば、将来
+   * 誰かが埋め込みや iframe を足したときに、既定値の解釈に頼らずこの1行を
+   * 読んで判断できる。アプリ本体は frame-ancestors 'none' なので
+   * 第三者に埋め込まれる経路自体が無く、これはその補強にあたる。
+   */
+  ["permissions-policy", "display-capture=(self), camera=(self), microphone=(self)"],
 ];
 
 /**
@@ -153,6 +163,16 @@ const SANDBOX_SECURITY_HEADERS: ReadonlyArray<[string, string]> = [
   ],
   ["x-content-type-options", "nosniff"],
   ["referrer-policy", "no-referrer"],
+  /*
+   * runner には画面取得・カメラ・マイクを誰にも許さない（空リスト）。
+   * ここはユーザーコードを実行するページであり（悪意あるコードを前提に
+   * 設計している）、画面取得を渡す理由が1つも無い
+   * （docs/design/vc-screenshare.md §9-2）。
+   * 現状でも runner の iframe は allow-same-origin を付けていないため
+   * 一意の不透明オリジンになり self には一致しないが、その前提が崩れた
+   * ときのために宣言側でも塞いでおく。
+   */
+  ["permissions-policy", "display-capture=(), camera=(), microphone=()"],
 ];
 
 // ---------------------------------------------------------------------------

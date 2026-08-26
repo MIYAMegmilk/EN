@@ -1330,6 +1330,7 @@ function renderVc() {
   // 文言は「押すとどうなるか」、絵は「いまどうなっているか」を出す（Zoom と同じ流儀）
   setVcControl($("vc-mute"), !vc.muted, vc.muted ? "ミュート解除" : "ミュート");
   setVcControl($("vc-camera"), vc.camera, vc.camera ? "カメラOFF" : "カメラON");
+  renderVcScreen(vc);
   const peers = vc.peers
     .map((p) => `${p.nickname}: ${p.connectionState}${p.degraded === true ? "（品質低下）" : ""}`)
     .join(" / ");
@@ -1342,6 +1343,35 @@ function renderVc() {
     : "音声なし（VC枠外）";
   $("vc-status").textContent = peers.length > 0 ? `${head} — ${peers}` : head;
   renderVcQuality(vc);
+}
+
+/**
+ * 画面共有（docs/design/vc-screenshare.md §10）のボタンと選択を更新する。
+ *
+ * 状態は必ず VC.getState() から導く（DOM から読み戻さない）。
+ * 非対応の端末でもボタンは消さず、理由を title に出す。消してしまうと
+ * 「自分の端末にだけ機能が無い」ことに気づけず、壊れていると誤解される。
+ * 受信は常に有効なので、他の人の共有は非対応端末でも見られる。
+ */
+function renderVcScreen(vc) {
+  const button = $("vc-screen");
+  const kind = $("vc-screen-kind");
+  // 同時に共有できるのは1人（§4.4）。他の人が共有中は自分から始められない
+  const otherSharing = vc.sharingPeerId !== null && vc.screen !== true;
+  const canStart = vc.active === true && vc.screenSupported === true && !otherSharing;
+  button.disabled = !(canStart || vc.screen === true);
+  if (vc.screenSupported !== true) {
+    button.title = "この端末では画面共有を始められません（他の人の共有は見られます）";
+  } else if (otherSharing) {
+    button.title = `${vc.sharingPeerName} さんが画面を共有中です`;
+  } else if (vc.screen === true) {
+    button.title = "画面共有をやめます";
+  } else {
+    button.title = "自分の画面を共有します（共有中は自分のカメラ映像は止まります）";
+  }
+  setVcControl(button, vc.screen === true, vc.screen === true ? "共有をやめる" : "画面共有");
+  // 種類は開始時に決まる。共有中に切り替えられるかのように見せない
+  kind.disabled = !canStart;
 }
 
 /**
@@ -1426,12 +1456,81 @@ function autoStartVoice(msg) {
   Voice.setEnabled(true);
 }
 
+/**
+ * 拡大表示中の共有者の playerId（docs/design/vc-screenshare.md §7）。
+ * 開いていなければ null。共有が止まったときに「いま開いているのが
+ * その人の画面か」を確かめてから閉じるために持つ。
+ */
+let vcZoomPlayerId = null;
+
+/**
+ * 共有画面を拡大表示する（§7.2）。
+ *
+ * タイルの video を DOM ごと移すのではなく、覆いの中の video に**同じ
+ * MediaStream を張る**。vc.js の closePeer() はタイルごと要素を消すので、
+ * 要素の持ち主を移すと後始末が壊れる。同じストリームを2枚に張るのは
+ * 通常の使い方で、デコードは1回・描画が2回になるだけ（受信帯域は増えない）。
+ */
+function openVcZoom(view) {
+  vcZoomPlayerId = view.playerId;
+  // ニックネームはユーザー由来なので textContent で入れる（§3.8）
+  $("vc-zoom-title").textContent = `${view.nickname} さんの共有画面`;
+  const video = $("vc-zoom-video");
+  video.srcObject = view.stream;
+  $("vc-zoom").classList.remove("hidden");
+  const played = video.play();
+  if (played !== undefined && typeof played.catch === "function") {
+    played.catch(() => {});
+  }
+  $("vc-zoom-close").focus();
+}
+
+/**
+ * 拡大表示を閉じる。playerId を渡すと、その人の画面を出しているときだけ閉じる
+ * （共有が止まったのが別の人だったときに巻き添えで閉じないため）。
+ */
+function closeVcZoom(playerId) {
+  if (vcZoomPlayerId === null) return;
+  if (playerId !== undefined && playerId !== null && playerId !== vcZoomPlayerId) return;
+  vcZoomPlayerId = null;
+  $("vc-zoom-video").srcObject = null;
+  $("vc-zoom").classList.add("hidden");
+  if (typeof document.exitFullscreen === "function" && document.fullscreenElement) {
+    document.exitFullscreen().catch(() => {});
+  }
+}
+
+/**
+ * 端末の全画面へ渡す（§7.2）。
+ * iOS Safari は Element.requestFullscreen() を持たず、video の
+ * webkitEnterFullscreen() しかない。どちらも無ければ覆いだけで完結する。
+ */
+function toggleVcZoomFullscreen() {
+  if (typeof document.exitFullscreen === "function" && document.fullscreenElement) {
+    document.exitFullscreen().catch(() => {});
+    return;
+  }
+  const stage = $("vc-zoom-stage");
+  if (typeof stage.requestFullscreen === "function") {
+    const entered = stage.requestFullscreen();
+    if (entered !== undefined && typeof entered.catch === "function") entered.catch(() => {});
+    return;
+  }
+  const video = $("vc-zoom-video");
+  if (typeof video.webkitEnterFullscreen === "function") video.webkitEnterFullscreen();
+}
+
 /** VC モジュールを組み込む。iceServers が null なら VC 側の既定を使う */
 function bindVc(iceServers) {
   VC.init({
     send,
     iceServers,
     container: $("vc-people"),
+    // 拡大表示の覆いはこちらの持ち物。vc.js からは開閉だけを頼まれる（§7.2）
+    onZoom: (view, playerId) => {
+      if (view === null) closeVcZoom(playerId);
+      else openVcZoom(view);
+    },
     onStatus: (event) => {
       if (event.kind === "error") showError(event.message);
       // 品質劣化の通知（§3.6）は異常ではなく正常な保護動作なので、
@@ -1448,6 +1547,25 @@ function bindVc(iceServers) {
   $("vc-camera").addEventListener("click", () => {
     VC.toggleCamera().then(renderVc);
   });
+  $("vc-screen").addEventListener("click", () => {
+    if (VC.getState().screen === true) {
+      // 種類は毎回「文字」から始める（共有の中身は毎回違うので前回値は当たらない）
+      Promise.resolve(VC.stopScreenShare()).then(renderVc, renderVc);
+      $("vc-screen-kind").value = "text";
+      return;
+    }
+    Promise.resolve(VC.startScreenShare($("vc-screen-kind").value)).then(renderVc, renderVc);
+  });
+  $("vc-zoom-close").addEventListener("click", () => closeVcZoom());
+  $("vc-zoom-full").addEventListener("click", toggleVcZoomFullscreen);
+  // 覆いの余白を押したら閉じる（品書きと同じ作法）
+  $("vc-zoom").addEventListener("click", (event) => {
+    if (event.target === $("vc-zoom")) closeVcZoom();
+  });
+  // 端末の全画面に対応していなければ、その押し口は出さない（§7.2）
+  const canFullscreen = typeof $("vc-zoom-stage").requestFullscreen === "function" ||
+    typeof $("vc-zoom-video").webkitEnterFullscreen === "function";
+  $("vc-zoom-full").classList.toggle("hidden", !canFullscreen);
   $("vc-resume").addEventListener("click", () => {
     // 自動停止した映像は本人の明示操作でのみ戻す（§3.6）
     if (typeof VC.resumeCamera !== "function") {
@@ -1535,7 +1653,10 @@ function bind() {
     if (event.target === $("game-platform")) toggleGamePlatform(false);
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") toggleGamePlatform(false);
+    if (event.key !== "Escape") return;
+    toggleGamePlatform(false);
+    // 共有画面の拡大表示も同じ作法で閉じる（vc-screenshare.md §7.2）
+    closeVcZoom();
   });
   $("platform-start").addEventListener("click", () => {
     toggleGamePlatform(false);
