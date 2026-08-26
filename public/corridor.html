@@ -150,6 +150,14 @@
   </head>
   <body>
     <div class="corridor-bar">
+      <!--
+        入り口へ戻る道。この画面へは entrance.html の「廊下を歩く」から来るので、
+        戻り先も入り口に揃える（create-room.html と同じ文言・同じ行き先）。
+        バーの先頭に置いてあるのは、狭い画面ではバーが横スクロールになり、
+        最初に見えている物しか押せないため。
+      -->
+      <a id="to-entrance" class="btn" href="/entrance.html">入り口に戻る</a>
+
       <h1>今夜、灯りのついている卓</h1>
 
       <div class="corridor-group" role="group" aria-label="表示の切り替え">
