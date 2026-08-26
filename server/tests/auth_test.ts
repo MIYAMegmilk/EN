@@ -23,6 +23,10 @@ function randomUserId(): string {
  *
  * get 以外のメソッドは元の kv に束縛して素通しする（Proxy 越しに呼ぶと Deno.Kv 内部の
  * プライベートフィールドへアクセスできず壊れるため、必ず bind してから返す）。
+ *
+ * 注意: このラッパーはキーの絞り込みをせず、すべての get でフックを呼ぶ。
+ * どのキーに反応するかはフック側で判定すること（例: `key[0] !== "user"` なら何もしない）。
+ * 絞らずに書き込みを差し込むと、セッション検証など無関係な読み出しにも割り込んでしまう。
  */
 function kvWithGetHook(kv: Deno.Kv, hook: (key: Deno.KvKey) => Promise<void>): Deno.Kv {
   return new Proxy(kv, {
@@ -1106,9 +1110,12 @@ Deno.test("PUT /api/profile: 読み出しから書き戻すまでの間に別の
       headers: { "content-type": "application/json", cookie },
       body: JSON.stringify({ nickname: "ひだり", tags: ["game"] }),
     });
+    // 先に「横取りが実際に差し込まれたか」を確かめる。ここが空振りしたまま
+    // ステータスの assert に進むと、「ロックが無い」のか「フックが刺さらなかった」のか
+    // 失敗メッセージから区別できなくなる
+    assertEquals(steal, null, "横取りの保存が実際に差し込まれたこと");
     assertEquals(res.status, 409, "読んだ versionstamp が変わっているので409で弾かれること");
     assert(typeof (await res.json()).error === "string", "error メッセージが返ること");
-    assertEquals(steal, null, "横取りの保存が実際に差し込まれたこと");
 
     // 横取りした内容がそのまま残っている＝409を返した側は書き込んでいない
     const stored = await kv.get<User>(["user", userId]);
