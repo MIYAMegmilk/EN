@@ -404,6 +404,21 @@ select {
   display: none !important;
 }
 
+/*
+ * hidden 属性の保険。
+ *
+ * `[hidden] { display: none }` は UA スタイルの規則で、カスケードでは作者スタイルの
+ * 通常宣言のほうが常に強い（詳細度は関係ない）。廊下ビューの札で
+ * `.corridor-sign { display: flex }` が hidden に勝ってしまい、使い終わった札が
+ * 画面に残り続ける不具合が実際に起きた。アプリ全体で同じ罠を踏まないよう打ち消す。
+ *
+ * `.hidden`（クラス）と役割が重なるが、こちらは vc.js の `video.hidden = true` のように
+ * 属性で出し分けている箇所を守る。両方 display: none なので競合しない。
+ */
+[hidden] {
+  display: none !important;
+}
+
 /* エラー表示。中身が空のときは場所を取らない */
 .alert:empty {
   display: none;
@@ -862,4 +877,611 @@ select {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   color: var(--dim);
+}
+
+/* ── 廊下ビュー ─────────────────────────────────────── */
+/*
+ * corridor.html（単独の確認用ページ）と index.html（本番のホーム）の両方が使う。
+ * 配線は public/assets/3d/corridor-ui.js、3D 本体は corridor-view.js。
+ *
+ * セレクタはすべて .corridor-* / .tier-* に閉じてある。他の画面には一切効かない。
+ * 置き場所ごとの寸法（画面いっぱいにするのか、記事の中に埋めるのか）は
+ * ページ側の <style> が持つ。
+ */
+
+.corridor-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  flex: none;
+  padding: 10px 16px;
+  /* ノッチのある端末で、横向きにしたときバーが切り欠きに潜らないようにする */
+  padding-left: max(16px, env(safe-area-inset-left));
+  padding-right: max(16px, env(safe-area-inset-right));
+  background: linear-gradient(180deg, var(--panel-3), var(--panel));
+  border-bottom: 1px solid var(--line);
+}
+
+.corridor-bar h1 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--gold);
+}
+
+/* バーの中のボタンは指で押せる高さを確保する */
+.corridor-bar .btn {
+  min-height: 44px;
+  padding: 10px 14px;
+  touch-action: manipulation;
+}
+
+.corridor-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/*
+ * 狭い画面ではバーを1行に畳んで横へ流す。
+ *
+ * 幅390px で折り返させると6行（見出し／切り替え／歩く2行／VC／卓数）になり、
+ * 縦を約292px（画面 844px の 35%）食っていた。1行なら 64px で済む。
+ * 「アイコンだけにする」案は採らなかった――「この卓に入る」「一覧で選ぶ」のように
+ * ボタンの文字そのものが何が起きるかの説明になっているため、
+ * 文字を落とすより横へ流すほうが失うものが少ない。
+ */
+@media (max-width: 640px) {
+  .corridor-bar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+
+  .corridor-bar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .corridor-bar > * {
+    flex: none;
+  }
+
+  /* 見出しは読み上げには残したまま、場所だけ譲る（.sr-only と同じ手当て） */
+  .corridor-bar h1 {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .corridor-group {
+    flex-wrap: nowrap;
+  }
+
+  .corridor-hint {
+    margin-left: 0;
+  }
+}
+
+/* 「店内 / 一覧」。押されている側を枠と文字色でも示す */
+.corridor-mode[aria-pressed="true"] {
+  border-color: var(--gold-3);
+  background: #3b2c1d;
+  color: var(--gold-2);
+}
+
+.corridor-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--ink);
+}
+
+/* 画面中央の印。ここに来た扉が「いま見ている卓」になる */
+.corridor-aim {
+  position: absolute;
+  z-index: 1;
+  left: 50%;
+  top: 50%;
+  width: 18px;
+  height: 18px;
+  margin: -9px 0 0 -9px;
+  border: 1px solid rgba(230, 166, 63, 0.55);
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+/*
+ * 重ねものの土台。層そのものは指もマウスも素通りさせ（pointer-events: none）、
+ * 中のボタンだけが受ける。こうしないと canvas のドラッグ見回しが死ぬ。
+ */
+.corridor-layer {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  pointer-events: none;
+}
+
+/*
+ * いま見ている卓を文字でも出す。3D の canvas は読み上げられないので、
+ * 一覧カードと同じ情報がここに必ず出るようにしておく。
+ *
+ * 中身は札（tier-focus）と重なるが、こちらは位置が動かないので
+ * 読み上げの拠り所になる。そのぶん場所は取らせない
+ * ――幅 390px の画面で 220px（56%）、高さは2行ぶんまで。
+ * 左下はバーチャルスティックに譲ったので左上に置く。
+ */
+.corridor-focus {
+  position: absolute;
+  left: calc(12px + env(safe-area-inset-left));
+  top: 12px;
+  max-width: min(220px, calc(100% - 24px));
+  padding: 7px 10px;
+  background: rgba(22, 16, 10, 0.86);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+
+.corridor-focus h2 {
+  margin: 0;
+  font-family: var(--serif);
+  font-size: 13.5px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--cream);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.corridor-focus p {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/*
+ * 何枚を出して何枚を省いたかの注記。押せるものではない。
+ * 左上の焦点パネル（220px）と並ぶので、幅 390px の画面でもぶつからない幅に抑える。
+ */
+.corridor-note {
+  position: absolute;
+  right: calc(12px + env(safe-area-inset-right));
+  top: 12px;
+  max-width: min(140px, calc(100% - 250px));
+  margin: 0;
+  text-align: right;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--dim);
+  pointer-events: none;
+}
+
+/* ?debug=1 のときの注記。左上の焦点パネルを避けて下へ回す */
+.corridor-note.is-debug {
+  top: auto;
+  bottom: calc(12px + env(safe-area-inset-bottom));
+  max-width: calc(100% - 170px);
+  color: var(--gold-2);
+}
+
+.corridor-hint {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--dim);
+}
+
+/* 3D を諦めた理由などの注記。空のときは場所を取らない */
+.corridor-error:empty {
+  display: none;
+}
+
+.corridor-error {
+  margin: 0;
+  padding: 12px 16px;
+  font-size: 12.5px;
+  color: var(--gold-2);
+  background: rgba(140, 31, 26, 0.18);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+
+/* ── 卓の札 ───────────────────────────────────────── */
+/*
+ * 位置・大きさ・濃さは JS が transform と opacity だけで書き換える。
+ * left/top を毎フレーム動かすとレイアウトが走るので触らない。
+ *
+ * 3段ある。中身の出し入れは .tier-* で切り替え、DOM の作りは1種類にしてある。
+ * 寸法は corridor-ui.js の SIGN_BOX と揃えること（重なり判定がこの値を使う）。
+ *   tier-focus  150 × 72   いま見ている扉。全部出す
+ *   tier-pill   124 × 28   近い扉。卓名 ＋ 3/6 ＋ 記号
+ *   tier-dot     42 × 20   遠い扉。人数だけ
+ */
+.corridor-sign {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: linear-gradient(180deg, rgba(246, 236, 220, 0.97), rgba(232, 219, 196, 0.97));
+  border: 1px solid rgba(61, 44, 28, 0.55);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
+  color: var(--gold-ink);
+  cursor: pointer;
+  pointer-events: auto;
+  touch-action: manipulation;
+  transform-origin: 50% 50%;
+  will-change: transform, opacity;
+}
+
+.corridor-sign:hover {
+  border-color: var(--gold-3);
+}
+
+.corridor-sign:focus-visible {
+  outline: 2px solid var(--gold-2);
+  outline-offset: 2px;
+}
+
+/* 満席は押せない。枠を破線にして、色以外でも「閉じている」と分かるようにする */
+.corridor-sign:disabled {
+  cursor: default;
+  border-style: dashed;
+  background: linear-gradient(180deg, rgba(214, 203, 186, 0.94), rgba(196, 184, 165, 0.94));
+}
+
+/* 既定ではすべて隠し、段ごとに要る部分だけ出す */
+.corridor-sign > * {
+  display: none;
+}
+
+.corridor-sign-mark {
+  font-size: 11px;
+  line-height: 1;
+  flex: none;
+}
+
+.corridor-sign-name {
+  font-family: var(--serif);
+  line-height: 1.3;
+  overflow: hidden;
+}
+
+/* 人数は必ず「3/6」。満席かどうかが数字だけで分かる */
+.corridor-sign-seats {
+  flex: none;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+/*
+ * 状態は「記号 + 文字」の二重表示。色が見えなくても読み分けられるようにする。
+ * ○ 空き ／ ● 入店中 ／ ▶ ゲーム中 ／ × 満席
+ */
+.corridor-sign-label,
+.corridor-sign-game,
+.corridor-sign-since {
+  font-size: 10px;
+  line-height: 1.35;
+  color: #6b5943;
+}
+
+.corridor-sign.is-open .corridor-sign-mark {
+  color: #3c5426;
+}
+
+.corridor-sign.is-busy .corridor-sign-mark {
+  color: #5b4a36;
+}
+
+.corridor-sign.is-playing .corridor-sign-mark {
+  color: #8a5a12;
+}
+
+.corridor-sign.is-full .corridor-sign-mark {
+  color: var(--red-2);
+}
+
+/* いま見ている扉。ここだけ全部出す（状態は記号と文字の両方） */
+.tier-focus {
+  width: 150px;
+  min-height: 72px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  grid-template-areas:
+    "name  name  name"
+    "mark  label seats"
+    "game  game  game"
+    "tags  tags  since";
+  align-items: center;
+  gap: 1px 4px;
+  padding: 6px 8px;
+  border-radius: var(--r-md);
+}
+
+.tier-focus > .corridor-sign-name {
+  display: block;
+  grid-area: name;
+  font-size: 12.5px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tier-focus > .corridor-sign-mark {
+  display: block;
+  grid-area: mark;
+}
+
+.tier-focus > .corridor-sign-label {
+  display: block;
+  grid-area: label;
+  white-space: nowrap;
+}
+
+.tier-focus > .corridor-sign-seats {
+  display: block;
+  grid-area: seats;
+  font-size: 13px;
+}
+
+.tier-focus > .corridor-sign-game {
+  display: block;
+  grid-area: game;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tier-focus > .corridor-sign-tags {
+  display: flex;
+  grid-area: tags;
+  gap: 3px;
+  overflow: hidden;
+}
+
+.tier-focus > .corridor-sign-since {
+  display: block;
+  grid-area: since;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.tier-focus .tag {
+  padding: 0 5px;
+  font-size: 9.5px;
+  line-height: 1.5;
+  border-color: rgba(61, 44, 28, 0.4);
+  background: rgba(61, 44, 28, 0.07);
+  color: #6b5943;
+}
+
+/* 近い扉。卓名 ＋ 3/6 ＋ 記号だけの錠剤型 */
+.tier-pill {
+  max-width: 124px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--r-pill);
+}
+
+.tier-pill > .corridor-sign-mark {
+  display: block;
+}
+
+.tier-pill > .corridor-sign-name {
+  display: block;
+  font-size: 11.5px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tier-pill > .corridor-sign-seats {
+  display: block;
+  font-size: 11.5px;
+}
+
+/* 遠い扉。人数だけ */
+.tier-dot {
+  width: 42px;
+  height: 20px;
+  justify-content: center;
+  padding: 0;
+  border-radius: var(--r-pill);
+}
+
+.tier-dot > .corridor-sign-seats {
+  display: block;
+  font-size: 10.5px;
+}
+
+/* ── 画面外の卓 ───────────────────────────────────── */
+/*
+ * 自由に歩ける空間では「卓が見つからない」が一番効く失敗なので、
+ * 視界から外れた卓は画面の縁に寄せて、矢印でどちらにあるかを出す。
+ * 向きは bearing から作るので、後ろの卓も左後ろ／右後ろを区別して出せる。
+ * 押すとその卓のほうを向く（見えない卓にいきなり入れるより安全）。
+ */
+.corridor-edge {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 44px;
+  max-width: 96px;
+  padding: 4px 8px;
+  background: rgba(22, 16, 10, 0.9);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  color: var(--text);
+  font-size: 10.5px;
+  line-height: 1.3;
+  cursor: pointer;
+  pointer-events: auto;
+  touch-action: manipulation;
+  transform-origin: 50% 50%;
+  will-change: transform;
+}
+
+.corridor-edge:focus-visible {
+  outline: 2px solid var(--gold-2);
+  outline-offset: 2px;
+}
+
+.corridor-edge-arrow {
+  flex: none;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--gold-2);
+}
+
+.corridor-edge-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.corridor-edge-seats {
+  flex: none;
+  color: var(--muted);
+}
+
+/* ── バーチャルスティック ─────────────────────────── */
+/*
+ * 指で歩くための道具。倒した向きと量がそのまま前後・左右の速さになる。
+ * キーボードとバーのボタンで同じことができるので、読み上げからは外してある。
+ *
+ * 位置は安全領域ぶん内側へ寄せる。iPhone の下端にはホームバーがあり、
+ * そこに重ねると指が持っていかれる（viewport-fit=cover のページでのみ効く）。
+ */
+.corridor-stick {
+  position: absolute;
+  left: calc(18px + env(safe-area-inset-left));
+  bottom: calc(18px + env(safe-area-inset-bottom));
+  width: 132px;
+  height: 132px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(230, 166, 63, 0.12), rgba(22, 16, 10, 0.72));
+  border: 1px solid var(--line);
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.corridor-stick-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 58px;
+  height: 58px;
+  margin: -29px 0 0 -29px;
+  border-radius: 50%;
+  background: linear-gradient(180deg, var(--gold-2), var(--gold-3));
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  will-change: transform;
+}
+
+.corridor-stick-label {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -18px;
+  text-align: center;
+  font-size: 10.5px;
+  color: var(--dim);
+}
+
+/*
+ * 画面が低いとき（横向きの iPhone など）はスティックを小さくする。
+ * 132 + 18 + ラベル 18 = 168px は、高さ 326px の場に対して半分を超える。
+ */
+@media (max-height: 460px) {
+  .corridor-stick {
+    width: 104px;
+    height: 104px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+  }
+
+  .corridor-stick-knob {
+    width: 46px;
+    height: 46px;
+    margin: -23px 0 0 -23px;
+  }
+}
+
+/* ── 入店の確認 ───────────────────────────────────── */
+.corridor-confirm {
+  width: min(320px, calc(100vw - 40px));
+  padding: 14px 16px 12px;
+  border: 1px solid var(--line);
+  color: var(--text);
+}
+
+.corridor-confirm::backdrop {
+  background: rgba(8, 5, 3, 0.66);
+}
+
+.corridor-confirm h2 {
+  margin: 0 0 4px;
+  font-family: var(--serif);
+  font-size: 17px;
+  font-weight: 400;
+  color: var(--cream);
+  overflow-wrap: anywhere;
+}
+
+.corridor-confirm p {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.corridor-confirm-foot {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.corridor-confirm-foot .btn {
+  flex: 1;
+  min-height: 44px;
+}
+
+/* ── 一覧へのフォールバック（corridor.html 側の受け皿） ── */
+.corridor-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px 16px 28px;
+}
+
+/*
+ * 酔い対策。揺れを嫌う設定のときは、札の出入りの動きも止める。
+ * 歩きの加速の慣らしを切るのは JS 側（corridor-ui.js の reducedMotion）で見ている。
+ */
+@media (prefers-reduced-motion: reduce) {
+  .corridor-sign,
+  .corridor-edge,
+  .corridor-stick-knob,
+  .corridor-bar .btn {
+    transition: none;
+  }
 }

@@ -2,115 +2,218 @@
 <html lang="ja">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      viewport-fit=cover: このページは画面いっぱいに描くので、ノッチ・ホームバーの
+      内側に収めるための env(safe-area-inset-*) を効かせる必要がある。
+      cover が無いと env() は常に 0 を返す。
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
     <title>宴 -EN- 廊下</title>
     <link rel="stylesheet" href="./assets/en.css" />
     <style>
       /*
        * 廊下ビューの確認用ページ。卓が何百あっても同じ区画を使い回して歩ける、
-       * という見せ方だけを切り出してある。index.html には手を入れていない。
+       * という見せ方だけを切り出してある。3D を index.html から切り離して
+       * 単体で確かめられる場所として残してある。
+       *
+       * 廊下そのものの見た目（バー・札・矢印・スティック・確認）は en.css の
+       * 「廊下ビュー」の節に移した。index.html と同じものを2箇所に持たないため。
+       * ここに残すのは、このページ固有の「画面いっぱいに敷く」寸法と、
+       * 一覧フォールバックの卓カードだけ。
+       */
+
+      /*
+       * 画面いっぱいに敷く。
+       *
+       * 100vh はスマホでは「アドレスバーが引っ込んだときの高さ」なので、
+       * バーが出ている間はその分だけ画面からはみ出す。実際に見えている高さは 100dvh。
+       * 対応していない環境のために 100vh を先に書いて、上書きさせる。
+       *
+       * min-height ではなく height にして overflow を切るのは、
+       * バーが伸びたときにページ全体を伸ばすのではなく、場（stage）を縮めるため。
        */
       body {
-        min-height: 100vh;
+        height: 100vh;
+        height: 100dvh;
         margin: 0;
         display: flex;
         flex-direction: column;
+        overflow: hidden;
       }
 
-      .corridor-bar {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        flex-wrap: wrap;
-        padding: 10px 16px;
-        background: linear-gradient(180deg, var(--panel-3), var(--panel));
-        border-bottom: 1px solid var(--line);
+      /* 画面いっぱいのページでは、注記は角丸の箱ではなく帯として敷く */
+      .corridor-error {
+        flex: none;
+        border-width: 0 0 1px;
+        border-radius: 0;
       }
 
-      .corridor-bar h1 {
+      /* ── 一覧フォールバックの卓カード ─────────────── */
+      /* 見た目は index.html の卓カードに合わせてある（クラス名も同じ） */
+      #rooms-list {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        gap: 18px;
+      }
+
+      .rooms-empty {
+        grid-column: 1 / -1;
         margin: 0;
-        font-size: 16px;
-        color: var(--gold);
-      }
-
-      .corridor-stage {
-        position: relative;
-        flex: 1;
-        min-height: 0;
-        background: var(--ink);
-      }
-
-      /* 画面中央の印。ここに来た扉が「いま見ている卓」になる */
-      .corridor-aim {
-        position: absolute;
-        left: 50%;
-        top: 50%;
-        width: 18px;
-        height: 18px;
-        margin: -9px 0 0 -9px;
-        border: 1px solid rgba(230, 166, 63, 0.55);
-        border-radius: 50%;
-        pointer-events: none;
-      }
-
-      /*
-       * いま見ている卓を文字でも出す。3D の canvas は読み上げられないので、
-       * 一覧カードと同じ情報がここに必ず出るようにしておく。
-       */
-      .corridor-focus {
-        position: absolute;
-        left: 16px;
-        bottom: 16px;
-        max-width: min(340px, calc(100% - 32px));
-        padding: 12px 14px;
-        background: rgba(22, 16, 10, 0.88);
-        border: 1px solid var(--line);
+        padding: 40px 20px;
+        text-align: center;
+        font-size: 13px;
+        color: var(--dim);
+        border: 1px dashed var(--line);
         border-radius: var(--r-lg);
       }
 
-      .corridor-focus h2 {
-        margin: 0 0 4px;
-        font-size: 17px;
+      .room {
+        display: flex;
+        flex-direction: column;
+        padding: 16px 18px 0;
+        overflow: hidden;
       }
 
-      .corridor-focus p {
-        margin: 0;
-        font-size: 13px;
-        color: var(--muted);
+      .room-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 12px;
       }
 
-      .corridor-hint {
-        margin-left: auto;
+      .room-code {
+        font-family: var(--serif);
         font-size: 12px;
-        color: var(--dim);
+        letter-spacing: 0.22em;
+        color: var(--muted);
       }
 
-      .corridor-error {
-        padding: 24px;
+      .room h2 {
+        font-family: var(--serif);
+        font-size: 19px;
+        font-weight: 400;
+        margin: 0 0 8px;
+        color: var(--cream);
+        overflow-wrap: anywhere;
+      }
+
+      .room-meta {
+        margin: 0 0 16px;
+        font-size: 12.5px;
         color: var(--muted);
+        overflow-wrap: anywhere;
+      }
+
+      .room-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-bottom: 16px;
+      }
+
+      .room-seats {
+        margin-bottom: 16px;
+        font-size: 12.5px;
+        color: var(--muted);
+      }
+
+      .room-foot {
+        display: flex;
+        align-items: stretch;
+        margin: auto -18px 0;
+        border-top: 1px solid var(--line-soft);
+      }
+
+      .room-foot .btn {
+        flex: 1;
+        min-height: 44px;
+        border: none;
+        border-radius: 0;
+        font-family: var(--serif);
+        letter-spacing: 0.4em;
+        text-indent: 0.4em;
+        padding: 13px;
+      }
+
+      .room-since {
+        display: flex;
+        align-items: center;
+        padding: 0 14px;
+        font-size: 11.5px;
+        color: var(--dim);
+        white-space: nowrap;
       }
     </style>
   </head>
   <body>
     <div class="corridor-bar">
       <h1>今夜、灯りのついている卓</h1>
-      <button id="left" class="btn" type="button">左を向く</button>
-      <button id="back" class="btn" type="button">下がる</button>
-      <button id="fwd" class="btn" type="button">進む</button>
-      <button id="right" class="btn" type="button">右を向く</button>
-      <button id="enter" class="btn btn-gold" type="button" disabled>この卓に入る</button>
+
+      <div class="corridor-group" role="group" aria-label="表示の切り替え">
+        <button id="mode-3d" class="btn corridor-mode" type="button" aria-pressed="true">
+          店内を歩く
+        </button>
+        <button id="mode-list" class="btn corridor-mode" type="button" aria-pressed="false">
+          一覧で選ぶ
+        </button>
+      </div>
+
+      <div id="walk-controls" class="corridor-group">
+        <button id="left" class="btn" type="button">左を向く</button>
+        <button id="back" class="btn" type="button">下がる</button>
+        <button id="fwd" class="btn" type="button">進む</button>
+        <button id="right" class="btn" type="button">右を向く</button>
+        <button id="enter" class="btn btn-gold" type="button" disabled>この卓に入る</button>
+      </div>
+
+      <div class="corridor-group" role="group" aria-label="VC の動作確認">
+        <button id="vc-join" class="btn" type="button">VCに入る（止める）</button>
+        <button id="vc-leave" class="btn" type="button" disabled>VCを抜ける（再開する）</button>
+      </div>
+
       <span id="count" class="corridor-hint"></span>
     </div>
 
+    <p id="error" class="corridor-error hidden"></p>
+
     <div id="stage" class="corridor-stage">
       <div class="corridor-aim" aria-hidden="true"></div>
-      <div class="corridor-focus">
-        <h2 id="focus-name">—</h2>
-        <p id="focus-meta" aria-live="polite">通りかかった扉の札がここに出ます</p>
+
+      <div id="signs" class="corridor-layer" role="group" aria-label="いま見えている卓の札"></div>
+      <div id="edges" class="corridor-layer" role="group" aria-label="画面の外にある卓"></div>
+
+      <div class="corridor-layer">
+        <p id="signs-note" class="corridor-note"></p>
+
+        <div class="corridor-focus">
+          <h2 id="focus-name">—</h2>
+          <p id="focus-meta" aria-live="polite">通りかかった扉の札がここに出ます</p>
+        </div>
+
+        <div id="stick" class="corridor-stick" aria-hidden="true">
+          <div id="stick-knob" class="corridor-stick-knob"></div>
+          <span class="corridor-stick-label">歩く</span>
+        </div>
       </div>
     </div>
 
-    <p id="error" class="corridor-error hidden"></p>
+    <section id="list-view" class="corridor-list hidden" aria-label="卓の一覧">
+      <div id="rooms-list"></div>
+    </section>
+
+    <dialog id="confirm" class="corridor-confirm card" aria-labelledby="confirm-name">
+      <h2 id="confirm-name"></h2>
+      <p id="confirm-state"></p>
+      <p id="confirm-meta"></p>
+      <p id="confirm-since"></p>
+      <div class="corridor-confirm-foot">
+        <button id="confirm-cancel" class="btn" type="button">やめる</button>
+        <button id="confirm-ok" class="btn btn-gold" type="button">入店する</button>
+      </div>
+    </dialog>
 
     <script type="module" src="./corridor.js"></script>
   </body>
