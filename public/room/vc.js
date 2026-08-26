@@ -6,6 +6,13 @@
  *   - ルーム内の VC 対象者（vcEligible）とのフルメッシュ P2P 接続
  *   - MDN の Perfect Negotiation パターンによるオファー衝突の解消
  *   - マイクのミュート、カメラの ON/OFF（初期 OFF・§3.6）
+ *   - 画面共有の開始／停止（docs/design/vc-screenshare.md）
+ *
+ * 画面共有の不変条件（vc-screenshare.md §4.1）:
+ *   **送出する映像トラックは常に高々1本**。カメラと画面は排他で、共有中は
+ *   自分のカメラ映像は送出されない（フルメッシュではエンコードが
+ *   PeerConnection ごとに独立しており、両方送ると負荷が倍になるため）。
+ *   ここを崩すと、受信側の video 要素がどちらを描くかブラウザ任せになる。
  *
  * 設計:
  *   部屋ページ（room.html）と開発用ページの双方から使えるよう、
@@ -25,7 +32,17 @@
    *   { kind: "bye" }                           … VC 離脱の告知
    *   { kind: "desc",    description }          … offer / answer（RTCSessionDescription）
    *   { kind: "ice",     candidate }            … ICE candidate（null は収集完了）
-   *   { kind: "video",   on }                    … 自分の映像送出の ON / OFF
+   *   { kind: "video",   on, source, surface }  … 自分の映像送出の ON / OFF
+   *
+   * video の source / surface は画面共有で足した拡張（vc-screenshare.md §4.3）。
+   *   source  … "camera" | "screen"。省略時は "camera" とみなす。
+   *             on の意味は変えていないので、source を知らない古いクライアントと
+   *             混ざっても表示の出し入れは従来どおり動く
+   *   surface … "monitor" | "window" | "browser" | null。共有者が
+   *             track.getSettings().displaySurface で事後確認した自己申告値。
+   *             受信側では表示にしか使わない（信頼して制御に使ってはいけない）
+   * サーバーは payload を解釈せずそのまま転送するので、ここに相乗りする限り
+   * server/types.ts / server/rooms.ts の契約は変えなくてよい（§4.3）。
    */
 
   /**
@@ -87,12 +104,61 @@
   const QUALITY_FPS_STOP_RATIO = 0.5;
   /** 実効送信 FPS が要求値のこの比率以上なら回復【暫定値】 */
   const QUALITY_FPS_RESUME_RATIO = 0.75;
+  /**
+   * 画面共有中、framesEncoded が1フレームも増えないまま何サンプル続いたら
+   * 「エンコードが成立していない」と見なすか（vc-screenshare.md §8.4）【暫定値】。
+   */
+  const SCREEN_STALL_SAMPLES = 3;
+
+  // -------------------------------------------------------------------------
+  // 画面共有の送出プロファイル（vc-screenshare.md §6.2 / §6.3）
+  //
+  // メッシュではエンコーダも輻輳制御も PeerConnection ごとに独立しているため、
+  // ここで決めた1本ぶんの数字が、そのままピアの数だけ上りと CPU に乗る
+  // （6人なら5本＝標準案で 3.5 Mbps・720p30 換算 1.67 倍）。
+  // 単体通話の感覚で上げてはいけない。
+  // -------------------------------------------------------------------------
+
+  /**
+   * 送出プロファイル。
+   *   text   … 既定。資料・コードを読ませる用途。1280×720 は「拡大表示があれば
+   *            1920px 幅の 14px 文字が 9.3px で読める」ことから決めた値で、
+   *            拡大表示（§7）と一組で意味を持つ
+   *   motion … 動画・ゲーム画面用。text のままだと解像度を守るために fps が
+   *            捨てられて紙芝居になる
+   *   light  … TURN リレー時と、品質劣化1回目の降格先（§6.6 / §8.2）
+   */
+  const SCREEN_PROFILES = {
+    text: { width: 1280, height: 720, frameRate: 10, maxBitrate: 700000, contentHint: "text" },
+    motion: { width: 1280, height: 720, frameRate: 24, maxBitrate: 1200000, contentHint: "motion" },
+    light: { width: 640, height: 360, frameRate: 5, maxBitrate: 250000, contentHint: "text" },
+  };
+
+  /** 利用者に出す「内容の種類」の既定（§10。前回値は覚えない） */
+  const SCREEN_DEFAULT_KIND = "text";
+
+  /**
+   * カメラの取り込み制約。ON にするときと、画面共有をやめて戻すときの
+   * 両方から使うので1か所にまとめてある（取り直しで画質が変わらないように）。
+   */
+  const CAMERA_CONSTRAINTS = {
+    audio: false,
+    video: { width: { ideal: 640 }, height: { ideal: 360 } },
+  };
 
   /** 外から注入される設定 */
   const config = {
     send: null,
     container: null,
     onStatus: null,
+    /**
+     * 拡大表示（vc-screenshare.md §7）の開閉を頼む口。
+     * 覆いそのものは app.js が持つ。タイルは vc.js が作って消すので、
+     * 要素の持ち主を跨がないよう「開けてほしい／閉じてほしい」だけを渡す。
+     *   引数 { playerId, nickname, stream } … 開く
+     *   引数 null                            … 閉じる（共有が止まったとき）
+     */
+    onZoom: null,
     /**
      * getStats の注入口。既定は RTCPeerConnection.getStats() をそのまま呼ぶ。
      * テストから統計を差し替えられるようにするためだけに存在する。
@@ -114,6 +180,41 @@
     micStream: null,
     /** カメラの MediaStream */
     camStream: null,
+    /**
+     * 画面共有の MediaStream。null でなければ「共有中」。
+     * カメラと同時に持つことはある（共有中もカメラは切らない）が、
+     * 送出されるのは常に画面のほうだけ（§4.1 の不変条件）。
+     */
+    screenStream: null,
+    /** 画面共有の状態。共有していないあいだも既定値のまま残す */
+    screen: {
+      /** 利用者が選んだ内容の種類。"text" | "motion"（§10） */
+      kind: SCREEN_DEFAULT_KIND,
+      /** いま当てているプロファイル名。"text" | "motion" | "light" */
+      profile: SCREEN_DEFAULT_KIND,
+      /** track.getSettings().displaySurface の事後確認値（§9-1） */
+      surface: null,
+      /** getDisplayMedia の応答待ちか（開始の連打よけ・§9-4） */
+      starting: false,
+      /**
+       * 開始処理の世代。開始は getDisplayMedia の選択待ちで数十秒かかり得るので、
+       * その最中に停止・競合が割り込んだことを await の後で見分けるために持つ。
+       * 共有を手放すたびに進める。
+       */
+      gen: 0,
+      /** TURN リレーを検知したか（§6.6）。検知したら軽い案へ落とす */
+      relay: false,
+      /**
+       * 共有をやめたときにカメラへ戻すか（オーナー判断）。
+       * 共有中はカメラを実際に止めるので、「戻す約束」だけをここに残す。
+       * 共有中のカメラ操作（setCamera）は、この約束の入り切りとして働く。
+       */
+      cameraWasOn: false,
+      /** 品質劣化で軽い案へ降格したか（§8.2 の一段目） */
+      demoted: false,
+      /** 降格した時刻（Date.now()）。最小保持時間を測る */
+      demotedAt: null,
+    },
     /** ミュート中か */
     muted: false,
     /** playerId → ピア情報 */
@@ -143,9 +244,13 @@
       stoppedAt: null,
       /** この VC 参加中に自動停止した回数 */
       autoStopCount: 0,
-      /** カメラを ON にした時刻（ウォームアップ判定用） */
-      camOnAt: null,
-      /** カメラ ON 時の要求 FPS。実効 FPS の比率を出す分母になる */
+      /**
+       * 映像の送出を始めた時刻（ウォームアップ判定用）。
+       * カメラ⇔画面の切り替えでもエンコーダと帯域推定は立ち上げ直しになるので、
+       * 映像ソースが変わるたびに打ち直す（vc-screenshare.md §8.3 / T9）。
+       */
+      videoOnAt: null,
+      /** 映像の送出開始時の要求 FPS。実効 FPS の比率を出す分母になる */
       requestedFps: null,
       /** 回復を通知済みか（同じ回復で何度も通知しないための掛け金） */
       recovered: false,
@@ -207,11 +312,48 @@
     return playerId.slice(0, 8);
   }
 
-  /** 送出中のローカルトラック（マイク＋カメラ） */
+  // -------------------------------------------------------------------------
+  // 映像ソース（§4.1 の不変条件「送出する映像トラックは常に高々1本」）
+  // -------------------------------------------------------------------------
+
+  /** いま送出している映像の出どころ。"none" | "camera" | "screen" */
+  function currentVideoSource() {
+    if (state.screenStream !== null) return "screen";
+    if (state.camStream !== null) return "camera";
+    return "none";
+  }
+
+  /** 送出する映像の MediaStream。画面共有が優先（§4.1） */
+  function activeVideoStream() {
+    if (state.screenStream !== null) return state.screenStream;
+    return state.camStream;
+  }
+
+  /** 送出する映像トラック。無ければ null */
+  function activeVideoTrack() {
+    const stream = activeVideoStream();
+    if (stream === null) return null;
+    const track = stream.getVideoTracks()[0];
+    return track === undefined ? null : track;
+  }
+
+  /** 画面共有を始められる端末か。UA 文字列は見ない（§2） */
+  function screenShareSupported() {
+    const devices = global.navigator === undefined ? undefined : global.navigator.mediaDevices;
+    return devices !== undefined && devices !== null &&
+      typeof devices.getDisplayMedia === "function";
+  }
+
+  /**
+   * 送出中のローカルトラック（マイク＋映像1本）。
+   * 映像はカメラ固定ではなく activeVideoTrack() を返す。ここを直さないと、
+   * 共有中に入ってきたピアにだけ画面が載らない（§5 T3）。
+   */
   function localTracks() {
     const tracks = [];
     if (state.micStream !== null) tracks.push(...state.micStream.getAudioTracks());
-    if (state.camStream !== null) tracks.push(...state.camStream.getVideoTracks());
+    const video = activeVideoTrack();
+    if (video !== null) tracks.push(video);
     return tracks;
   }
 
@@ -241,11 +383,42 @@
     video.className = "vc-video";
     video.hidden = true;
 
+    // 共有中の札と拡大の口（§9-3 / §7）。共有していないあいだは隠しておく
+    const share = createShareBadge("画面を共有中", () => requestZoom(playerId));
+    share.zoom.setAttribute("aria-label", `${nicknameOf(playerId)} さんの共有画面を拡大表示`);
+
     root.appendChild(label);
     root.appendChild(video);
+    root.appendChild(share.root);
     root.appendChild(audio);
     if (config.container !== null) config.container.appendChild(root);
-    return { root, label, audio, video };
+    return { root, label, audio, video, share };
+  }
+
+  /**
+   * 「画面を共有中」の札を作る（§9-3）。
+   * 文言は固定文字列で、ニックネームを混ぜるときも textContent で入れる（§3.8）。
+   * onZoom を渡すと「拡大」の押し口が付く。拡大表示が無いとタイルの中では
+   * 文字が読めない（§7.1）ので、この押し口は飾りではなく機能の一部である。
+   */
+  function createShareBadge(text, onZoom) {
+    const root = document.createElement("div");
+    root.className = "vc-share-badge";
+    root.hidden = true;
+
+    const caption = document.createElement("span");
+    caption.className = "vc-share-text";
+    caption.textContent = text;
+    root.appendChild(caption);
+
+    const zoom = document.createElement("button");
+    zoom.type = "button";
+    zoom.className = "vc-share-zoom";
+    zoom.textContent = "拡大";
+    zoom.addEventListener("click", onZoom);
+    root.appendChild(zoom);
+
+    return { root, caption, zoom };
   }
 
   /** 自動再生が拒否された場合に備えて再生を試みる（iOS Safari 対策） */
@@ -289,20 +462,97 @@
       video.muted = true;
       video.className = "vc-video";
       video.hidden = true;
+      // 共有中は顔が出ない（§4.1）ので、不具合と誤解されないよう札で断る（§9-3）
+      const share = createShareBadge("画面を共有中（カメラは停止中）", () => {
+        if (state.selfId !== null) requestZoom(state.selfId);
+      });
+      share.root.classList.add("vc-share-self");
+      share.zoom.setAttribute("aria-label", "自分が共有している画面を拡大表示");
+      // 止めるのは常に1手で済ませる（§9-1）。共有中ずっと目に入る位置に置く
+      const stop = document.createElement("button");
+      stop.type = "button";
+      stop.className = "vc-share-stop";
+      stop.textContent = "共有をやめる";
+      stop.addEventListener("click", () => {
+        stopScreenShare({ message: "画面共有を止めました" });
+      });
+      share.root.appendChild(stop);
       root.appendChild(label);
       root.appendChild(video);
+      root.appendChild(share.root);
       config.container.appendChild(root);
-      state.localVideo = { root, video };
+      state.localVideo = { root, video, share };
     }
     const video = state.localVideo.video;
-    if (state.camStream === null) {
+    // 送出しているものを、そのまま自分にも見せる。共有中に「いま外に出ている
+    // もの」が自分の画面から消えると、事故に気づけなくなる（§9-1）
+    const stream = activeVideoStream();
+    const sharing = currentVideoSource() === "screen";
+    state.localVideo.share.root.hidden = !sharing;
+    state.localVideo.root.classList.toggle("vc-peer-sharing", sharing);
+    video.classList.toggle("vc-video-screen", sharing);
+    if (stream === null) {
       video.hidden = true;
       video.srcObject = null;
       return;
     }
     video.hidden = false;
-    video.srcObject = state.camStream;
+    video.srcObject = stream;
     tryPlay(video);
+  }
+
+  /**
+   * 相手のタイルの共有表示を更新する（§7.3 / §9-3）。
+   * 画面は端が切れると読みたい部分（ツールバー・行頭）が消えるので、
+   * 共有中のタイルだけ object-fit を contain に切り替える。
+   */
+  function updatePeerShareView(peer) {
+    const sharing = peer.remoteVideoSource === "screen";
+    peer.view.share.root.hidden = !sharing;
+    peer.view.root.classList.toggle("vc-peer-sharing", sharing);
+    peer.view.video.classList.toggle("vc-video-screen", sharing);
+    peer.view.share.zoom.setAttribute(
+      "aria-label",
+      `${nicknameOf(peer.id)} さんの共有画面を拡大表示`,
+    );
+  }
+
+  /**
+   * 拡大表示を頼む（§7.2）。覆いは app.js が持っているので、
+   * ここでは「誰の・どのストリームを」だけを渡す。
+   * 同じ MediaStream を2つの video に張るのは通常の使い方で、
+   * デコードは1回・描画が2回になるだけ（追加の受信帯域はゼロ）。
+   */
+  function requestZoom(playerId) {
+    if (typeof config.onZoom !== "function") return;
+    const stream = playerId === state.selfId ? activeVideoStream() : peerShareStream(playerId);
+    if (stream === null) return;
+    try {
+      config.onZoom({
+        playerId,
+        nickname: playerId === state.selfId ? "あなた" : nicknameOf(playerId),
+        stream,
+      });
+    } catch (e) {
+      console.error("VC onZoom failed:", e);
+    }
+  }
+
+  /** 共有中のピアの受信ストリーム。共有していなければ null */
+  function peerShareStream(playerId) {
+    const peer = state.peers.get(playerId);
+    if (peer === undefined || peer.remoteVideoSource !== "screen") return null;
+    return peer.stream;
+  }
+
+  /** 拡大表示を閉じてもらう。共有が止まったら黒い枠だけを残さない（§7.2） */
+  function closeZoom(playerId) {
+    if (typeof config.onZoom !== "function") return;
+    try {
+      config.onZoom(null, playerId);
+    } catch (e) {
+      console.error("VC onZoom failed:", e);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -338,13 +588,34 @@
       degraded: false,
       /** 相手が映像の送出を止めていると申告しているか（kind: "video"） */
       remoteVideoOff: false,
+      /**
+       * 相手が送っている映像の出どころ。"camera" | "screen" | null（送出なし）。
+       * 届いたトラックがカメラか画面かは受信側では判別できないので、
+       * 相手の告知（§4.3）だけが根拠になる。表示にしか使わない。
+       */
+      remoteVideoSource: null,
+      /** 相手が自己申告した displaySurface。表示にしか使わない（§4.3） */
+      remoteSurface: null,
+      /**
+       * 画面共有中に framesEncoded が増えなかった連続サンプル数（§8.4）。
+       * ハードウェアエンコーダの枯渇を、通知経路に依存せず統計から拾うため。
+       */
+      stallCount: 0,
     };
     state.peers.set(playerId, peer);
     peer.view.audio.srcObject = peer.stream;
 
     for (const track of localTracks()) {
-      const sender = pc.addTrack(track, track.kind === "video" ? state.camStream : state.micStream);
-      if (track.kind === "video") peer.videoSender = sender;
+      // 映像に紐づける MediaStream は「いま送出しているほう」。camStream 固定だと
+      // 共有中に null を渡してしまう（§5 T4）
+      const sender = pc.addTrack(
+        track,
+        track.kind === "video" ? activeVideoStream() : state.micStream,
+      );
+      if (track.kind === "video") {
+        peer.videoSender = sender;
+        applyEncodingProfile(sender, profileFor(currentVideoSource()));
+      }
     }
 
     pc.onnegotiationneeded = async () => {
@@ -445,6 +716,9 @@
     peer.view.audio.srcObject = null;
     peer.view.video.srcObject = null;
     peer.view.root.remove();
+    // 共有者が切断・キックされたら拡大表示も畳む。共有権はピアの状態から
+    // 導いているので（§4.4）、ここでピアが消えた時点で自動的に解ける
+    if (peer.remoteVideoSource === "screen") closeZoom(playerId);
   }
 
   /** すべてのピアを閉じる */
@@ -475,7 +749,7 @@
         onCandidate(from, payload.candidate);
         return;
       case "video":
-        onVideoState(from, payload.on === true);
+        onVideoState(from, payload);
         return;
       default:
         return;
@@ -499,6 +773,9 @@
     }
     signal(from, { kind: "ready", session: state.session });
     ensurePeer(from, session);
+    // ready → video の順に届く（WS は1接続を共用し、中継は順に send する）。
+    // 受け手は ready でピアを同期的に作ってから戻るので取りこぼさない（§4.3）
+    announceVideoStateTo(from);
   }
 
   /** offer / answer の処理（MDN Perfect Negotiation） */
@@ -536,16 +813,104 @@
    * （Chrome 151 で実測。最後のフレームが固まったまま残り続ける）、
    * 止めたことを明示的に伝えて表示を畳む。伝わらなくても音声には影響しない。
    */
-  function onVideoState(from, on) {
+  function onVideoState(from, payload) {
     const peer = state.peers.get(from);
     if (peer === undefined) return;
+    const on = payload.on === true;
+    const wasSharing = peer.remoteVideoSource === "screen";
     peer.remoteVideoOff = !on;
+    // source を知らない古いクライアントからの告知は "camera" とみなす（§4.3）
+    peer.remoteVideoSource = on ? (payload.source === "screen" ? "screen" : "camera") : null;
+    peer.remoteSurface = on && typeof payload.surface === "string" ? payload.surface : null;
     updateVideoVisibility(peer);
+    updatePeerShareView(peer);
+    const sharing = peer.remoteVideoSource === "screen";
+    if (sharing !== wasSharing) {
+      // 共有の開始・停止はログに残す。誰が何を共有していたかを後から追えるように
+      notify(
+        "vcState",
+        sharing
+          ? `${nicknameOf(from)} さんが画面共有を始めました`
+          : `${nicknameOf(from)} さんが画面共有を止めました`,
+      );
+      if (!sharing) closeZoom(from);
+      // 告知が行き違って2人が同時に共有した場合は、ここで1人に収束させる
+      if (sharing) resolveShareConflict();
+    }
   }
 
-  /** 自分の映像送出の ON / OFF を全ピアへ伝える */
-  function announceVideoState(on) {
-    for (const id of state.peers.keys()) signal(id, { kind: "video", on });
+  /**
+   * 自分の映像送出の状態を組み立てる（§4.3）。
+   * 引数は取らず、必ず現在の state から導く。「送ったつもり」と実際の送出が
+   * 食い違うと、相手のタイルの見た目だけが取り残されるため。
+   */
+  function videoStatePayload() {
+    const source = currentVideoSource();
+    return {
+      kind: "video",
+      on: source !== "none",
+      // 送出していないときも source は "camera" にしておく（既定値と同じ扱い）
+      source: source === "screen" ? "screen" : "camera",
+      surface: source === "screen" ? state.screen.surface : null,
+    };
+  }
+
+  /** 自分の映像送出の状態を全ピアへ伝える */
+  function announceVideoState() {
+    const payload = videoStatePayload();
+    for (const id of state.peers.keys()) signal(id, payload);
+  }
+
+  /**
+   * ピアを作った／受け入れた直後に、そのピアだけへ現在の映像状態を送る（§4.3）。
+   * これが無いと「自分が映像を出した後で入ってきた相手」に source が飛ばず、
+   * その人のタイルだけ object-fit も札も間違ったままになる。
+   */
+  function announceVideoStateTo(playerId) {
+    signal(playerId, videoStatePayload());
+  }
+
+  /** 画面を共有していると告知しているピアの playerId */
+  function sharingPeerIds() {
+    const ids = [];
+    for (const [id, peer] of state.peers) {
+      if (peer.remoteVideoSource === "screen") ids.push(id);
+    }
+    return ids;
+  }
+
+  /**
+   * 同時共有の競合を解く。★純粋関数★（§4.4）
+   *
+   * 告知が行き違う窓（片道 RTT ぶん）で2人が同時に開始し得る。
+   * playerId の辞書順で小さい方が共有権を持つ、という規則を両者が同じように
+   * 適用すれば必ず1人に収束する。時刻（Date.now()）は端末間で比較できない
+   * ので使わない（両者の判定が食い違い、どちらも止まる／どちらも残る）。
+   *
+   * @param {string|null} selfId 自分の playerId
+   * @param {string[]} peerIds 画面を共有していると分かっている相手の playerId
+   * @returns {string|null} 共有権を持つ playerId
+   */
+  function resolveShareOwner(selfId, peerIds) {
+    let owner = typeof selfId === "string" ? selfId : null;
+    for (const id of peerIds) {
+      if (typeof id !== "string") continue;
+      if (owner === null || id < owner) owner = id;
+    }
+    return owner;
+  }
+
+  /** 自分が共有権を失っていたら、自分の共有だけを畳む（§4.4） */
+  function resolveShareConflict() {
+    if (state.screenStream === null) return;
+    const rivals = sharingPeerIds();
+    if (rivals.length === 0) return;
+    const owner = resolveShareOwner(state.selfId, rivals);
+    if (owner === state.selfId) return;
+    // 負けた側には必ず理由を出す。黙って消えると不具合にしか見えない
+    stopScreenShare({
+      message: `${nicknameOf(owner)} さんの共有と重なったため、画面共有を止めました`,
+    });
   }
 
   /** ICE candidate の処理。衝突で捨てたオファー由来の失敗は無視する */
@@ -583,7 +948,11 @@
       connected: player.connected === true,
     });
     const peer = state.peers.get(player.id);
-    if (peer !== undefined) peer.view.label.textContent = player.nickname;
+    if (peer !== undefined) {
+      peer.view.label.textContent = player.nickname;
+      // 拡大ボタンの読み上げ名も一緒に直す（古い名前が読まれないように）
+      updatePeerShareView(peer);
+    }
   }
 
   /** VC 参加中であることを対象者全員へ告知する */
@@ -598,6 +967,132 @@
     closeAllPeers();
     state.session = randomId();
     announceReady();
+  }
+
+  // -------------------------------------------------------------------------
+  // 映像トラックの差し替えと送出パラメータ（vc-screenshare.md §4.2 / §6.4）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 1ピアぶんの映像を差し替える。track は null 可（送出をやめる）。
+   *
+   * sender が既にあれば replaceTrack で済み、再ネゴシエーションは要らない。
+   * 無い場合（カメラを一度も ON にしていないピア）は addTrack になり、
+   * onnegotiationneeded から offer / answer が1往復する。これは既存の
+   * カメラ ON とまったく同じ経路で、衝突は Perfect Negotiation が解消する。
+   *
+   * 例外は握りつぶす。1本の失敗で他のピアの差し替えまで止めないため（E7）。
+   */
+  async function applyVideoTrack(peer, track) {
+    if (peer.closed) return;
+    if (peer.videoSender !== null) {
+      try {
+        await peer.videoSender.replaceTrack(track);
+      } catch (e) {
+        console.error("VC replaceTrack failed:", e);
+      }
+    } else if (track !== null) {
+      try {
+        peer.videoSender = peer.pc.addTrack(track, activeVideoStream());
+      } catch (e) {
+        console.error("VC addTrack failed:", e);
+        return;
+      }
+    }
+    await applyEncodingProfile(peer.videoSender, profileFor(currentVideoSource()));
+  }
+
+  /** 全ピアの映像を差し替える。1本が失敗しても残りは進める（E7） */
+  async function applyVideoTrackAll(track) {
+    const peers = [...state.peers.values()];
+    await Promise.all(peers.map((peer) => applyVideoTrack(peer, track)));
+  }
+
+  /**
+   * sender 1個に送出パラメータを当てる（§6.4）。
+   *
+   * **必ず sender ごとに呼ぶ。** メッシュでは輻輳制御（BWE）も
+   * PeerConnection ごとに独立しているので、まとめて1回では片側しか効かない。
+   *
+   * profile が null（カメラ）のときは、画面共有で入れた上限を外して
+   * degradationPreference も戻す。カメラは逆に、解像度を捨ててでも
+   * 滑らかさを守るほうが目的に合う。
+   */
+  async function applyEncodingProfile(sender, profile) {
+    if (sender === null || sender === undefined) return;
+    if (typeof sender.getParameters !== "function") return;
+    try {
+      const params = sender.getParameters();
+      if (!Array.isArray(params.encodings) || params.encodings.length === 0) {
+        params.encodings = [{}];
+      }
+      if (profile === null) {
+        // 画面共有で入れた上限と方針を「外す」。カメラ側に別の値を積極的に
+        // 指定はしない（この機能の前はカメラで setParameters を呼んでおらず、
+        // ブラウザの既定に任せていた。その挙動を変えないため）
+        delete params.encodings[0].maxBitrate;
+        delete params.encodings[0].maxFramerate;
+        delete params.degradationPreference;
+      } else {
+        params.encodings[0].maxBitrate = profile.maxBitrate;
+        params.encodings[0].maxFramerate = profile.frameRate;
+        // encodings の外側に置く（W3C 仕様）。Firefox は contentHint に
+        // 非対応なので、ここで明示して挙動を揃える
+        params.degradationPreference = "maintain-resolution";
+      }
+      await sender.setParameters(params);
+    } catch (e) {
+      console.error("VC setParameters failed:", e);
+    }
+  }
+
+  /** 映像ソースに対応する送出プロファイル。カメラ・停止中は null */
+  function profileFor(source) {
+    if (source !== "screen") return null;
+    const profile = SCREEN_PROFILES[state.screen.profile];
+    return profile === undefined ? SCREEN_PROFILES[SCREEN_DEFAULT_KIND] : profile;
+  }
+
+  /**
+   * 実際に使うプロファイル名を決める。★純粋関数★（§6.6）
+   *
+   * TURN リレーは in と out の両方が VPS を通るので、標準案だと共有者1人で
+   * VPS に 7 Mbps 乗る。ボトルネックは VPS という共有資源なので、
+   * 1本でも relay があれば共有者単位で軽い案へ落とす。
+   *
+   * @param {{ requested:string, relay:boolean }} options
+   * @returns {"text"|"motion"|"light"}
+   */
+  function pickProfile(options) {
+    if (options.relay === true) return "light";
+    const requested = options.requested;
+    return requested === "motion" ? "motion" : "text";
+  }
+
+  /**
+   * getDisplayMedia に渡す制約を組み立てる。★純粋関数★（§6.4）
+   *
+   * **ideal / max しか入れてはいけない。** min / exact / advanced を渡すと
+   * TypeError で落ちる（W3C 仕様）。上限を保証したいので max を使う。
+   * 制約は「利用者が画面を選んだ後」にしか効かず、Chromium の既定は
+   * 2880×1800 / 最大 120fps なので、ここで絞らないとそれを掴む。
+   */
+  function displayConstraints(profile) {
+    return {
+      video: {
+        width: { max: profile.width },
+        height: { max: profile.height },
+        frameRate: { max: profile.frameRate },
+      },
+      // 共有音声はスコープ外（§6.5）。Chrome / Edge しか対応しておらず、
+      // フルメッシュのミキシング・エコー対策が別途要る
+      audio: false,
+      // EN のタブ自身を共有すると無限の入れ子になるうえ、その部屋の
+      // チャットや参加者名がそのまま外へ出る（Chrome 112+。他では無視される）
+      selfBrowserSurface: "exclude",
+      surfaceSwitching: "include",
+      systemAudio: "exclude",
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -635,8 +1130,13 @@
       limitationReason: null,
       rtt: null,
       outgoingBitrate: null,
+      /** 選ばれた経路が TURN リレーか（§6.6）。判定できなければ null */
+      relay: null,
+      /** エンコーダの実装名。ソフトへ落ちたのか動いていないのかの切り分け用（§8.4） */
+      encoderImplementation: null,
     };
     const pairs = [];
+    const candidates = new Map();
     let selectedPairId = null;
     report.forEach((s) => {
       // 音声・映像の区別は RTCRtpStreamStats.kind で行う。
@@ -650,10 +1150,15 @@
         if (raw.limitationReason === null && typeof s.qualityLimitationReason === "string") {
           raw.limitationReason = s.qualityLimitationReason;
         }
+        if (raw.encoderImplementation === null && typeof s.encoderImplementation === "string") {
+          raw.encoderImplementation = s.encoderImplementation;
+        }
       } else if (s.type === "transport" && typeof s.selectedCandidatePairId === "string") {
         selectedPairId = s.selectedCandidatePairId;
       } else if (s.type === "candidate-pair") {
         pairs.push(s);
+      } else if (s.type === "local-candidate" || s.type === "remote-candidate") {
+        if (typeof s.id === "string") candidates.set(s.id, s);
       }
     });
     const pair = pickCandidatePair(pairs, selectedPairId);
@@ -662,8 +1167,27 @@
       if (typeof pair.availableOutgoingBitrate === "number") {
         raw.outgoingBitrate = pair.availableOutgoingBitrate;
       }
+      raw.relay = pairUsesRelay(pair, candidates);
     }
     return raw;
+  }
+
+  /**
+   * 選ばれた経路が TURN リレーを通っているか（§6.6）。
+   * candidate-pair の local / remote を candidate 統計で引いて candidateType を見る。
+   * どちらの候補も引けなければ判定不能として null を返す（推測しない）。
+   */
+  function pairUsesRelay(pair, candidates) {
+    let known = false;
+    for (const key of ["localCandidateId", "remoteCandidateId"]) {
+      const id = pair[key];
+      if (typeof id !== "string") continue;
+      const candidate = candidates.get(id);
+      if (candidate === undefined || typeof candidate.candidateType !== "string") continue;
+      known = true;
+      if (candidate.candidateType === "relay") return true;
+    }
+    return known ? false : null;
   }
 
   /** 実際に使われている candidate-pair を選ぶ */
@@ -681,10 +1205,21 @@
     return null;
   }
 
-  /** ウォームアップを過ぎて判定に使ってよいピアか */
+  /**
+   * ウォームアップを過ぎて判定に使ってよいピアか。
+   *
+   * 基準はカメラ ON 時刻ではなく「映像の送出を始めた時刻」。replaceTrack で
+   * カメラ→画面へ切り替えるとエンコーダも帯域推定も立ち上げ直しになり、
+   * カメラ ON 直後とまったく同じ過渡状態（実測 9.8 秒 / 18.1 秒の
+   * "bandwidth" 誤検知）が再現するため（vc-screenshare.md §8.3）。
+   *
+   * 【未実測】QUALITY_CAMERA_WARMUP_MS = 30 秒が画面共有でも足りるかは
+   * 計測できていない（実機・実回線が要る）。恒久的な守りは sampleCause() の
+   * 「主判定の bandwidth に裏付けを要求する」側にあり、この時間は多層防御。
+   */
   function isWarmedUp(peer, now) {
-    if (state.quality.camOnAt === null) return false;
-    if (now - state.quality.camOnAt < QUALITY_CAMERA_WARMUP_MS) return false;
+    if (state.quality.videoOnAt === null) return false;
+    if (now - state.quality.videoOnAt < QUALITY_CAMERA_WARMUP_MS) return false;
     return now - peer.createdAt >= QUALITY_PEER_WARMUP_MS;
   }
 
@@ -717,7 +1252,11 @@
     return {
       at: now,
       warmedUp: isWarmedUp(peer, now),
-      videoActive: state.camStream !== null,
+      // カメラだけを見ると、共有中に「映像を送っていない」と誤認して
+      // 回復判定が RTT だけの緩い経路に落ちる（§5 T7）
+      videoActive: activeVideoTrack() !== null,
+      // 画面共有かどうかで fps の意味が変わるのでサンプルに持たせる（§8.1）
+      screenShare: currentVideoSource() === "screen",
       limitationReason: raw.limitationReason,
       fpsRatio,
       rtt: raw.rtt,
@@ -746,6 +1285,8 @@
     try {
       const peers = [...state.peers.values()];
       const now = Date.now();
+      let relay = false;
+      let relayKnown = false;
       const reports = await Promise.all(peers.map((peer) => readStats(peer)));
       for (let i = 0; i < peers.length; i += 1) {
         const peer = peers[i];
@@ -753,9 +1294,17 @@
         // 待っている間に閉じたピアのぶんは捨てる
         if (report === null || peer.closed) continue;
         const raw = extractRawStats(report, now);
+        trackEncodeStall(peer, raw);
+        if (raw.relay !== null) {
+          relayKnown = true;
+          if (raw.relay === true) relay = true;
+        }
         pushSample(peer.id, buildSample(peer, raw, now));
         state.quality.prev.set(peer.id, raw);
       }
+      // 判定できたときだけ更新する（取れないブラウザで勝手に落とさない）
+      if (relayKnown) updateRelayState(relay);
+      if (detectEncodeFailure()) return;
       applyQualityDecision(evaluateQuality(state.quality.window, state.peers.size, Date.now(), {
         autoStopped: state.quality.autoStopped,
         reason: state.quality.reason,
@@ -766,6 +1315,119 @@
       console.error("VC quality sampling failed:", e);
     } finally {
       state.quality.sampling = false;
+    }
+  }
+
+  /**
+   * 画面共有中に「1フレームもエンコードできていない」状態を数える（§8.4）。
+   *
+   * メッシュではエンコードが人数ぶん並ぶので、ハードウェアエンコーダの
+   * セッション上限に当たり得る。【未確認】このとき
+   * hardware-encoder-not-available がどの経路で通知されるか（例外か、
+   * イベントか、黙ってソフトウェアへ落ちるか）はブラウザ依存で、
+   * **実測できていない**。そこで通知経路に依存しない統計側の検出も持つ。
+   *
+   * 【設計書からの意図的なずらし】設計書 §8.4 は「framesEncoded が一定
+   * サンプル増えない」ことを条件にしているが、それだけだと**静止した画面を
+   * 共有しているだけの健全な状態**（資料を映して話している、が最も普通の
+   * 使い方）が毎回引っかかり、共有を勝手に止めてしまう。画面共有は変化駆動で、
+   * 動きが無ければフレームは出ない（§8.1 が fps を判定に使わない理由と同じ）。
+   * そこで「累積 framesEncoded が 0 のまま」＝ **一度もエンコードが成立して
+   * いない**場合に限って数える。エンコーダ枯渇の検出という目的は満たしつつ、
+   * 静止画面の誤検知は原理的に起きない。
+   */
+  function trackEncodeStall(peer, raw) {
+    // 接続が張れるまで（特に TURN 経由・参加直後）エンコーダは動かず
+    // framesEncoded は 0 のままになる。ここに門を置かないと、回線が遅いだけの
+    // 正常系で 6 秒後に共有が勝手に止まる
+    const connected = peer.pc.connectionState === "connected";
+    if (!connected || currentVideoSource() !== "screen" || raw.framesEncoded !== 0) {
+      peer.stallCount = 0;
+      return;
+    }
+    peer.stallCount += 1;
+    if (peer.stallCount === SCREEN_STALL_SAMPLES) {
+      // ソフトウェアへ落ちたのか、そもそも動いていないのかの切り分けに使う
+      console.error(
+        "VC screen share is not encoding:",
+        raw.encoderImplementation === null ? "(encoderImplementation 不明)" : raw.encoderImplementation,
+      );
+    }
+  }
+
+  /** 全ピアでエンコードが成立していないか。1本でも出ていれば枯渇ではない */
+  function detectEncodeFailure() {
+    if (currentVideoSource() !== "screen") return false;
+    let judged = 0;
+    for (const peer of state.peers.values()) {
+      if (peer.videoSender === null) continue;
+      judged += 1;
+      if (peer.stallCount < SCREEN_STALL_SAMPLES) return false;
+    }
+    if (judged === 0) return false;
+    stopScreenShare({
+      message: "この端末で画面を送り出せなかったため、画面共有を止めました",
+      isError: true,
+      // 送り出せない端末でカメラを掴み直しても同じことになる（音声優先・§3.6）
+      restore: false,
+    });
+    return true;
+  }
+
+  /**
+   * TURN リレーを検知したときの降格（§6.6）。
+   * relay は in と out の両方が VPS を通るので、標準案のままだと
+   * 共有者1人で VPS に 7 Mbps 乗る。共有者単位で軽い案へ落とす。
+   */
+  function updateRelayState(relay) {
+    if (relay === state.screen.relay) return;
+    state.screen.relay = relay;
+    if (currentVideoSource() !== "screen") return;
+    if (relay) {
+      if (state.screen.profile === "light") return;
+      applyScreenProfile("light");
+      // 640×360 では文字が読めない（§6.3）。黙って落とすと「画面共有は
+      // 使いものにならない」という誤った印象だけが残る
+      notify("quality", "回線の都合（中継経由）で画質を落としています");
+      return;
+    }
+    // 中継が外れたら戻す。品質劣化で落としたぶん（demoted）はそのまま
+    if (state.screen.demoted || state.screen.profile !== "light") return;
+    applyScreenProfile(state.screen.kind);
+    notify("quality", "回線が直接つながったので、共有の画質を戻しました");
+  }
+
+  /**
+   * 送出プロファイルを当て直す。取り込み側（applyConstraints）と
+   * 送出側（setParameters）の二重の歯止めを両方そろえる（§6.4）。
+   */
+  function applyScreenProfile(name) {
+    const profile = SCREEN_PROFILES[name];
+    if (profile === undefined) return;
+    state.screen.profile = name;
+    applyCaptureProfile(activeVideoTrack(), name);
+    for (const peer of state.peers.values()) {
+      applyEncodingProfile(peer.videoSender, profile);
+    }
+  }
+
+  /** 取り込み側だけを絞る（contentHint と applyConstraints）。§6.4 の一段目 */
+  function applyCaptureProfile(track, name) {
+    const profile = SCREEN_PROFILES[name];
+    if (profile === undefined || track === null) return;
+    try {
+      track.contentHint = profile.contentHint;
+    } catch (e) {
+      console.error("VC contentHint failed:", e);
+    }
+    if (typeof track.applyConstraints !== "function") return;
+    const applied = track.applyConstraints({
+      width: { max: profile.width },
+      height: { max: profile.height },
+      frameRate: { max: profile.frameRate },
+    });
+    if (applied !== undefined && typeof applied.catch === "function") {
+      applied.catch((e) => console.error("VC applyConstraints failed:", e));
     }
   }
 
@@ -816,6 +1478,21 @@
     // 分母となる requestedFps を取得できないブラウザでは fpsRatio が null に
     // なり、この判定は常に「原因なし」を返す（＝フォールバックが働かない）。
     // 詳細は buildSample() / setCamera() のコメントを参照。
+    //
+    // ただし画面共有中は fps を入口条件にしない（vc-screenshare.md §8.1 / T10）。
+    //   1. contentHint = "text" は maintain-resolution を選ばせる。つまり
+    //      fps が落ちるのは設計どおりの正常動作であって、劣化ではない
+    //   2. 画面共有は変化駆動で、静止した画面ではフレームがほとんど出ない。
+    //      framesEncoded が増えないのは回線とは無関係
+    // 代わりに RTT と送出可能帯域だけで見る。どちらも取れない環境では判定が
+    // 働かないが、これは既存の「誤検知より検知漏れに倒す」方針（R6）と同じ扱い。
+    if (sample.screenShare === true) {
+      if (sample.outgoingBitrate !== null && sample.outgoingBitrate < QUALITY_BITRATE_STOP_BPS) {
+        return "bitrate";
+      }
+      if (sample.rtt !== null && sample.rtt > QUALITY_RTT_STOP_SEC) return "rtt";
+      return null;
+    }
     if (sample.fpsRatio === null || sample.fpsRatio >= QUALITY_FPS_STOP_RATIO) return null;
     if (sample.outgoingBitrate !== null && sample.outgoingBitrate < QUALITY_BITRATE_STOP_BPS) {
       return "bitrate";
@@ -838,7 +1515,14 @@
     if (sample.outgoingBitrate !== null && sample.outgoingBitrate < QUALITY_BITRATE_RESUME_BPS) {
       return false;
     }
-    if (sample.fpsRatio !== null && sample.fpsRatio < QUALITY_FPS_RESUME_RATIO) return false;
+    // 共有中の fps は劣化の指標にならない（§8.1）ので、回復の判定でも見ない。
+    // ここで見ると、健全な共有がいつまでも「回復していない」ままになる
+    if (
+      sample.screenShare !== true && sample.fpsRatio !== null &&
+      sample.fpsRatio < QUALITY_FPS_RESUME_RATIO
+    ) {
+      return false;
+    }
     return true;
   }
 
@@ -871,7 +1555,7 @@
    *
    * @param {Map<string, Array<object>>} windowMap
    *   playerId → サンプル配列（古い順）。各サンプルは buildSample() の形:
-   *   { at:number, warmedUp:boolean, videoActive:boolean,
+   *   { at:number, warmedUp:boolean, videoActive:boolean, screenShare:boolean,
    *     limitationReason:string|null, fpsRatio:number|null,
    *     rtt:number|null, outgoingBitrate:number|null }
    * @param {number} peerCount VC ピアの総数（N）
@@ -964,6 +1648,24 @@
       peer.degraded = decision.degradedPeerIds.indexOf(id) >= 0;
     }
     if (decision.shouldStop) {
+      // 画面共有は会話の対象そのものなので、いきなり消すと話が成立しなくなる。
+      // まず画質を落として繋ぎ、それでも直らなければ止める（§8.2 の二段構え）。
+      // 終着点（停止＝音声優先）は §3.6 のまま変えていない。
+      if (
+        currentVideoSource() === "screen" && !state.screen.demoted &&
+        state.screen.profile !== "light"
+      ) {
+        // 既に軽い案なら落とす先が無いので、段を挟まずに停止へ進む
+        demoteScreenShare();
+        return;
+      }
+      if (
+        currentVideoSource() === "screen" && state.screen.demotedAt !== null &&
+        Date.now() - state.screen.demotedAt < QUALITY_MIN_HOLD_MS
+      ) {
+        // 降格の効きを見るあいだは止めない（最小保持時間）
+        return;
+      }
       stopVideoForQuality(decision.reason);
       return;
     }
@@ -980,14 +1682,29 @@
     }
   }
 
+  /** 画面共有を軽い案へ降格する（§8.2 の一段目） */
+  function demoteScreenShare() {
+    state.screen.demoted = true;
+    state.screen.demotedAt = Date.now();
+    applyScreenProfile("light");
+    // 観測窓を捨てる。降格前の劣化サンプルで即座に二段目へ進まないように
+    state.quality.prev.clear();
+    state.quality.window.clear();
+    notify("quality", "回線が不安定なため、共有の画質を落としました");
+  }
+
   /**
    * 品質劣化で映像だけを止める。音声は触らない（音声優先・§3.6）。
    * setCamera(false) は使わない。あちらは各ピアで removeTrack して
    * 再ネゴシエーションを起こすため、帯域が枯れている状況では逆効果になる。
    * replaceTrack(null) なら再ネゴシエーションは不要（MDN）。
+   *
+   * 止める対象は「いまの映像ソース」。カメラ固定にすると、共有中に品質が
+   * 落ちても何も止まらず §3.6 の音声優先が効かない（§5 T8）。
    */
   function stopVideoForQuality(reason) {
-    if (state.camStream === null) return;
+    const source = currentVideoSource();
+    if (source === "none") return;
     for (const peer of state.peers.values()) {
       if (peer.videoSender === null) continue;
       const replaced = peer.videoSender.replaceTrack(null);
@@ -995,16 +1712,22 @@
         replaced.catch((e) => console.error("VC replaceTrack failed:", e));
       }
     }
-    // カメラの LED を消すためにトラック自体も止める（§3.7 の趣旨）
+    // 送出をやめる以上、取り込みも全部やめる。画面のトラックを止め損ねると
+    // ブラウザの「共有中」バーが残り、カメラを止め損ねると LED が点いたままになる。
+    // 共有中はカメラを手元に持ったままのことがある（送ってはいない）ので、
+    // ここで両方を落として映像ソースを "none" にそろえる
+    if (source === "screen") releaseScreenStream();
     stopStream(state.camStream);
     state.camStream = null;
     renderLocalVideo();
+    // 自分の共有を拡大表示していたなら、中身が死んだ枠を残さない
+    if (source === "screen" && state.selfId !== null) closeZoom(state.selfId);
     state.quality.autoStopped = true;
     state.quality.reason = reason;
     state.quality.stoppedAt = Date.now();
     state.quality.autoStopCount += 1;
     state.quality.recovered = false;
-    announceVideoState(false);
+    announceVideoState();
     // 停止後も監視は続ける。回復を検知して通知するため（映像は戻さない）。
     // cpu は回線の問題ではないので文言を分ける（実態と合わせるため）
     notify(
@@ -1015,7 +1738,7 @@
     );
   }
 
-  /** 品質監視を始める。カメラ ON 中と自動停止中だけ動かす（電池・CPU 対策） */
+  /** 品質監視を始める。映像の送出中と自動停止中だけ動かす（電池・CPU 対策） */
   function startQualityMonitor() {
     if (state.quality.timer !== null) return;
     state.quality.prev.clear();
@@ -1048,9 +1771,49 @@
     stopQualityMonitor();
     clearAutoStop();
     state.quality.autoStopCount = 0;
-    state.quality.camOnAt = null;
+    state.quality.videoOnAt = null;
     state.quality.requestedFps = null;
     state.quality.mode = "unknown";
+  }
+
+  /**
+   * 映像ソースが変わったことを品質監視に伝える（§8.3 / T9）。
+   * ウォームアップを打ち直し、観測窓も捨てる。持ち越すと、切り替えた直後に
+   * 立ち上がり中の "bandwidth" を拾って必ず誤検知する。
+   */
+  function markVideoSourceChanged(track) {
+    state.quality.videoOnAt = track === null ? null : Date.now();
+    state.quality.requestedFps = requestedFpsOf(track);
+    state.quality.prev.clear();
+    state.quality.window.clear();
+    for (const peer of state.peers.values()) peer.stallCount = 0;
+  }
+
+  /**
+   * 実効 FPS の分母に使う要求 FPS。
+   * getSettings() を持たない／frameRate を返さないブラウザでは null になり、
+   * fpsRatio も出せなくなる（buildSample() のコメント参照）。
+   */
+  function requestedFpsOf(track) {
+    if (track === null) return null;
+    const settings = typeof track.getSettings === "function" ? track.getSettings() : {};
+    return typeof settings.frameRate === "number" ? settings.frameRate : null;
+  }
+
+  /**
+   * 映像ソースの有無に合わせて品質監視を入り切りする。
+   * 「映像が1本も無くなったとき」だけ止めること。カメラ基準で止めると、
+   * 共有中にカメラを切っただけで見張りが居なくなる（§5 T2）。
+   */
+  function syncQualityMonitor() {
+    if (currentVideoSource() !== "none") {
+      startQualityMonitor();
+      return;
+    }
+    stopQualityMonitor();
+    clearAutoStop();
+    state.quality.videoOnAt = null;
+    state.quality.requestedFps = null;
   }
 
   // -------------------------------------------------------------------------
@@ -1062,6 +1825,7 @@
     config.send = options.send;
     config.container = options.container ?? null;
     config.onStatus = options.onStatus ?? null;
+    config.onZoom = typeof options.onZoom === "function" ? options.onZoom : null;
     // getStats は省略可。既定は pc.getStats() をそのまま呼ぶ
     if (typeof options.getStats === "function") config.getStats = options.getStats;
     if (Array.isArray(options.iceServers) && options.iceServers.length > 0) {
@@ -1096,6 +1860,8 @@
         if (known) closePeer(msg.player.id);
         if (msg.player.id !== state.selfId && msg.player.vcEligible) {
           signal(msg.player.id, { kind: "ready", session: state.session });
+          // 後から入ってきた相手にも、いまの映像状態（カメラか画面か）を伝える（§4.3）
+          announceVideoStateTo(msg.player.id);
         }
         return;
       }
@@ -1206,6 +1972,14 @@
     state.micStream = null;
     stopStream(state.camStream);
     state.camStream = null;
+    // 画面のトラックも必ず止める。止め損ねるとブラウザの「共有中」バーが
+    // 残り続ける（カメラのランプを消すのと同じ趣旨・§5 T12）
+    releaseScreenStream();
+    state.screen.kind = SCREEN_DEFAULT_KIND;
+    state.screen.profile = SCREEN_DEFAULT_KIND;
+    state.screen.starting = false;
+    state.screen.relay = false;
+    if (state.selfId !== null) closeZoom(state.selfId);
     renderLocalVideo();
     state.active = false;
     state.muted = false;
@@ -1235,28 +2009,58 @@
     return state.muted;
   }
 
-  /** カメラを切り替える。戻り値は切り替え後の状態 */
+  /**
+   * カメラを切り替える。戻り値は切り替え後の状態。
+   * 共有中はカメラを掴んでいないので、裏返すのは「やめたら戻す約束」のほう。
+   */
   function toggleCamera() {
-    return setCamera(state.camStream === null);
+    return setCamera(!cameraIntended());
+  }
+
+  /**
+   * 利用者から見た「カメラは入っているか」。
+   * 共有中は実際には止めているが、やめたら戻る約束があるなら入と見なす
+   * （ボタンの文言をこれで描く。§10 の「DOM から状態を読み戻さない」流儀）。
+   */
+  function cameraIntended() {
+    if (currentVideoSource() === "screen") return state.screen.cameraWasOn;
+    return state.camStream !== null;
   }
 
   /**
    * カメラの ON / OFF（初期 OFF・本人の明示操作でのみ ON、§3.6）。
-   * ON は既存の全ピアへ映像を載せ、OFF は removeTrack して再ネゴシエーションする。
-   * ON 中は品質監視を動かす（§3.6 の映像自動停止）。
+   * ON は既存の全ピアへ映像を載せ、OFF は replaceTrack(null) で送出だけを外す。
+   * 映像を1本でも送っているあいだは品質監視を動かす（§3.6 の映像自動停止）。
+   *
+   * 画面共有中はカメラの入／切が**送出に影響しない**（§4.1 の不変条件により、
+   * 外へ出ているのは常に画面のほう）。sender をここで触ると共有ごと落ちるので
+   * 触らない（vc-screenshare.md §5 T1 / T2）。
    */
   async function setCamera(on) {
     if (!state.active) {
       notify("error", "先に VC に参加してください");
       return false;
     }
+    // ------------------------------------------------------------------
+    // 画面共有中のカメラ操作は「共有をやめたらカメラに戻すか」の入り切りとして
+    // 働く。共有中はカメラを実際に止めているので、ここで掴み直すと LED だけが
+    // 点いて何も送らない、という利用者を欺く状態になるため触らない。
+    // 戻り値は「いまカメラが動いているか」なので、どちらの操作でも false。
+    // ------------------------------------------------------------------
+    if (currentVideoSource() === "screen") {
+      state.screen.cameraWasOn = on === true;
+      notify(
+        "vcState",
+        on === true
+          ? "画面共有をやめたらカメラに戻します"
+          : "画面共有をやめてもカメラは戻しません",
+      );
+      return false;
+    }
     if (on === true) {
       if (state.camStream !== null) return true;
       try {
-        state.camStream = await global.navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: { width: { ideal: 640 }, height: { ideal: 360 } },
-        });
+        state.camStream = await global.navigator.mediaDevices.getUserMedia(CAMERA_CONSTRAINTS);
       } catch (e) {
         console.error("VC camera failed:", e);
         notify("error", "カメラを使用できませんでした");
@@ -1268,50 +2072,312 @@
         state.camStream = null;
         return false;
       }
-      for (const peer of state.peers.values()) {
-        if (peer.videoSender !== null) {
-          // 自動停止で外した sender は使い回す（再ネゴシエーションを避ける）
-          try {
-            await peer.videoSender.replaceTrack(track);
-          } catch (e) {
-            console.error("VC replaceTrack failed:", e);
-          }
-        } else {
-          peer.videoSender = peer.pc.addTrack(track, state.camStream);
-        }
-      }
+      // 自動停止で外した sender は使い回す（再ネゴシエーションを避ける）
+      await applyVideoTrackAll(track);
+      markVideoSourceChanged(track);
+      announceVideoState();
       renderLocalVideo();
-      // 要求 FPS は ON の時点で一度だけ控える。以後の実効 FPS の分母になる。
-      // getSettings() を持たない／frameRate を返さないブラウザではここが null になり、
-      // fpsRatio が出せずフォールバック判定が働かなくなる（buildSample のコメント参照）
-      const settings = typeof track.getSettings === "function" ? track.getSettings() : {};
-      state.quality.requestedFps = typeof settings.frameRate === "number" ? settings.frameRate : null;
-      state.quality.camOnAt = Date.now();
-      startQualityMonitor();
-      announceVideoState(true);
+      syncQualityMonitor();
       notify("vcState", "カメラを ON にしました");
       return true;
     }
-    // 本人が明示的に OFF にしたので、自動停止の追跡も終わらせる
-    stopQualityMonitor();
-    clearAutoStop();
-    state.quality.camOnAt = null;
-    state.quality.requestedFps = null;
-    if (state.camStream === null) return false;
-    for (const peer of state.peers.values()) {
-      for (const sender of peer.pc.getSenders()) {
-        if (sender.track !== null && sender.track.kind === "video") {
-          peer.pc.removeTrack(sender);
-          if (peer.videoSender === sender) peer.videoSender = null;
-        }
+    if (state.camStream === null) {
+      // カメラを持っていないなら、掛け金だけ外して戻る（従来どおり）
+      if (currentVideoSource() === "none") {
+        stopQualityMonitor();
+        clearAutoStop();
+        state.quality.videoOnAt = null;
+        state.quality.requestedFps = null;
       }
+      return false;
     }
+    const wasSending = currentVideoSource() === "camera";
     stopStream(state.camStream);
     state.camStream = null;
+    if (wasSending) {
+      // removeTrack はしない。sender を残しておけば次の映像で再ネゴが要らない（T1）
+      await applyVideoTrackAll(activeVideoTrack());
+      markVideoSourceChanged(null);
+      announceVideoState();
+    }
     renderLocalVideo();
-    announceVideoState(false);
+    // 映像が1本も無くなったときだけ監視を畳む（共有中は見張りを残す・T2）
+    syncQualityMonitor();
     notify("vcState", "カメラを OFF にしました");
     return false;
+  }
+
+  // -------------------------------------------------------------------------
+  // 画面共有（docs/design/vc-screenshare.md）
+  // -------------------------------------------------------------------------
+
+  /** 画面共有を切り替える。戻り値は切り替え後の状態 */
+  function toggleScreenShare(kind) {
+    if (state.screenStream !== null) {
+      return stopScreenShare({ message: "画面共有を止めました" });
+    }
+    return startScreenShare(kind);
+  }
+
+  /**
+   * 画面共有を始める（§4 / §6 / §9）。
+   *
+   * 開始は必ず本人の明示操作から。他の人が共有中なら **getDisplayMedia を
+   * 呼ばずに**断る（呼ぶと選択ダイアログを出してから断ることになる・§4.4）。
+   */
+  async function startScreenShare(kind) {
+    if (!state.active) {
+      notify("error", "先に VC に参加してください");
+      return false;
+    }
+    if (!screenShareSupported()) {
+      notify("error", "この端末では画面共有を始められません（他の人の共有は見られます）");
+      return false;
+    }
+    if (state.screenStream !== null) return true;
+    // 開始の連打よけ（§9-4）。選択ダイアログを二重に出さない
+    if (state.screen.starting) return false;
+    const rivals = sharingPeerIds();
+    if (rivals.length > 0) {
+      notify("error", `${nicknameOf(rivals[0])} さんが画面を共有中です`);
+      return false;
+    }
+    const requested = kind === "motion" ? "motion" : SCREEN_DEFAULT_KIND;
+    const profileName = pickProfile({ requested, relay: state.screen.relay });
+    // この開始処理の世代。await から戻るたびに、割り込まれていないかを見る
+    state.screen.gen += 1;
+    const gen = state.screen.gen;
+    state.screen.starting = true;
+    let stream = null;
+    try {
+      stream = await global.navigator.mediaDevices.getDisplayMedia(
+        displayConstraints(SCREEN_PROFILES[profileName]),
+      );
+    } catch (e) {
+      state.screen.starting = false;
+      console.error("VC getDisplayMedia failed:", e);
+      notify("error", shareErrorMessage(e));
+      return false;
+    }
+    state.screen.starting = false;
+    // 選択ダイアログを出しているあいだに卓を離れていたら、掴んだものを捨てる。
+    // ここで取りこぼすとブラウザの「共有中」バーだけが残る
+    if (!state.active || state.screen.gen !== gen) {
+      stopStream(stream);
+      return false;
+    }
+    // **もう一度**他の人の共有を見る。開始前の確認から、利用者が画面を選ぶまでの
+    // 数秒〜数十秒が空いている。この窓は設計書が想定する片道 RTT よりずっと長く、
+    // ここを見ないと2人が同時に共有したまま収束しない（§4.4）
+    const late = sharingPeerIds();
+    if (late.length > 0) {
+      stopStream(stream);
+      notify("error", `${nicknameOf(late[0])} さんが画面を共有中です`);
+      return false;
+    }
+    // 音声トラックは常に0本として扱う（§6.5）。万一返ってきたら捨てる
+    dropAudioTracks(stream);
+    const track = stream.getVideoTracks()[0];
+    if (track === undefined) {
+      stopStream(stream);
+      notify("error", "共有する画面を取得できませんでした");
+      return false;
+    }
+    state.screenStream = stream;
+    state.screen.kind = requested;
+    state.screen.profile = profileName;
+    state.screen.demoted = false;
+    state.screen.demotedAt = null;
+    // 実際に何が選ばれたかは事後にしか分からない（displaySurface は希望の
+    // 表明にすぎず、選択を制限できない）。§9-1 の警告もこの値から出す
+    state.screen.surface = readDisplaySurface(track);
+    // ブラウザの共有バーから止められたときの合流点。自前の停止ボタンからは
+    // stop() しても ended は発火しないので、そちらは明示的に後始末を呼ぶ（§9-1）
+    if (typeof track.addEventListener === "function") {
+      track.addEventListener("ended", onScreenTrackEnded);
+      // 共有中に対象を切り替えられたら、申告値を読み直して伝える（surfaceSwitching）
+      track.addEventListener("configurationchange", onScreenConfigurationChange);
+    }
+    // ------------------------------------------------------------------
+    // 共有中はカメラを**実際に止める**（オーナー判断）。
+    // LED は利用者にとって「撮られているかどうか」のハードウェア的な信号で、
+    // 送出していないのにランプが点いたままだと、その信号が嘘をつくことになる。
+    // 「カメラは停止中」と札に出しながら点灯している状態はいちばん不信感を招く。
+    // 共有をやめたときに戻せるよう、ON だったことだけを覚えておく。
+    // ------------------------------------------------------------------
+    state.screen.cameraWasOn = state.camStream !== null;
+    stopStream(state.camStream);
+    state.camStream = null;
+    // 取り込み側だけ先に絞る。送出パラメータは差し替えの後に当てる（§4.2 の順序）
+    applyCaptureProfile(track, profileName);
+    await applyVideoTrackAll(track);
+    if (state.screen.gen !== gen || state.screenStream !== stream) {
+      // 待っているあいだに止められた。送出を今の状態へそろえ直して抜ける
+      await applyVideoTrackAll(activeVideoTrack());
+      return false;
+    }
+    markVideoSourceChanged(track);
+    renderLocalVideo();
+    syncQualityMonitor();
+    announceVideoState();
+    // 告知が行き違って相手も同時に始めていたら、ここで1人に収束させる
+    resolveShareConflict();
+    if (state.screenStream === null) return false;
+    notify("vcState", "画面共有を始めました");
+    if (state.screen.surface === "monitor") {
+      // 止めはしない（利用者の選択を機械が覆さない）。強めに知らせるだけ
+      notify("error", "画面全体を共有しています。通知やパスワード入力も映ります");
+    }
+    return true;
+  }
+
+  /**
+   * 画面共有を止める（§9-1）。
+   * 自前の停止・競合による停止・ブラウザ側からの停止のすべてがここに合流する。
+   * 二度呼ばれても壊れないこと（ended と停止ボタンが両方走り得る）。
+   */
+  async function stopScreenShare(options) {
+    if (state.screenStream === null) return false;
+    // 「戻す約束」は releaseScreenStream() が消すので、先に控える。
+    // restore: false（エンコード不成立での停止）のときは戻さない。この端末が
+    // 映像を送り出せなかったのだから、カメラを掴み直すのは筋が通らない
+    const restore = options === undefined || options.restore !== false;
+    const resume = restore && state.screen.cameraWasOn;
+    releaseScreenStream();
+    // 共有前にカメラが ON だったなら取り直す（開始時に実際に止めているため）。
+    // 失敗しても VC 全体は壊さず、カメラ OFF として整合させて進む
+    const restored = resume ? await reacquireCamera() : true;
+    // カメラへ戻れたならそちらへ、戻れなければ replaceTrack(null)
+    const next = activeVideoTrack();
+    await applyVideoTrackAll(next);
+    markVideoSourceChanged(next);
+    renderLocalVideo();
+    syncQualityMonitor();
+    announceVideoState();
+    if (state.selfId !== null) closeZoom(state.selfId);
+    const message = options === undefined || options.message === undefined
+      ? "画面共有を止めました"
+      : options.message;
+    notify(options !== undefined && options.isError === true ? "error" : "vcState", message);
+    if (!restored) {
+      // 何が起きたかを必ず出す。黙って切のままだと不具合にしか見えない
+      notify("error", "カメラに戻せませんでした。カメラは切のままです");
+    }
+    return false;
+  }
+
+  /**
+   * 画面共有をやめた後にカメラを取り直す。
+   *
+   * 【未実測】権限は VC 参加中に一度許可されているので、取り直しで許可の
+   * 問い合わせが再び出ることはない**はず**だが、実ブラウザで確かめていない
+   * （画面共有の開始にネイティブの選択ダイアログが要るため自動化できない）。
+   *
+   * 他のアプリがカメラを掴んでいる等で失敗し得る。呼び出し側が「カメラ OFF」
+   * として整合を保てるよう、例外は外へ出さず真偽値だけを返す。
+   */
+  async function reacquireCamera() {
+    if (state.camStream !== null) return true;
+    // 卓を離れた後に戻しても意味が無い（ランプだけが点く）
+    if (!state.active) return false;
+    let stream = null;
+    try {
+      stream = await global.navigator.mediaDevices.getUserMedia(CAMERA_CONSTRAINTS);
+    } catch (e) {
+      console.error("VC camera restore failed:", e);
+      return false;
+    }
+    if (!state.active) {
+      stopStream(stream);
+      return false;
+    }
+    if (stream.getVideoTracks()[0] === undefined) {
+      stopStream(stream);
+      return false;
+    }
+    state.camStream = stream;
+    return true;
+  }
+
+  /**
+   * 画面のストリームを手放す。トラックを止め損ねると、ブラウザの
+   * 「共有中」バーが残り続ける（§5 T12）。
+   */
+  function releaseScreenStream() {
+    const stream = state.screenStream;
+    state.screenStream = null;
+    state.screen.surface = null;
+    state.screen.profile = state.screen.kind;
+    state.screen.demoted = false;
+    state.screen.demotedAt = null;
+    // 約束は stopScreenShare() が先に控えている。ここで消しておかないと、
+    // 品質劣化による停止や退室のあとにカメラを掴み直してしまう
+    state.screen.cameraWasOn = false;
+    // 選択待ちの開始処理が走っていたら、それを無効にする（世代を進める）
+    state.screen.gen += 1;
+    if (stream === null) return;
+    for (const track of stream.getTracks()) {
+      if (typeof track.removeEventListener === "function") {
+        track.removeEventListener("ended", onScreenTrackEnded);
+        track.removeEventListener("configurationchange", onScreenConfigurationChange);
+      }
+    }
+    stopStream(stream);
+  }
+
+  /** ブラウザ側（共有バー）から止められたときの合流点（§9-1・E6） */
+  function onScreenTrackEnded() {
+    stopScreenShare({ message: "画面共有を止めました" });
+  }
+
+  /**
+   * 共有中に対象が切り替えられたとき（surfaceSwitching: "include"）。
+   * displaySurface は開始時の一度きりでは古くなるので読み直し、
+   * 画面全体へ切り替わったのなら §9-1 の警告を出し直す。
+   */
+  function onScreenConfigurationChange() {
+    if (state.screenStream === null) return;
+    const track = activeVideoTrack();
+    if (track === null) return;
+    const surface = readDisplaySurface(track);
+    if (surface === state.screen.surface) return;
+    state.screen.surface = surface;
+    announceVideoState();
+    if (surface === "monitor") {
+      notify("error", "画面全体を共有しています。通知やパスワード入力も映ります");
+    }
+  }
+
+  /** getDisplayMedia が返したストリームから音声を落とす（§6.5） */
+  function dropAudioTracks(stream) {
+    if (typeof stream.getAudioTracks !== "function") return;
+    for (const track of stream.getAudioTracks()) {
+      try {
+        track.stop();
+      } catch (e) {
+        console.error("VC audio track stop failed:", e);
+      }
+      if (typeof stream.removeTrack === "function") stream.removeTrack(track);
+    }
+  }
+
+  /** 実際に選ばれた共有対象。取れなければ null（表示にしか使わない・§4.3） */
+  function readDisplaySurface(track) {
+    if (typeof track.getSettings !== "function") return null;
+    const settings = track.getSettings();
+    return typeof settings.displaySurface === "string" ? settings.displaySurface : null;
+  }
+
+  /**
+   * getDisplayMedia の失敗を文言にする。
+   * 利用者の取り消し（NotAllowedError）は異常ではないので、責める文言にしない。
+   */
+  function shareErrorMessage(error) {
+    const name = error === null || error === undefined ? "" : error.name;
+    if (name === "NotAllowedError") return "画面共有を取り消しました";
+    if (name === "NotFoundError") return "共有できる画面が見つかりませんでした";
+    if (name === "AbortError") return "画面共有を始められませんでした";
+    return "画面共有を始められませんでした";
   }
 
   /**
@@ -1336,12 +2402,35 @@
         connectionState: peer.pc.connectionState,
         iceConnectionState: peer.pc.iceConnectionState,
         degraded: peer.degraded === true,
+        /** 相手が送っている映像の出どころ。"camera" | "screen" | null */
+        videoSource: peer.remoteVideoSource,
       });
     }
+    // 共有権はフラグで持たない。常に「今どのピアが screen を告知しているか」
+    // から導く（§4.4）。こうしておけば切断・キックで自動的に解ける
+    const sharingPeers = sharingPeerIds();
     return {
       active: state.active,
       muted: state.muted,
       camera: state.camStream !== null,
+      /**
+       * 共有をやめたらカメラに戻るか（共有中のみ意味を持つ）。
+       * 共有中はカメラを実際に止めているので camera は false になる。
+       * ボタンの文言はこちらを見て描く
+       */
+      cameraResumes: currentVideoSource() === "screen" && state.screen.cameraWasOn,
+      /** 自分が画面を共有中か */
+      screen: state.screenStream !== null,
+      /** いま送出している映像の出どころ。"none" | "camera" | "screen" */
+      videoSource: currentVideoSource(),
+      /** この端末で画面共有を始められるか（特徴検出・§2） */
+      screenSupported: screenShareSupported(),
+      /** 他の人が共有中ならその playerId。誰も共有していなければ null */
+      sharingPeerId: sharingPeers.length > 0 ? sharingPeers[0] : null,
+      /** 共有中の相手の表示名（ボタンの title に出す） */
+      sharingPeerName: sharingPeers.length > 0 ? nicknameOf(sharingPeers[0]) : null,
+      /** 共有の内容の種類。"text" | "motion"（§10） */
+      screenKind: state.screen.kind,
       eligible: selfEligible(),
       peers,
       quality: {
@@ -1367,8 +2456,15 @@
     toggleCamera,
     setCamera,
     resumeCamera,
+    toggleScreenShare,
+    startScreenShare,
+    stopScreenShare,
     getState,
     /** テスト用に公開する純粋関数（§3.6 の品質判定） */
     evaluateQuality,
+    /** テスト用に公開する純粋関数（画面共有・vc-screenshare.md §11） */
+    displayConstraints,
+    pickProfile,
+    resolveShareOwner,
   };
 })(window);
