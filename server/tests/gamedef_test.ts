@@ -116,10 +116,21 @@ Deno.test("validate: 公式ゲームはすべて仕様を満たす", () => {
   for (const g of OFFICIAL_GAMES) {
     const res = validateGameDefinition(g);
     assert(res.ok, `${g.title}: ${res.ok ? "" : res.errors.join(" / ")}`);
-    assert(g.prompts.length >= 8 && g.prompts.length <= 10);
+    assert(g.prompts.length >= 25, `${g.title}: お題は25件以上必要です`);
   }
-  assertEquals(OFFICIAL_GAMES.length, 3);
-  assertEquals(new Set(OFFICIAL_GAMES.map((g) => g.id)).size, 3);
+  assertEquals(OFFICIAL_GAMES.length, 4);
+  assertEquals(new Set(OFFICIAL_GAMES.map((g) => g.id)).size, 4);
+});
+
+Deno.test("validate: 公式ゲームのお題本文はゲーム内で重複しない", () => {
+  for (const g of OFFICIAL_GAMES) {
+    const texts = g.prompts.map((p) => p.text);
+    assertEquals(
+      new Set(texts).size,
+      texts.length,
+      `${g.title}: お題本文が重複しています`,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------
