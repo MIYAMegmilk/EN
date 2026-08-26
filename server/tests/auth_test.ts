@@ -6,6 +6,7 @@
 import { assert, assertEquals, assertFalse } from "@std/assert";
 import { startServer } from "../main.ts";
 import { SESSION_COOKIE_NAME } from "../auth.ts";
+import { DEBUG_TOKEN_HEADER } from "../debug.ts";
 import type { AuthSession } from "../types.ts";
 
 function randomUserId(): string {
@@ -721,3 +722,435 @@ for (const cookie of BROKEN_COOKIES) {
     }
   });
 }
+
+// ---------------------------------------------------------------------------
+// PUT /api/profile のレート制限（IPごとに30件/分・暫定値）
+// ---------------------------------------------------------------------------
+
+Deno.test("PUT /api/profile: 上限の30件/分を超えると429（暫定値）", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const userId = randomUserId();
+    const registerRes = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId, password: "correcthorse" }),
+    });
+    const cookie = cookieFrom(registerRes);
+    // 登録の枠（3件/時）と混ざらないよう、プロフィール保存だけ別IPから送る
+    const headers = {
+      "content-type": "application/json",
+      cookie,
+      "x-forwarded-for": "10.2.0.1",
+    };
+    const body = JSON.stringify({ nickname: "たろう", tags: [] });
+
+    for (let i = 0; i < 30; i++) {
+      const res = await fetch(`${base}/api/profile`, { method: "PUT", headers, body });
+      assertEquals(res.status, 200, `${i + 1}件目までは上限内なので通ること`);
+      await res.body?.cancel();
+    }
+
+    const limited = await fetch(`${base}/api/profile`, { method: "PUT", headers, body });
+    assertEquals(limited.status, 429);
+    assert(typeof (await limited.json()).error === "string", "error メッセージが返ること");
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("PUT /api/profile: 上限内（30件目）までは保存でき、GET /api/meに反映される", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const userId = randomUserId();
+    const registerRes = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId, password: "correcthorse" }),
+    });
+    const cookie = cookieFrom(registerRes);
+    const headers = {
+      "content-type": "application/json",
+      cookie,
+      "x-forwarded-for": "10.2.0.2",
+    };
+
+    for (let i = 0; i < 30; i++) {
+      const res = await fetch(`${base}/api/profile`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ nickname: `たろう${i}`, tags: ["game"] }),
+      });
+      assertEquals(res.status, 200, `${i + 1}件目は上限内なので通ること`);
+      await res.body?.cancel();
+    }
+
+    const meRes = await fetch(`${base}/api/me`, { headers: { cookie } });
+    assertEquals(meRes.status, 200);
+    assertEquals((await meRes.json()).nickname, "たろう29", "30件目の内容が保存されていること");
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("PUT /api/profile: レート制限の枠はIPごとに独立している（§3.8、回帰）", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const userId = randomUserId();
+    const registerRes = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId, password: "correcthorse" }),
+    });
+    const cookie = cookieFrom(registerRes);
+    const body = JSON.stringify({ nickname: "たろう", tags: [] });
+    const firstIp = { "content-type": "application/json", cookie, "x-forwarded-for": "10.2.1.1" };
+    const secondIp = { "content-type": "application/json", cookie, "x-forwarded-for": "10.2.1.2" };
+
+    for (let i = 0; i < 30; i++) {
+      const res = await fetch(`${base}/api/profile`, { method: "PUT", headers: firstIp, body });
+      assertEquals(res.status, 200);
+      await res.body?.cancel();
+    }
+
+    const sameIpLimited = await fetch(`${base}/api/profile`, {
+      method: "PUT",
+      headers: firstIp,
+      body,
+    });
+    assertEquals(sameIpLimited.status, 429);
+    await sameIpLimited.body?.cancel();
+
+    const otherIpProfileOk = await fetch(`${base}/api/profile`, {
+      method: "PUT",
+      headers: secondIp,
+      body,
+    });
+    assertEquals(otherIpProfileOk.status, 200, "別IPの枠は消費されていないこと");
+    await otherIpProfileOk.body?.cancel();
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("PUT /api/profile: 429で弾かれたリクエストはあだ名・タグを書き換えない", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const userId = randomUserId();
+    const registerRes = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId, password: "correcthorse" }),
+    });
+    const cookie = cookieFrom(registerRes);
+    const headers = {
+      "content-type": "application/json",
+      cookie,
+      "x-forwarded-for": "10.2.2.1",
+    };
+
+    for (let i = 0; i < 30; i++) {
+      const res = await fetch(`${base}/api/profile`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ nickname: "さいしょ", tags: [] }),
+      });
+      assertEquals(res.status, 200);
+      await res.body?.cancel();
+    }
+
+    const limited = await fetch(`${base}/api/profile`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ nickname: "うわがき", tags: ["game"] }),
+    });
+    assertEquals(limited.status, 429);
+    await limited.body?.cancel();
+
+    const meBody = await (await fetch(`${base}/api/me`, { headers: { cookie } })).json();
+    assertEquals(meBody.nickname, "さいしょ", "429のリクエストは保存されていないこと");
+    assertEquals(meBody.tags, [], "タグも書き換わっていないこと");
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("PUT /api/profile: 未ログインのリクエストも枠を消費する（401より先に判定する）", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const userId = randomUserId();
+    const registerRes = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId, password: "correcthorse" }),
+    });
+    const cookie = cookieFrom(registerRes);
+    const body = JSON.stringify({ nickname: "たろう", tags: [] });
+
+    // Cookie 無しの連打でも枠は消費される（KVへの書き込み口をログインの有無によらず守る）
+    for (let i = 0; i < 30; i++) {
+      const res = await fetch(`${base}/api/profile`, {
+        method: "PUT",
+        headers: { "content-type": "application/json", "x-forwarded-for": "10.2.3.1" },
+        body,
+      });
+      assertEquals(res.status, 401);
+      await res.body?.cancel();
+    }
+
+    const limited = await fetch(`${base}/api/profile`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", cookie, "x-forwarded-for": "10.2.3.1" },
+      body,
+    });
+    assertEquals(limited.status, 429, "同じIPならログイン済みでも枠は使い切られていること");
+    await limited.body?.cancel();
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test(
+  "reset-limits: プロフィール保存の上限まで使ったあと、リセットで保存が復活する",
+  async () => {
+    const savedToken = Deno.env.get("EN_DEBUG_TOKEN");
+    Deno.env.set("EN_DEBUG_TOKEN", "the-correct-token");
+    const kv = await Deno.openKv(":memory:");
+    const server = startServer(0, "127.0.0.1", kv);
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      const userId = randomUserId();
+      const registerRes = await fetch(`${base}/api/auth/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ userId, password: "correcthorse" }),
+      });
+      const cookie = cookieFrom(registerRes);
+      const headers = {
+        "content-type": "application/json",
+        cookie,
+        "x-forwarded-for": "10.2.4.1",
+      };
+      const body = JSON.stringify({ nickname: "たろう", tags: [] });
+
+      for (let i = 0; i < 30; i++) {
+        const res = await fetch(`${base}/api/profile`, { method: "PUT", headers, body });
+        assertEquals(res.status, 200);
+        await res.body?.cancel();
+      }
+      const limited = await fetch(`${base}/api/profile`, { method: "PUT", headers, body });
+      assertEquals(limited.status, 429, "枠を使い切って429になっていること（前提）");
+      await limited.body?.cancel();
+
+      const resetRes = await fetch(`${base}/api/debug/reset-limits`, {
+        method: "POST",
+        headers: { [DEBUG_TOKEN_HEADER]: "the-correct-token" },
+      });
+      assertEquals(resetRes.status, 200);
+      const resetBody = await resetRes.json();
+      assertEquals(resetBody.scope, "all");
+      assert(resetBody.cleared.profile >= 1, "プロフィール保存の枠も集計されていること");
+
+      const afterReset = await fetch(`${base}/api/profile`, { method: "PUT", headers, body });
+      assertEquals(afterReset.status, 200, "リセット後は再び保存できること");
+      await afterReset.body?.cancel();
+    } finally {
+      await server.shutdown();
+      kv.close();
+      if (savedToken === undefined) Deno.env.delete("EN_DEBUG_TOKEN");
+      else Deno.env.set("EN_DEBUG_TOKEN", savedToken);
+    }
+  },
+);
+
+Deno.test("reset-limits: IPを指定したときもプロフィール保存の枠が消える", async () => {
+  const savedToken = Deno.env.get("EN_DEBUG_TOKEN");
+  Deno.env.set("EN_DEBUG_TOKEN", "the-correct-token");
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const userId = randomUserId();
+    const registerRes = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId, password: "correcthorse" }),
+    });
+    const cookie = cookieFrom(registerRes);
+    const headers = {
+      "content-type": "application/json",
+      cookie,
+      "x-forwarded-for": "10.2.5.1",
+    };
+    const body = JSON.stringify({ nickname: "たろう", tags: [] });
+
+    for (let i = 0; i < 30; i++) {
+      const res = await fetch(`${base}/api/profile`, { method: "PUT", headers, body });
+      assertEquals(res.status, 200);
+      await res.body?.cancel();
+    }
+    const limited = await fetch(`${base}/api/profile`, { method: "PUT", headers, body });
+    assertEquals(limited.status, 429, "枠を使い切って429になっていること（前提）");
+    await limited.body?.cancel();
+
+    const resetRes = await fetch(`${base}/api/debug/reset-limits`, {
+      method: "POST",
+      headers: { "content-type": "application/json", [DEBUG_TOKEN_HEADER]: "the-correct-token" },
+      body: JSON.stringify({ ip: "10.2.5.1" }),
+    });
+    assertEquals(resetRes.status, 200);
+    const resetBody = await resetRes.json();
+    assertEquals(resetBody.scope, "ip");
+    assertEquals(resetBody.cleared.profile, 1, "指定したIPのプロフィール枠が消えたこと");
+
+    const afterReset = await fetch(`${base}/api/profile`, { method: "PUT", headers, body });
+    assertEquals(afterReset.status, 200, "リセット後は再び保存できること");
+    await afterReset.body?.cancel();
+  } finally {
+    await server.shutdown();
+    kv.close();
+    if (savedToken === undefined) Deno.env.delete("EN_DEBUG_TOKEN");
+    else Deno.env.set("EN_DEBUG_TOKEN", savedToken);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PUT /api/profile の楽観ロック（versionstamp の照合。競合したら409）
+// ---------------------------------------------------------------------------
+
+Deno.test("PUT /api/profile: 同時に保存すると片方が409になる（楽観ロック）", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const userId = randomUserId();
+    const registerRes = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId, password: "correcthorse" }),
+    });
+    const cookie = cookieFrom(registerRes);
+    const headers = { "content-type": "application/json", cookie };
+
+    // 先に2本の接続を開いておく。接続確立の待ちが入ると2つ目のリクエストが
+    // 1つ目の完了後に届いてしまい、同時保存の状況にならないため
+    const warmup = await Promise.all([
+      fetch(`${base}/api/me`, { headers: { cookie } }),
+      fetch(`${base}/api/me`, { headers: { cookie } }),
+    ]);
+    for (const res of warmup) await res.body?.cancel();
+
+    // 2つのタブから同時に保存した状況。素の set だと両方200になり先の変更が消える
+    const [left, right] = await Promise.all([
+      fetch(`${base}/api/profile`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ nickname: "ひだり", tags: ["game"] }),
+      }),
+      fetch(`${base}/api/profile`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ nickname: "みぎ", tags: ["music"] }),
+      }),
+    ]);
+    await left.body?.cancel();
+    await right.body?.cancel();
+    assertEquals(
+      [left.status, right.status].sort(),
+      [200, 409],
+      "片方だけが保存され、もう片方は409で弾かれること",
+    );
+
+    // 保存されたのは200を返した方の内容だけ（もう片方は書かれていない）
+    const winner = left.status === 200 ? "ひだり" : "みぎ";
+    const meBody = await (await fetch(`${base}/api/me`, { headers: { cookie } })).json();
+    assertEquals(meBody.nickname, winner);
+    assertEquals(meBody.tags, winner === "ひだり" ? ["game"] : ["music"]);
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("PUT /api/profile: 続けて保存する分には409にならず後の内容が残る（回帰）", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const userId = randomUserId();
+    const registerRes = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId, password: "correcthorse" }),
+    });
+    const cookie = cookieFrom(registerRes);
+    const headers = { "content-type": "application/json", cookie };
+
+    const first = await fetch(`${base}/api/profile`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ nickname: "はじめ", tags: ["game"] }),
+    });
+    assertEquals(first.status, 200);
+    await first.body?.cancel();
+
+    const second = await fetch(`${base}/api/profile`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ nickname: "あとから", tags: ["music"] }),
+    });
+    assertEquals(second.status, 200, "直前の保存を読み直しているので競合しないこと");
+    assertEquals(await second.json(), { nickname: "あとから", tags: ["music"] });
+
+    const meBody = await (await fetch(`${base}/api/me`, { headers: { cookie } })).json();
+    assertEquals(meBody.nickname, "あとから");
+    assertEquals(meBody.tags, ["music"]);
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("PUT /api/profile: 保存の直前にアカウントが消えていると404（楽観ロックの前提）", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const userId = randomUserId();
+    const registerRes = await fetch(`${base}/api/auth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId, password: "correcthorse" }),
+    });
+    const cookie = cookieFrom(registerRes);
+
+    // セッションは有効なままアカウントだけ消す（楽観ロックの check 以前に弾く経路）
+    await kv.delete(["user", userId]);
+
+    const res = await fetch(`${base}/api/profile`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ nickname: "たろう", tags: [] }),
+    });
+    assertEquals(res.status, 404);
+    assert(typeof (await res.json()).error === "string", "error メッセージが返ること");
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});

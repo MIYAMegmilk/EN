@@ -405,6 +405,8 @@ function confirmKick(player) {
 function resetToEntry() {
   store.drop();
   clearPendingKick();
+  // 卓を出たらざわめきも止める。一覧に戻ったのに店内の音が続くと居場所が分からない
+  Sound.stop("gaya");
   state.snapshot = null;
   state.rejoinAfterRestart = false;
   Chat.reset();
@@ -418,6 +420,12 @@ function resetToEntry() {
 function receive(msg) {
   switch (msg.t) {
     case "roomState":
+      // 卓に入った瞬間だけ、戸を叩いてふすまが開く。roomState は再接続でも飛んでくるので
+      // 「いま卓の外にいた」ときに限る。以降はざわめきを絞ったまま流し続ける
+      if (state.snapshot === null) {
+        Sound.sequence("knock", "slidingScreen");
+        Sound.loop("gaya", { volume: Sound.GAYA_ROOM });
+      }
       state.snapshot = msg.snapshot;
       state.phase = msg.snapshot.phase;
       state.deadline = msg.snapshot.deadline;
@@ -1414,6 +1422,10 @@ function bind() {
 /** 起動する。ICE 設定を先に取ってから VC を初期化する */
 async function start() {
   bind();
+  Sound.bindButtons();
+  Sound.mountControls();
+  // 入室の音は鳴る間が決まっていて、その場で取りに行くと間に合わない
+  Sound.preload("decide", "knock", "slidingScreen");
   loadRoomTags();
   refreshAccount();
   bindVc(await fetchIceServers());

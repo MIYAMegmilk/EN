@@ -44,6 +44,14 @@ const LOGIN_WINDOW_MS = 60_000;
 /** 登録のレート制限（§3.8: IPごとに3件/時） */
 const REGISTER_LIMIT = 3;
 const REGISTER_WINDOW_MS = 60 * 60_000;
+/**
+ * 軽量プロフィール保存のレート制限。§3.8 に規定が無いため、ログイン・登録とは別枠で緩めに設ける。
+ * 認証必須とはいえ、ログインさえすれば KV への書き込みを無制限に叩けてしまうため上限を置く。
+ * プロフィール画面であだ名・趣味タグを何度か直す程度の連続操作は妨げない値にした。
+ * 【暫定値】IPごとに30件/分。
+ */
+const PROFILE_LIMIT = 30;
+const PROFILE_WINDOW_MS = 60_000;
 
 const USER_ID_RE = /^[A-Za-z0-9]+$/;
 
@@ -213,6 +221,7 @@ export class AuthApi {
   #debug: DebugRecorder | null;
   #loginLimiter = new RateLimiter(LOGIN_LIMIT, LOGIN_WINDOW_MS);
   #registerLimiter = new RateLimiter(REGISTER_LIMIT, REGISTER_WINDOW_MS);
+  #profileLimiter = new RateLimiter(PROFILE_LIMIT, PROFILE_WINDOW_MS);
 
   /** debug はデバッグ機能用のイベント記録先。渡さなければ記録しない（本番の任意設定は main.ts 側） */
   constructor(kv: Deno.Kv, debug: DebugRecorder | null = null) {
@@ -224,29 +233,32 @@ export class AuthApi {
   dispose(): void {
     this.#loginLimiter.dispose();
     this.#registerLimiter.dispose();
+    this.#profileLimiter.dispose();
   }
 
   /**
-   * デバッグ用途: ログイン・登録のレート制限の記録を消す（server/debug.ts の
+   * デバッグ用途: ログイン・登録・プロフィール保存のレート制限の記録を消す（server/debug.ts の
    * POST /api/debug/reset-limits から呼ばれる。開発中にレート制限で詰まったときに
    * 待たずに解除するため）。
    *
-   * ip を指定すればそのIPの枠だけ、省略すれば全IPの枠を消す。ログイン・登録は
+   * ip を指定すればそのIPの枠だけ、省略すれば全IPの枠を消す。ログイン・登録・プロフィール保存は
    * 常にまとめて消す（対象を個別に選べるようにすると呼び出し側の作りが複雑になるため。
-   * 詰まった開発者は大抵どちらの枠か覚えていない）。
+   * 詰まった開発者は大抵どの枠か覚えていない）。
    *
    * 戻り値は消えた枠（IP）の件数。ip指定時は「そのIPに記録が有ったか」を0/1で返す。
    */
-  resetRateLimits(ip?: string): { login: number; register: number } {
+  resetRateLimits(ip?: string): { login: number; register: number; profile: number } {
     if (ip !== undefined) {
       return {
         login: this.#loginLimiter.resetKey(ip) ? 1 : 0,
         register: this.#registerLimiter.resetKey(ip) ? 1 : 0,
+        profile: this.#profileLimiter.resetKey(ip) ? 1 : 0,
       };
     }
     return {
       login: this.#loginLimiter.resetAll(),
       register: this.#registerLimiter.resetAll(),
+      profile: this.#profileLimiter.resetAll(),
     };
   }
 
@@ -268,7 +280,7 @@ export class AuthApi {
       return this.tags();
     }
     if (url.pathname === "/api/profile" && req.method === "PUT") {
-      return await this.saveProfile(req);
+      return await this.saveProfile(req, clientIp);
     }
     return null;
   }
@@ -417,7 +429,20 @@ export class AuthApi {
   }
 
   /** ログイン中ユーザーのあだ名・趣味タグを保存する（§3.0 / §3.11、要ログイン） */
-  private async saveProfile(req: Request): Promise<Response> {
+  private async saveProfile(req: Request, clientIp: string): Promise<Response> {
+    // 判定はセッション検証より前に置く（login と同じ流儀）。KV への書き込みを伴う口なので、
+    // ログインの有無にかかわらず同一IPからの連打をまず止める
+    if (!this.#profileLimiter.tryConsume(clientIp, Date.now())) {
+      this.#debug?.record(
+        "profile.rateLimited",
+        `プロフィール保存失敗: IP ${clientIp} がプロフィール保存のレート制限（${PROFILE_LIMIT}件/分）に達しました`,
+        { ip: clientIp },
+      );
+      return errorResponse(
+        429,
+        "プロフィールの保存が多すぎます。しばらくしてから再度お試しください",
+      );
+    }
     const token = sessionToken(req);
     const userId = await verifySession(this.#kv, token);
     if (userId === null) {
@@ -455,7 +480,14 @@ export class AuthApi {
       return errorResponse(404, "アカウントが見つかりません");
     }
     const updated: User = { ...entry.value, nickname: nicknameResult.value, tags: uniqueTags };
-    await this.#kv.set(userKey, updated);
+    // 読み出してから書き戻すまでの間に別の保存が入ると、素の set では後勝ちで
+    // 先の変更が消える（同じユーザーが2つのタブでプロフィールを開いている場合など。
+    // あだ名と趣味タグを1回の書き込みでまとめて更新するため、消える範囲が広い）。
+    // 読んだ versionstamp を照合し、変わっていたら書かずに 409 を返して呼び出し側にやり直させる
+    const commit = await this.#kv.atomic().check(entry).set(userKey, updated).commit();
+    if (!commit.ok) {
+      return errorResponse(409, "プロフィールが同時に更新されました。再度お試しください");
+    }
 
     return jsonResponse({ nickname: updated.nickname, tags: updated.tags });
   }
