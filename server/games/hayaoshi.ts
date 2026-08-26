@@ -458,6 +458,9 @@ export const hayaoshiModule: GameModule<HayaoshiState, HayaoshiView> = {
     switch (event.t) {
       case "clientEvent":
         return handleClientEvent(state, event.playerId, event.payload, event.now);
+      // このゲームはチャットを使わない（回答は gameEvent のみ）
+      case "chatMessage":
+        return moduleNoop(state);
       case "timeout": {
         // 期限に達していなければ何もしない（早すぎる発火への防御）
         if (state.deadline === null || event.now < state.deadline) return moduleNoop(state);
