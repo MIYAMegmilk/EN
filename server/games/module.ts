@@ -61,6 +61,15 @@ export type ModuleInitInput = {
 export type ModuleEvent =
   /** クライアントからのゲーム内イベント。payload の検証はモジュールの責務（§9.1） */
   | { t: "clientEvent"; playerId: string; payload: unknown; now: number }
+  /**
+   * チャット発言（§3.9）。**ゲームが進行しているときだけ**ルーム層から流れてくる。
+   * 「回答をチャットに書く」タイプのゲーム（お絵かき当てなど）が使う入口で、
+   * text はルーム層で検証済み（文字数・制御文字）。使わないモジュールは無視してよい。
+   *
+   * bot（せり・ぐっちー）の発話はこの経路を通らない（チャットへ直接配信されるため）。
+   * つまり bot は回答者になれない
+   */
+  | { t: "chatMessage"; playerId: string; text: string; now: number }
   /** schedule 効果で予約した時刻に達した */
   | { t: "timeout"; now: number }
   /** 途中参加。進行中はそのゲームの観戦者として扱うのが既定（§5） */
@@ -86,6 +95,13 @@ export type ModuleEffect =
   | { t: "score"; totals: ScoreEntry[] }
   /** ゲームが終わった */
   | { t: "ended"; reason: "completed" | "tooFewPlayers" | "hostEnded" }
+  /**
+   * いま処理した chatMessage を**チャットに出さない**（履歴に積まない・配信しない・
+   * bot にも渡さない）。当てゲームで正解の発言が卓に見えると総取りになるため、
+   * モジュールが「この発言は伏せる」と判断できるようにする。
+   * chatMessage 以外のイベントで返しても意味を持たない
+   */
+  | { t: "suppressChat" }
   /**
    * prompt モジュール互換の効果。既存 S2C（roundResult / finalResult）をそのまま配る。
    * kind:"prompt" 以外のモジュールは使わない。既存クライアントを壊さないための経過措置で、

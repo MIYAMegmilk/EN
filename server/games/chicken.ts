@@ -199,6 +199,9 @@ export const chickenModule: GameModule<ChickenState, ChickenView> = {
     switch (event.t) {
       case "clientEvent":
         return handleSubmit(state, event.playerId, event.payload, event.now);
+      // このゲームはチャットを使わない（提出は gameEvent のみ）
+      case "chatMessage":
+        return moduleNoop(state);
       case "timeout": {
         // 期限に達していなければ何もしない（早すぎる発火への防御）
         if (state.deadline === null || event.now < state.deadline) return moduleNoop(state);

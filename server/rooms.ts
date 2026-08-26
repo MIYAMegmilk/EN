@@ -1353,6 +1353,20 @@ export class RoomManager {
     }
     times.push(now);
     entry.chatTimes.set(player.id, times);
+    // 進行中のゲームモジュールへ発言を渡す（設計書 §2.7「回答をチャットで受け取る」）。
+    // 進行していなければ applyModuleEvent が null を返すだけで、卓の挙動は今までどおり。
+    // origin を渡さないのは、チャットはゲーム操作ではないため。チャットを使わない
+    // モジュールが返すエラーを発言者へ見せてはいけない
+    const judged = this.applyModuleEvent(entry, {
+      t: "chatMessage",
+      playerId: player.id,
+      text: validated.value,
+      now,
+    });
+    // モジュールが suppressChat を返した発言は卓に出さない（履歴にも積まず、bot にも渡さない）。
+    // 当てゲームで正解の発言が見えると答えが総取りになるため。発言者本人へのフィードバックは
+    // モジュールの view が返す（お絵かき当ての myCorrectOrder）
+    if (judged !== null && judged.effects.some((e) => e.t === "suppressChat")) return;
     // TODO(チーム分担): §3.10 bot 発言の投稿口
     const message: ChatMessage = {
       id: crypto.randomUUID(),
@@ -2146,9 +2160,42 @@ export class RoomManager {
   private applyEffects(entry: RoomEntry, effects: ModuleEffect[], phaseBefore: RoomPhase): void {
     // schedule は「次にいつ起こすか」の予約であると同時に、専用モジュール型ゲームの
     // カウントダウン表示（gameView の deadline）の出どころでもある。viewChanged より
-    // 先に反映しておかないと、画面に1つ前の期限が出てしまうので、まとめて先に消化する
+    // 先に反映しておかないと、画面に1つ前の期限が出てしまうので、まとめて先に消化する。
+    //
+    // score も同じ理由で先に消化する。score は Player.score（配信されるスナップショット
+    // の一部）を書き換える効果だが、モジュールが返す効果の順序は viewChanged → schedule
+    // → score → ended のように score が viewChanged より後ろに来ることがある
+    // （例: chicken.ts の finish()）。効果を配列順に処理すると、その viewChanged の時点
+    // ではまだ score が未反映のまま配信されてしまい、しかもゲーム終了直後は
+    // running=false になった影響で ended 側の再配信（phase 変化がある場合のみ）も
+    // 起きないため、更新後の得点が一度もクライアントへ届かない、という不具合が起きる
+    // （実機で確認済み: チキンレース終了後、参加者一覧の得点が反映されないまま）。
+    // 「モジュールが返す効果の順序に依存しない」ようにするため、score は broadcastPhase
+    // より前に必ず適用してしまう。
+    //
+    // さらに、score が変えるのは Player.score（RoomSnapshot.players の一部）であって、
+    // broadcastPhase が配る S2C "phase"（および gameView）のどちらにも Player.score は
+    // 乗らない。つまり順序を直しても、そのままでは誰にも roomState が配り直されず、
+    // 卓の参加者一覧の得点はいつまでも初回 join 時の値のままになる
+    // （これも実機で確認済み: score 適用後に "phase" は届くが "roomState" は届かない）。
+    // score は「ゲーム1本につき1回」しか来ない効果なので、score を消化したときに
+    // 全員へ roomState を配り直し、参加者一覧を最新の得点で更新する
+    let scoreApplied = false;
     for (const effect of effects) {
       if (effect.t === "schedule") entry.scheduledAt = effect.at;
+      if (effect.t === "score") {
+        scoreApplied = true;
+        // Player.score はゲーム横断の累計。1ゲーム分の合計をここで加算する
+        for (const row of effect.totals) {
+          const player = entry.room.players.get(row.playerId);
+          if (player !== undefined) player.score += row.totalScore;
+        }
+      }
+    }
+    if (scoreApplied) {
+      for (const player of entry.room.players.values()) {
+        this.sendSnapshot(entry, player);
+      }
     }
     let previousPhase = phaseBefore;
     for (const effect of effects) {
@@ -2166,11 +2213,7 @@ export class RoomManager {
           // 上で先に消化済み
           break;
         case "score":
-          // Player.score はゲーム横断の累計。1ゲーム分の合計をここで加算する
-          for (const row of effect.totals) {
-            const player = entry.room.players.get(row.playerId);
-            if (player !== undefined) player.score += row.totalScore;
-          }
+          // 上で先に消化済み（viewChanged より前に反映しておく必要があるため）
           break;
         case "roundResult":
           this.broadcast(entry, { t: "roundResult", scores: effect.scores });
@@ -2179,6 +2222,10 @@ export class RoomManager {
         case "finalResult":
           this.broadcast(entry, { t: "finalResult", scores: effect.scores });
           this.applyBotEvent(entry, botResultEvent("finalResult", effect.scores));
+          break;
+        case "suppressChat":
+          // 発言を伏せるかどうかは handleChat が結果から直接読む（配信前に決める必要がある）。
+          // ここでは何もしない
           break;
         case "ended": {
           // state は捨てずに残す（最終結果を表示したままにするため）。

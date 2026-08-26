@@ -40,6 +40,8 @@ import {
   ROOM_TAGS_MAX,
   type S2C,
   type SandboxGameInfo,
+  WS_GAME_EVENT_HARD_MAX,
+  WS_GAME_EVENT_RATE_MAX,
   WS_RATE_MAX,
   WS_RATE_WINDOW_MS,
   WS_SANDBOX_HARD_MAX,
@@ -311,6 +313,13 @@ async function handleWebSocket(
   const sandboxLimiter = new MessageRateLimiter(WS_SANDBOX_RATE_MAX);
   const sandboxHardLimiter = new MessageRateLimiter(WS_SANDBOX_HARD_MAX);
   let sandboxNoticeAt: number | null = null;
+  // gameEvent も同じ構造の別枠（設計書 docs/design/games-unified.md §2.2 / §9.3）。
+  // お絵かき当てのようなリアルタイム描画は毎秒10件前後のチャンクを送るため、
+  // 一般枠（20件/秒。他の操作と共用）では正当な描き手を切断してしまう。
+  // ソフト超過は破棄のみ・通知は判定窓1回、ハード超過だけ切断する
+  const gameEventLimiter = new MessageRateLimiter(WS_GAME_EVENT_RATE_MAX);
+  const gameEventHardLimiter = new MessageRateLimiter(WS_GAME_EVENT_HARD_MAX);
+  let gameEventNoticeAt: number | null = null;
   socket.onmessage = (event) => {
     const data = event.data;
     if (typeof data !== "string") {
@@ -339,6 +348,8 @@ async function handleWebSocket(
     // ルーム参加前の連打も「1接続あたり」の規定どおり一般枠で数える。
     const isSignal = msg !== null && msg.t === "rtcSignal";
     const isSandboxSignal = msg !== null && msg.t === "sandboxSignal";
+    // gameEvent と確定したものだけを別枠へ回す（壊れた JSON・未知の t は必ず一般枠）
+    const isGameEvent = msg !== null && msg.t === "gameEvent";
     const windowSec = WS_RATE_WINDOW_MS / 1000;
     // 1003（受理できない種類のデータ）/ 1009（サイズ超過）と区別し、送信ポリシー違反を示す
     // 1008 で閉じる。切断後は onclose → manager.disconnect が走るため、§3.2 の60秒猶予で
@@ -410,6 +421,35 @@ async function handleWebSocket(
             code: "RATE_LIMITED",
             message:
               `サンドボックスゲームの送信が多すぎます（${windowSec}秒に${WS_SANDBOX_RATE_MAX}件まで）。超過分は破棄しました`,
+          });
+        }
+        return;
+      }
+    } else if (isGameEvent) {
+      // 両方の枠に記録してから判定する（同じ受信列を別々の上限で数える）
+      const withinSoft = gameEventLimiter.accept();
+      const withinHard = gameEventHardLimiter.accept();
+      if (!withinHard) {
+        disconnect(WS_GAME_EVENT_HARD_MAX, "gameEvent-hard");
+        return;
+      }
+      if (!withinSoft) {
+        // ソフト上限の超過は当該メッセージを破棄するだけで切断しない（設計書 §9.3）。
+        // WS は全用途1本共用（§3.2）なので、ここで切断するとチャットも VC も巻き添えになる。
+        // 通知は判定窓につき1回に絞り、超過分の件数だけ返信が増えるのを防ぐ
+        const at = Date.now();
+        if (gameEventNoticeAt === null || at - gameEventNoticeAt >= WS_RATE_WINDOW_MS) {
+          gameEventNoticeAt = at;
+          debug.record(
+            "ws.rateLimited",
+            `WS破棄: gameEvent枠のソフト上限（${windowSec}秒に${WS_GAME_EVENT_RATE_MAX}件）を超えたため以降のメッセージを破棄します`,
+            { bucket: "gameEvent-soft", max: WS_GAME_EVENT_RATE_MAX },
+          );
+          link.send({
+            t: "error",
+            code: "RATE_LIMITED",
+            message:
+              `ゲームの送信が多すぎます（${windowSec}秒に${WS_GAME_EVENT_RATE_MAX}件まで）。超過分は破棄しました`,
           });
         }
         return;
