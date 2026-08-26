@@ -1,15 +1,30 @@
 # UI と実装ロジックの差分
 
-> **2026-08-24 更新**: 公開ルームまわりを実装したため、以下は解消済み。
+> **2026-08-26 更新**: 合言葉・承認制（ノック）・ランダムマッチ（いますぐ飲む）・部屋タグを
+> 実装したため、以下は解消済み。以下の表のうち該当する行は古い記述のまま残っているものがあるので、
+> このメモを優先すること。
 >
 > - `GET /api/rooms`（`server/main.ts`）… 稼働中の公開ルームを返す。認証不要・10秒ポーリング
 > - 公開ルームの作成（`rooms.ts` `handleCreateRoom`）… `visibility: "public"` + ルーム名必須
-> - 公開ルームへのオープン入室（`doJoin`）… コードだけで入室できる。承認制（ノック）は未実装のまま
-> - `PublicRoomSummary`（`server/types.ts`）… 一覧1行の型。**型の追加なのでチームのレビューが要る**
-> - ホーム（`public/index.html` + `public/rooms.js`）… お座敷一覧の描画と10秒ポーリング
+> - 公開ルームへのオープン入室（`doJoin`）… コードだけで入室できる
+> - **承認制（ノック）** … `handleKnock` / `handleApproveKnock` / `handleRejectKnock`（`server/rooms.ts`）。
+>   フロントは `public/app.js` の `knockRoom` / `renderKnocks` と `public/rooms.js` の
+>   「ノックする」ボタン（`room.entryMode === "knock"` で出し分け）。テストは
+>   `server/tests/rooms_test.ts` の「ノック: …」多数
+> - **合言葉** … `validatePassphrase` / `passphrases` マップ（`server/rooms.ts`）。フロントは
+>   `public/index.html` の `#passphrase` 欄と `public/create-room.js` の入力欄（招待制のみ表示）。
+>   テストは `rooms_test.ts` の「合言葉: …」多数
+> - **ランダムマッチ（いますぐ飲む）** … `joinQueue` / `leaveQueue` と待機列の成立処理
+>   （`server/rooms.ts`）。フロントは `public/index.html` の `#queue-join` ボタンと
+>   `public/app.js` の `joinQueue` / `renderQueue`。テストは `rooms_test.ts` の「相席: …」多数
+> - **部屋タグ** … `ROOM_TAGS` / `GET /api/room-tags`（`server/room_tags.ts` / `main.ts`）。
+>   フロントは `public/create-room.js`（作成時の選択）と `public/rooms.js`（一覧のタグ表示）
+> - `PublicRoomSummary`（`server/types.ts`）… 一覧1行の型。`entryMode` / `tags` / `createdAt` を含む
+> - ホーム（`public/index.html` + `public/rooms.js`）… お座敷一覧の描画と10秒ポーリング。
+>   「◯時から」（`createdAt`）も一覧に表示済み
 >
-> 以下の表で「公開ルーム一覧そのもの」「承認制／ノックする」の行のうち、一覧と作成に関する
-> 記述は上記で置き換わっている。タグ・サムネ・「◯時から」の一部・ランダムマッチは未実装のまま。
+> 未実装のまま残っているのは、趣味タグ以外のプロフィール周り（統計・卓歴・自由記述）・
+> サムネイル画像・ゲームUI本体など、下の表の該当行のとおり。
 
 `public/mock/` の4画面を、**いまサーバーに実装されているロジック**（`server/types.ts` /
 `rooms.ts` / `auth.ts` / `bot.ts` / `main.ts`、`public/room/vc.js`）と突き合わせた結果。
@@ -29,7 +44,7 @@
 | **ルーム状態はメモリのみ** | `Room` は KV に置かない（`types.ts` §5 コメント / 設計書 §5）。サーバー再起動で全ルーム消滅。24時間で自動削除 |
 | **永続化されるのは4つだけ** | アカウント・認証セッション・ゲーム定義・共有コードマップ。**履歴・統計は一切残らない** |
 | **`/` の振り分け** | `main.ts` … ログイン済み → `index.html`、未ログイン → `login.html` |
-| **HTTP API は認証系と `/api/ice` のみ** | `main.ts` に `// TODO(チーム分担): §4.0 HTTP API（/api/rooms, /api/games/*）` が残っている |
+| **HTTP API** | 認証系・`/api/ice`・`/api/rooms`・`/api/room-tags`・`/api/rooms/:code`（PATCH）・`/api/tags`・`/api/profile` は実装済み。`main.ts` には `// TODO(チーム分担): §4.0 HTTP API（/api/rooms 以外の未実装分）` が残っており、`/api/games/*` などはまだ無い |
 
 ---
 
@@ -41,7 +56,7 @@
 | のれんをくぐる | ✅ ある | 成功で Cookie 発行（HttpOnly / SameSite=Lax） |
 | ふらっと（ゲスト） | ✅ ある | `join` はゲスト可。ただしルーム作成は要ログイン |
 | **次回も暖簾をくぐったままにする** | 🔴 ロジックが無い | セッションは**常に30日固定**。「保持しない」選択肢がサーバーに無い。チェックボックスは飾りになる |
-| **合言葉で入る** | 🔴 ロジックが無い | `C2S` に合言葉が無い。`join` が受けるのは **6桁ルームコード**のみ。合言葉（4〜20文字・全ルーム横断で一意）は §3.1 の仕様にあるだけで未実装 |
+| **合言葉で入る** | ✅ ある | `join` は合言葉（`msg.passphrase`）でも入室できる（`server/rooms.ts` `validatePassphrase` / `passphraseKey`）。招待制の卓にのみ付けられ、4〜20文字・全ルーム横断で一意。ホーム（`index.html` `#passphrase`）に入力欄がある |
 | 再発行はできません | ✅ 仕様どおり | §3.0 でリセットは作らない |
 | 登録画面への導線 | ⚠️ モックに無い | `register` は実装済みだが、モックにタブ／リンクが無い |
 
@@ -49,38 +64,41 @@
 
 ## 2. お座敷一覧（`rooms.html`）
 
-**この画面はデータ源が丸ごと存在しない。** 一覧の中身は全部ダミーです。
+**このモックは初期のダミー一覧を元にした比較表。** 実画面は `public/index.html` +
+`public/rooms.js` に統合されており、すでに `GET /api/rooms` に繋がって実データを
+10秒ポーリングで描画している（`public/mock/` 自体は現存しない）。以下はモックの要素との突き合わせ。
 
 | モックの要素 | 実装の状態 | 詳細 |
 |---|---|---|
-| **公開ルーム一覧そのもの** | 🔴 ロジックが無い | `GET /api/rooms` が未実装（`main.ts` の TODO）。10秒ポーリングの取得先が無い |
+| **公開ルーム一覧そのもの** | ✅ ある | `GET /api/rooms`（`main.ts`）が `manager.listPublicRooms()` を返す。認証不要・`index.html` + `rooms.js` が10秒ポーリングで描画する |
 | TAKU-01 などの卓コード | ⚠️ 表記が違う | 実際は `ROOM_CODE_LENGTH = 6` の**数字6桁**。`TAKU-04` 形式ではない |
 | **3 / 8 名** の定員 | ⚠️ 値が違う | 定員は `ROOM_CAPACITY = 10` 固定。ルームごとに 6/8/10 と変える仕組みは無い |
 | 顔（あだ名の頭文字アイコン） | ⚠️ 型はあるが未配線 | `PlayerPublic.nickname` から頭1文字を取れば作れる。アイコン画像の型は無い |
-| **タグ（初めての方歓迎／静かめ …）** | 🔴 ロジックが無い | `Room` にタグのフィールドが無い。趣味タグ（§3.11）は `PlayerPublic` にも無い。`GET /api/tags` も無い |
-| **絞り込みピル** | 🔴 上と同じ | 絞り込む対象のデータが無い |
-| **19:40 から** | 🔴 ロジックが無い | `Room.createdAt` はサーバーにあるが `RoomSnapshot` に含まれず、一覧APIも無いので外へ出る経路が無い |
-| **空きあり／満席ちかし** | ⚠️ 導出は可能 | `players.length` と定員から作れる。ただし一覧APIが要る |
-| **承認制／ノックする** | 🔴 ロジックが無い | `knock` / `approveKnock` / `rejectKnock` は `rooms.ts` で `INVALID_INPUT: この機能は未実装です` を返す。`visibility` も `"public" \| "private"` の2値で、**オープン入室と承認制の区別が型に無い** |
+| **タグ（初めての方歓迎／静かめ …）** | ✅ ある | `Room` にプリセットタグ（`server/room_tags.ts` の `ROOM_TAGS`）が付けられる。`GET /api/room-tags` で一覧を取得し、`create-room.js` の選択欄・`rooms.js` の一覧表示（`.room-tags`）まで配線済み |
+| **絞り込みピル** | 🔴 ロジックが無い | タグ自体はあるが、一覧をタグで絞り込むUI・ロジックはまだ無い |
+| **19:40 から** | ✅ ある | `PublicRoomSummary.createdAt` が一覧APIに含まれ、`rooms.js` の `formatTime()` が「◯時から」として表示している |
+| **空きあり／満席ちかし** | ✅ ある | `PublicRoomSummary.playerCount` / `capacity` から `rooms.js` が導出して表示している |
+| **承認制／ノックする** | ✅ ある | `handleKnock` / `handleApproveKnock` / `handleRejectKnock`（`server/rooms.ts`）。`RoomEntryMode = "open" \| "knock"` が型にあり、一覧は `entryMode` に応じて「入店」／「ノックする」を出し分ける（`rooms.js`）。承認待ちの一覧はホストにのみ `app.js` の `renderKnocks` が表示する |
 | サムネイル画像 | 🔴 ロジックが無い | 設計書 §5 のプリセット画像。型もアセットも未着手（モックにも入れていない） |
 | 卓を立てる | ✅ ある | `createRoom`（要ログイン）。ただし公開ルーム名は `ROOM_NAME_MAX = 20` |
-| **「いますぐ飲む」（ランダムマッチ）** | 🔴 ロジックが無い＋モックにも無い | `joinQueue` / `leaveQueue` / `queueStatus` / `matched` が `C2S`/`S2C` に存在しない。**企画書 §3 の主要導線なのにモックからも抜けている** |
+| **「いますぐ飲む」（ランダムマッチ）** | ✅ ある | `C2S: joinQueue` / `leaveQueue`、成立処理は `server/rooms.ts`。`index.html` の `#queue-join` ボタンと `app.js` の `joinQueue` / `renderQueue` が導線になっている |
 
 ---
 
 ## 3. 手帳（`profile.html`）
 
-**この画面は表示できる実データがほぼ無い。** `GET /api/me` が返すのは `{ userId }` **だけ**です。
+**軽量プロフィール（あだ名・趣味タグ）は実装済み。** それ以外の統計・卓歴・自由記述は
+実データが無いまま。`GET /api/me` は `{ userId, nickname?, tags? }` を返す（`server/auth.ts` `me()`）。
 
 | モックの要素 | 実装の状態 | 詳細 |
 |---|---|---|
 | ユーザーID（@takashi） | ✅ ある | `/api/me` の `userId` |
-| あだ名（たかし） | 🔴 ロジックが無い | アカウントへのあだ名保存（§3.0）が未実装。`PUT /api/profile` が無い。あだ名は**入室のたびに手入力**する現状 |
+| あだ名（たかし） | ✅ ある | `PUT /api/profile`（`server/auth.ts` `saveProfile`）でアカウントに保存でき、`/api/me` が `nickname` を返す。`public/profile.js` / `public/entrance.js` から編集できる |
 | **48 / 312 / 27 / 9 の統計** | 🔴 ロジックが無い | 集計対象が残らない（ルームはメモリのみ・24時間で消滅）。出すなら KV への履歴設計から |
 | **通っている卓** | 🔴 同上 | 過去に入った卓を記録する仕組みが無い |
 | **呑んだ記録** | 🔴 同上 | 滞在時間・杯数・乾杯回数を数えるロジックがどこにも無い |
 | **ひとこと／住まい／今夜の一杯** | 🔴 仕様と衝突 | §3.7「他者に見えるのはあだ名とプリセット趣味タグのみ。自由記述プロフィールは作らない」。実装するなら仕様変更の合意が要る |
-| 呑み方タグ | 🔴 ロジックが無い | 趣味タグ（§3.11）が未実装。プリセットも `GET /api/tags` も無い |
+| 呑み方タグ | ✅ ある | プリセット趣味タグ（§3.11）は `GET /api/tags` で一覧を取得でき、`PUT /api/profile` の `tags` で保存する。`public/profile.js` / `public/entrance.js` がチェックボックスとして配線済み |
 | **卓に入るときの決めごと（トグル4つ）** | 🔴 ロジックが無い | 保存先が無い。うち「自動でカメラを入れる」は **§3.6 の「カメラは全ルーム初期OFF」と正面から衝突**する。安全設計の根幹なので、実装するなら要議論 |
 | いま呑んでいます | 🔴 ロジックが無い | アカウントの在室状態を横断で持っていない |
 | 卓歴 1年4ヶ月 | ⚠️ 導出は可能 | `User.createdAt` はある。ただし `/api/me` が返していない |
@@ -121,7 +139,7 @@
 | 席替え | 🔴 ロジックが無い | 対応する `C2S` が無い |
 | お品書き タブ | ⚠️ 意味が未定 | ゲーム一覧（`RoomSnapshot.availableGames`）を指すなら繋がる。メニュー的な別物なら未実装 |
 | 通信 良好 | ⚠️ 導出は可能 | `vc.js` が各ピアの `connectionState` を持っている。集約して1つの表示にする関数が要る |
-| キック（ホスト） | 🔴 ロジックが無い | `kick` は `INVALID_INPUT: この機能は未実装です`。**モックにもUIが無い**。§3.7 の安全設計の要 |
+| キック（ホスト） | ✅ ある | `handleKick`（`server/rooms.ts`、ホストのみ）。`public/app.js` に確認つきの `confirmKick` とキックボタンが実装済み |
 | 通報リンク | 🔴 モック側の欠落 | §3.7 で「ルーム内フッターに常設」と決めている外部フォームへのリンクが無い |
 | TAKU-04 ／ 01:12:40 | ⚠️ 一部だけある | コードは6桁数字。経過時間は `Room.createdAt` があるが `RoomSnapshot` に含まれない |
 
@@ -138,8 +156,8 @@
 
 ## まとめ: 実装順の目安
 
-1. **モックの直しで済むもの** … ゲームUI（8フェーズ）・川柳テロップ・終了アンケート・bot ON/OFF・キック・通報リンクの置き場を足す。サーバーは既にある
+1. **モックの直しで済むもの** … ゲームUI（8フェーズ）・川柳テロップ・終了アンケート・bot ON/OFF・通報リンクの置き場を足す。サーバーは既にある（キックはUIも実装済み）
 2. **配線すれば動くもの** … 参加者タイル・チャット・VC・カメラ・ホスト表示・通信状態
-3. **サーバーの実装が要るもの（型変更なし）** … `GET /api/rooms`、knock 系、kick、`importGame`
-4. **型の追加＝チーム合意が要るもの** … 趣味タグ、ルームタグ・サムネ、合言葉、ランダムマッチ、あだ名のアカウント保存、他者のマイク状態
+3. **サーバーの実装が要るもの（型変更なし）** … `importGame`
+4. **型の追加＝チーム合意が要るもの** … 他者のマイク状態、サムネイル画像、絞り込みピル（趣味タグ・ルームタグ・合言葉・ランダムマッチ・ノック・あだ名のアカウント保存は実装済み）
 5. **仕様変更の議論が要るもの** … 手帳の自由記述（§3.7 と衝突）、カメラ自動ON（§3.6 と衝突）、統計・履歴の永続化（メモリのみの前提と衝突）
