@@ -21,6 +21,7 @@ import {
   VOICE_RATE_WINDOW_MS,
 } from "../rooms.ts";
 import { DEFAULT_PHASE_DURATIONS } from "../engine.ts";
+import { OFFICIAL_GAMES } from "../official_games.ts";
 import type { S2C } from "../types.ts";
 import {
   CHAT_HISTORY_MAX,
@@ -236,7 +237,7 @@ Deno.test("ルーム作成: 作成者がホストとして入室し、6桁コー
   assertEquals(snapshot.youAreHost, true);
   assertEquals(snapshot.hostId, snapshot.youId);
   assertEquals(snapshot.phase, "lobby");
-  assertEquals(snapshot.availableGames.length, 3);
+  assertEquals(snapshot.availableGames.length, OFFICIAL_GAMES.length);
   assertExists(snapshot.session);
   assertEquals(manager.roomCount, 1);
   manager.dispose();
