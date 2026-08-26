@@ -5,7 +5,8 @@
  * ポートも開かない（`BoardServer.handle()` を直接呼ぶ）。
  *
  * 観点:
- *   - 認証: 全エンドポイントがトークン無し / 誤りで拒否されること（**`GET /` も**）
+ *   - 認証: `/api/*` がトークン無し / 誤りで拒否されること（**1本も緩めていないこと**）
+ *   - 画面: `GET /`（シェル HTML）だけは無認証で 200。かつ**中身を持たない**こと（§7-6）
  *   - 表明: 作成・一覧・更新・1セッション1表明
  *   - TTL の境界（直前・直後）
  *   - 重なり判定: 完全一致 / ディレクトリ配下 / 重ならない / 自分自身は除外 / パス無し
@@ -193,9 +194,13 @@ function bodyOfExactSize(base: Record<string, string>, size: number): string {
   return JSON.stringify({ ...base, pad: "x".repeat(padLength) });
 }
 
-/** テスト対象の全エンドポイント（認証テストで総当たりする） */
-const ALL_ENDPOINTS: ReadonlyArray<[string, string]> = [
-  ["GET", "/"],
+/**
+ * **認証必須**の口を全部並べたもの（認証テストで総当たりする）。
+ * `GET /`（シェル HTML）だけが例外で、ここには入らない（§7-6。下の PUBLIC_ENDPOINT）。
+ * **口を足したらここにも足すこと。** 無認証で通ってよい口を増やすときは、
+ * 「情報を持たない静的な器か」を必ず確かめる。
+ */
+const AUTHED_ENDPOINTS: ReadonlyArray<[string, string]> = [
   ["GET", "/api/claims"],
   ["POST", "/api/claims"],
   ["PATCH", "/api/claims/01ABC"],
@@ -206,15 +211,23 @@ const ALL_ENDPOINTS: ReadonlyArray<[string, string]> = [
   ["GET", "/api/prs"],
   ["POST", "/api/messages"],
   ["GET", "/unknown"],
+  // 画面のパスでも、GET 以外は認証を通す（無認証にしてあるのは GET だけ）
+  ["POST", "/"],
 ];
+
+/** 無認証で配ってよい唯一の口（§7-6） */
+const PUBLIC_ENDPOINT: [string, string] = ["GET", "/"];
+
+/** 応答ヘッダの作法を確かめるときに叩く口（無認証のシェルも含めて全部） */
+const ALL_ENDPOINTS: ReadonlyArray<[string, string]> = [PUBLIC_ENDPOINT, ...AUTHED_ENDPOINTS];
 
 // ---------------------------------------------------------------------------
 // 認証（§6 / §7-6 / §7-8）
 // ---------------------------------------------------------------------------
 
-Deno.test("認証: トークン無しでは全エンドポイントが401（GET / を含む）", async () => {
+Deno.test("認証: トークン無しでは /api/* が全部401（緩めた口はシェル HTML だけ）", async () => {
   await withBoard(async (ctx) => {
-    for (const [i, [method, path]] of ALL_ENDPOINTS.entries()) {
+    for (const [i, [method, path]] of AUTHED_ENDPOINTS.entries()) {
       // 失敗の連打でレート制限にかからないよう、IP を毎回変える
       const res = await ctx.call(method, path, {
         token: null,
@@ -229,9 +242,9 @@ Deno.test("認証: トークン無しでは全エンドポイントが401（GET 
   });
 });
 
-Deno.test("認証: 誤ったトークンでは全エンドポイントが401（GET / を含む）", async () => {
+Deno.test("認証: 誤ったトークンでは /api/* が全部401", async () => {
   await withBoard(async (ctx) => {
-    for (const [i, [method, path]] of ALL_ENDPOINTS.entries()) {
+    for (const [i, [method, path]] of AUTHED_ENDPOINTS.entries()) {
       // 失敗の連打でレート制限にかからないよう、IP を毎回変える
       const res = await ctx.call(method, path, {
         token: "enboard_wrongwrongwrong",
@@ -373,30 +386,154 @@ Deno.test("応答: OPTIONS にプリフライトを返さない（CORS 不許可
 // 画面（§7-6）
 // ---------------------------------------------------------------------------
 
-Deno.test("画面: HTML があれば認証付きで返す", async () => {
+Deno.test("画面: シェル HTML はトークン無しでも200で返る（§7-6）", async () => {
   const file = await Deno.makeTempFile({ suffix: ".html" });
   await Deno.writeTextFile(file, "<!doctype html><title>board</title>");
   try {
     await withBoard(async (ctx) => {
-      const res = await ctx.call("GET", "/");
+      // ブラウザはページ遷移に Authorization を付けられないので、
+      // ヘッダーを1つも持たない素のリクエストで届く
+      const res = await ctx.call("GET", "/", { token: null });
       assertEquals(res.status, 200);
       assertEquals(res.headers.get("content-type"), "text/html; charset=utf-8");
-      assertEquals(res.headers.get("cache-control"), "no-store");
+      assertEquals(res.headers.get("www-authenticate"), null);
       assertStringIncludes(await res.text(), "<title>board</title>");
+      // 末尾スラッシュが増えても、誤ったトークンが付いていても同じように返る
+      // （認証をそもそも見ないので、壊れた Authorization で締め出されない）
+      const slashed = await ctx.board.handle(
+        new Request(`${ORIGIN}//`),
+        "192.0.2.240",
+      );
+      assertEquals(slashed.status, 200);
+      await slashed.body?.cancel();
+      const withBadToken = await ctx.call("GET", "/", { token: "enboard_wrong" });
+      assertEquals(withBadToken.status, 200);
+      await withBadToken.body?.cancel();
     }, { htmlPath: file });
   } finally {
     await Deno.remove(file);
   }
 });
 
-Deno.test("画面: HTML が置かれていなければ、置き場所を示す503を返す", async () => {
-  const missing = `${await Deno.makeTempDir()}/not-created.html`;
+Deno.test("画面: 無認証なのは GET だけ。同じパスの他メソッドは認証を通す", async () => {
   await withBoard(async (ctx) => {
-    const res = await ctx.call("GET", "/");
+    const denied = await ctx.call("POST", "/", { token: null, body: {} });
+    assertEquals(denied.status, 401);
+    await denied.body?.cancel();
+    const allowed = await ctx.call("POST", "/", { body: {} });
+    assertEquals(allowed.status, 405);
+    assertEquals(allowed.headers.get("allow"), "GET");
+    await allowed.body?.cancel();
+  });
+});
+
+Deno.test("画面: シェル HTML に表明・タスク・あだ名・トークンが混ざらない（§7-6）", async () => {
+  // 無認証で配る前提が崩れていないかを見る。**中身を持たないからこそ配れる**ので、
+  // 実際にデータを作ったうえで、シェルの本文に1つも出てこないことを確かめる。
+  await withBoard(async (ctx) => {
+    await createClaim(ctx, {
+      sessionId: "s-shell",
+      title: "ゼッタイニモレテハイケナイ表明",
+      note: "ヒミツノメモ",
+      branch: "feature/himitsu-branch",
+      paths: ["server/himitsu.ts"],
+    });
+    await createClaim(ctx, {
+      sessionId: "s-shell-other",
+      title: "ヒロシノサギョウ",
+      paths: ["public/hiroshi.js"],
+    }, ctx.otherToken);
+    const task = await ctx.call("POST", "/api/tasks", {
+      body: { title: "ヒミツノタスク", body: "ヒミツノホンブン" },
+    });
+    assertEquals(task.status, 201, await task.clone().text());
+    await task.body?.cancel();
+
+    // 既定の画面（tools/board/public/index.html）をそのまま、トークン無しで取る
+    const res = await ctx.call("GET", "/", { token: null });
+    assertEquals(res.status, 200);
+    const html = await res.text();
+    const secrets = [
+      "ゼッタイニモレテハイケナイ表明",
+      "ヒミツノメモ",
+      "feature/himitsu-branch",
+      "server/himitsu.ts",
+      "ヒロシノサギョウ",
+      "public/hiroshi.js",
+      "ヒミツノタスク",
+      "ヒミツノホンブン",
+      // メンバーのあだ名（誰が居るかもチームの内部情報）
+      "ちいかわ",
+      "ひろし",
+      // トークンとそのハッシュ
+      ctx.token,
+      ctx.otherToken,
+      await hashToken(ctx.token),
+    ];
+    for (const secret of secrets) {
+      assertFalse(html.includes(secret), `シェル HTML に混ざっている: ${secret}`);
+    }
+    // 認証付きの API 側には、ちゃんと入っている（上の検査が空振りしていない証拠）
+    const claims = await ctx.call("GET", "/api/claims");
+    const claimsText = await claims.text();
+    assertStringIncludes(claimsText, "ゼッタイニモレテハイケナイ表明");
+    assertStringIncludes(claimsText, "ちいかわ");
+  });
+});
+
+Deno.test("画面: シェル HTML にセキュリティヘッダが付く（CORS は無し・no-store）", async () => {
+  await withBoard(async (ctx) => {
+    const res = await ctx.call("GET", "/", { token: null });
+    assertEquals(res.status, 200);
+    const html = await res.text();
+
+    assertEquals(res.headers.get("cache-control"), "no-store");
+    assertEquals(res.headers.get("x-content-type-options"), "nosniff");
+    assertEquals(res.headers.get("referrer-policy"), "no-referrer");
+    assertEquals(res.headers.get("access-control-allow-origin"), null);
+    assertEquals(res.headers.get("access-control-allow-credentials"), null);
+    assertEquals(res.headers.get("access-control-allow-headers"), null);
+
+    const csp = res.headers.get("content-security-policy");
+    assert(csp !== null, "CSP が付いていない");
+    const directives = new Map(
+      csp.split(";").map((part) => part.trim()).filter((part) => part.length > 0).map((part) => {
+        const at = part.indexOf(" ");
+        return at < 0 ? [part, ""] as const : [part.slice(0, at), part.slice(at + 1)] as const;
+      }),
+    );
+    assertEquals(directives.get("default-src"), "'none'");
+    assertEquals(directives.get("connect-src"), "'self'");
+    assertEquals(directives.get("base-uri"), "'none'");
+    assertEquals(directives.get("form-action"), "'none'");
+    // meta では効かない。クリックジャッキング対策はヘッダー側にしか置けない
+    assertEquals(directives.get("frame-ancestors"), "'none'");
+
+    // ヘッダーと index.html の <meta> がずれると、画面のスクリプトが動かなくなる。
+    // script-src（インライン1本のハッシュ）が食い違っていないことを見る
+    const meta = /<meta\s+http-equiv="Content-Security-Policy"\s+content="([^"]+)"/.exec(html);
+    assert(meta !== null, "index.html に CSP の <meta> が無い");
+    const metaScriptSrc = /script-src ([^;]+)/.exec(meta[1]);
+    assert(metaScriptSrc !== null, "<meta> の CSP に script-src が無い");
+    assertEquals(
+      directives.get("script-src"),
+      metaScriptSrc[1].trim(),
+      "ヘッダーと <meta> の script-src がずれている（index.html を直したら server.ts も直すこと）",
+    );
+  });
+});
+
+Deno.test("画面: HTML が置かれていなければ、置き場所を示す503を返す", async () => {
+  const dir = await Deno.makeTempDir();
+  const missing = `${dir}/not-created.html`;
+  await withBoard(async (ctx) => {
+    const res = await ctx.call("GET", "/", { token: null });
     assertEquals(res.status, 503);
     const body = await res.json();
     assertStringIncludes(body.error, "not-created.html");
     assertStringIncludes(body.error, "画面");
+    // この 503 は無認証で誰でも引ける。サーバー上の絶対パスは外へ出さない
+    assertFalse(String(body.error).includes(dir), body.error);
   }, { htmlPath: missing });
 });
 
