@@ -471,7 +471,7 @@ export function mount(container, api) {
 // 小道具
 // -----------------------------------------------------------------------------
 
-/** テキストだけを持つ要素を作る（chat.js / sandbox.js と同じ方式。innerHTML は使わない） */
+/** テキストだけを持つ要素を作る（chat.js と同じ方式。innerHTML は使わない） */
 function el(tag, text) {
   const node = document.createElement(tag);
   if (text !== undefined && text !== null) node.textContent = String(text);

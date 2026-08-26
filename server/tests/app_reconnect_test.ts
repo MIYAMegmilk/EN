@@ -175,7 +175,6 @@ async function load(
     "Voice",
     "Chat",
     "Bot",
-    "Sandbox",
     "Sound",
     `${source}\n; return { state, store };`,
   );
@@ -226,8 +225,6 @@ async function load(
     stubModule("Chat", calls),
     // renderVcBotTiles が isHost と bots を読む。トグルの可否に使う
     stubModule("Bot", calls, { getState: () => ({ bots: {}, isHost: false }) }),
-    // 品書きは公式ゲームと余興を1つに並べる。余興の一覧はここから引く
-    stubModule("Sandbox", calls, { getGames: () => [] }),
     // 効果音。音量の定数は数値として読まれる（loop の引数に入る）ので実物と同じ値を返す
     stubModule("Sound", calls, { GAYA_CORRIDOR: 0.32, GAYA_ROOM: 0.06 }),
   ) as App;
