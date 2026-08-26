@@ -246,3 +246,35 @@ Deno.test("entrance.html: 卓を建てるカードが index.html/廊下カード
     kv.close();
   }
 });
+
+/**
+ * 「暖簾をくぐった先の景色」は assets/interior.svg 1枚が正本で、
+ * 3D の背景板・login.html の遷移画面・entrance.html の到着が同じ絵を使う。
+ * どれかが別の絵を持ち出すと、くぐった先と遷移画面と着いた先が別の店に見える。
+ */
+Deno.test("interior.svg: 3D・遷移画面・到着が同じ1枚を使っている", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  const base = `http://127.0.0.1:${server.port}`;
+  try {
+    const svg = await fetch(`${base}/assets/interior.svg`);
+    assertEquals(svg.status, 200, "景色が配信されている必要があります");
+    assert(
+      (svg.headers.get("content-type") ?? "").includes("image/svg+xml"),
+      "SVG として配信される必要があります（three も CSS も画像として読む）",
+    );
+    await svg.body?.cancel();
+
+    for (const path of ["/login.html", "/entrance.html", "/noren-scene.js"]) {
+      const res = await fetch(`${base}${path}`);
+      const text = await res.text();
+      assert(
+        text.includes("interior.svg"),
+        `${path} が assets/interior.svg を参照している必要があります`,
+      );
+    }
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
