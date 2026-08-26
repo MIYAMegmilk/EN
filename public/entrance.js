@@ -62,6 +62,16 @@ function checkedTagIds() {
     .map((el) => el.value);
 }
 
+/** ゲストなら「卓を建てる」カードをリンクとして機能させず、その旨を表示する */
+function applyCreateCardState(loggedIn) {
+  if (loggedIn) return;
+  const card = $("entrance-create");
+  card.removeAttribute("href");
+  card.classList.add("entrance-card-disabled");
+  card.setAttribute("aria-disabled", "true");
+  $("entrance-create-desc").textContent = "ログインすると卓を建てられます。";
+}
+
 function renderTags(tags, selectedIds) {
   const container = $("entrance-tags");
   container.textContent = "";
@@ -98,6 +108,7 @@ async function init() {
 
   const me = await callApi("/api/me");
   isLoggedIn = me.ok && me.body !== null && typeof me.body.userId === "string";
+  applyCreateCardState(isLoggedIn);
 
   let nickname = "";
   let tags = [];

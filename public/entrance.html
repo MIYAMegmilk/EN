@@ -17,7 +17,7 @@
 
       main {
         width: 100%;
-        max-width: 720px;
+        max-width: 960px;
       }
 
       h1 {
@@ -37,7 +37,7 @@
 
       .entrance-choices {
         display: grid;
-        grid-template-columns: 1fr 1fr;
+        grid-template-columns: repeat(3, 1fr);
         gap: 16px;
       }
 
@@ -234,6 +234,28 @@
         margin-left: 6px;
       }
 
+      .preview-create {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .preview-create-plus {
+        font-family: var(--serif);
+        font-size: 40px;
+        color: var(--gold-3);
+        opacity: 0.7;
+      }
+
+      .entrance-card-disabled {
+        cursor: default;
+        opacity: 0.55;
+      }
+
+      .entrance-card-disabled:hover {
+        border-color: var(--line-soft);
+      }
+
       .entrance-profile {
         margin-bottom: 18px;
         padding: 14px 18px;
@@ -387,6 +409,14 @@
           </div>
           <h2>廊下を歩く<span class="badge proto-badge">試作中</span></h2>
           <p>3D の廊下を歩いて、灯りのついた扉を探して入ります。</p>
+        </a>
+
+        <a id="entrance-create" class="entrance-card card" href="/create-room.html">
+          <div class="entrance-preview preview-create" aria-hidden="true">
+            <span class="preview-create-plus">＋</span>
+          </div>
+          <h2>卓を建てる</h2>
+          <p id="entrance-create-desc">あなたが幹事になって、新しい卓を開きます。</p>
         </a>
       </div>
     </main>

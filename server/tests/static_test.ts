@@ -185,3 +185,20 @@ Deno.test("create-room.html: room-handoff.js が create-room.js より前に読�
     kv.close();
   }
 });
+
+Deno.test("entrance.html: 卓を建てるカードが index.html/廊下カードと並んで存在する", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/entrance.html`);
+    const html = await res.text();
+    assert(
+      html.includes('id="entrance-create"') && html.includes('href="/create-room.html"'),
+      "entrance.html に create-room.html へのリンクが必要です",
+    );
+    assert(html.includes('id="entrance-create-desc"'), "卓を建てるカードの説明文の要素が必要です");
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
