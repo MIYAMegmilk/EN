@@ -99,15 +99,15 @@ export const SANDBOX_PAYLOAD_MAX_BYTES = 4 * 1024;
  * 【暫定値】。根拠: sandboxSignal 用に置いた WS_SANDBOX_RATE_MAX の値をそのまま引き継いだもの
  * （設計書 §2.2）。サーバー側の負荷試験は未実施（設計書 §10-2）。
  *
- * **定義のみ。main.ts の専用レート枠への適用は後続 PR に回す。** それまで gameEvent は
- * 一般枠（WS_RATE_MAX = 20件/秒）で判定される。一般枠のほうが厳しいため安全側だが、
- * 描画中継（設計書 §2.7 は 10チャンク/秒 を想定）を実装する前に専用枠が要る。
+ * main.ts の専用枠（rtcSignal / sandboxSignal と同構造）へ**適用済み**。
+ * 一般枠（WS_RATE_MAX = 20件/秒）のままだと、描画中継（設計書 §2.7 は 10チャンク/秒 を想定）で
+ * 描いている本人が切断されてしまうため、お絵かき当ての実装に合わせて配線した。
  */
 export const WS_GAME_EVENT_RATE_MAX = 30;
 /**
  * gameEvent のハードキャップ。これを超える連投は乱用とみなして切断する。
  * 【暫定値】。根拠は WS_GAME_EVENT_RATE_MAX と同じ（WS_SANDBOX_HARD_MAX の引き継ぎ）。
- * **定義のみ。適用は後続 PR。**
+ * main.ts へ適用済み。
  */
 export const WS_GAME_EVENT_HARD_MAX = 150;
 /**

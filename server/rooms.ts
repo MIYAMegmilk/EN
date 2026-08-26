@@ -1353,6 +1353,20 @@ export class RoomManager {
     }
     times.push(now);
     entry.chatTimes.set(player.id, times);
+    // 進行中のゲームモジュールへ発言を渡す（設計書 §2.7「回答をチャットで受け取る」）。
+    // 進行していなければ applyModuleEvent が null を返すだけで、卓の挙動は今までどおり。
+    // origin を渡さないのは、チャットはゲーム操作ではないため。チャットを使わない
+    // モジュールが返すエラーを発言者へ見せてはいけない
+    const judged = this.applyModuleEvent(entry, {
+      t: "chatMessage",
+      playerId: player.id,
+      text: validated.value,
+      now,
+    });
+    // モジュールが suppressChat を返した発言は卓に出さない（履歴にも積まず、bot にも渡さない）。
+    // 当てゲームで正解の発言が見えると答えが総取りになるため。発言者本人へのフィードバックは
+    // モジュールの view が返す（お絵かき当ての myCorrectOrder）
+    if (judged !== null && judged.effects.some((e) => e.t === "suppressChat")) return;
     // TODO(チーム分担): §3.10 bot 発言の投稿口
     const message: ChatMessage = {
       id: crypto.randomUUID(),
@@ -2179,6 +2193,10 @@ export class RoomManager {
         case "finalResult":
           this.broadcast(entry, { t: "finalResult", scores: effect.scores });
           this.applyBotEvent(entry, botResultEvent("finalResult", effect.scores));
+          break;
+        case "suppressChat":
+          // 発言を伏せるかどうかは handleChat が結果から直接読む（配信前に決める必要がある）。
+          // ここでは何もしない
           break;
         case "ended": {
           // state は捨てずに残す（最終結果を表示したままにするため）。

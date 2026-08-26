@@ -31,6 +31,7 @@ import {
   type ModuleEffect,
   type ModuleEvent,
   type ModuleInitInput,
+  moduleNoop,
   type ModuleResult,
   readKind,
 } from "./module.ts";
@@ -91,7 +92,9 @@ export function toEngineEvent(
 }
 
 /** ModuleEvent のうち clientEvent 以外を EngineEvent へ写像する。語彙は1対1で対応する */
-function toEngineLifecycleEvent(event: Exclude<ModuleEvent, { t: "clientEvent" }>): EngineEvent {
+function toEngineLifecycleEvent(
+  event: Exclude<ModuleEvent, { t: "clientEvent" } | { t: "chatMessage" }>,
+): EngineEvent {
   switch (event.t) {
     case "timeout":
       return { t: "timeout", now: event.now };
@@ -210,6 +213,8 @@ export const promptModule: GameModule<GameState, PhaseView> = {
       }
       return toModuleResult(engineReduce(state, engineEvent));
     }
+    // 宣言的フローのゲームはチャットを使わない（回答は submitInput / submitVote）
+    if (event.t === "chatMessage") return moduleNoop(state);
     return toModuleResult(engineReduce(state, toEngineLifecycleEvent(event)));
   },
 

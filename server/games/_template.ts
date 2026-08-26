@@ -130,6 +130,13 @@ export const templateModule: GameModule<TemplateState> = {
             return moduleFail(state, "INVALID_INPUT", "未知のゲーム内イベントです");
         }
       }
+      case "chatMessage": {
+        // チャット発言。ゲームが進行している間だけ届く。
+        // 「回答をチャットに書く」ゲーム（お絵かき当てなど）だけが使う入口で、
+        // 使わないなら無視してよい。答えを卓から隠したいときは
+        // effects に { t: "suppressChat" } を返すと、その発言は配信されない
+        return moduleNoop(state);
+      }
       case "timeout": {
         // 期限に達していなければ何もしない（早すぎる発火への防御）
         if (state.deadline === null || event.now < state.deadline) return moduleNoop(state);
