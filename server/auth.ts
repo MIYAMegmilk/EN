@@ -187,6 +187,26 @@ function errorResponse(status: number, message: string): Response {
   return jsonResponse({ error: message }, { status });
 }
 
+/**
+ * リクエストからセッション Cookie の値を取り出す（§3.0）。
+ *
+ * `getCookies()` は壊れた Cookie ヘッダー（空文字・空白のみ・`"; ;"`・`"=abc"` など）で
+ * 例外を投げる。素で呼ぶと認証不要のまま誰でも 500 を踏めてしまうため、
+ * 取り出せないときは Cookie が無いのと同じ `undefined` として扱う。
+ * 呼び出し側の `verifySession` が null を返し、未ログインとして正しく処理される。
+ *
+ * `verifySession` と同じく、HTTP レスポンスを作らない箇所（WS アップグレード時の
+ * Cookie 検証や静的配信の振り分け）からも使うため main.ts へ公開する。
+ * Cookie 名を知っているのはこのモジュールなので、判定を写して二重に持たない。
+ */
+export function sessionToken(req: Request): string | undefined {
+  try {
+    return getCookies(req.headers)[SESSION_COOKIE_NAME];
+  } catch {
+    return undefined;
+  }
+}
+
 /** 認証 API のハンドラ一式。Deno KV への読み書きをカプセル化する */
 export class AuthApi {
   #kv: Deno.Kv;
@@ -381,7 +401,7 @@ export class AuthApi {
   }
 
   private async logout(req: Request): Promise<Response> {
-    const token = getCookies(req.headers)[SESSION_COOKIE_NAME];
+    const token = sessionToken(req);
     if (token !== undefined) {
       await this.#kv.delete(["authSession", token]);
     }
@@ -398,7 +418,7 @@ export class AuthApi {
 
   /** ログイン中ユーザーのあだ名・趣味タグを保存する（§3.0 / §3.11、要ログイン） */
   private async saveProfile(req: Request): Promise<Response> {
-    const token = getCookies(req.headers)[SESSION_COOKIE_NAME];
+    const token = sessionToken(req);
     const userId = await verifySession(this.#kv, token);
     if (userId === null) {
       this.#debug?.record(
@@ -441,7 +461,7 @@ export class AuthApi {
   }
 
   private async me(req: Request): Promise<Response> {
-    const token = getCookies(req.headers)[SESSION_COOKIE_NAME];
+    const token = sessionToken(req);
     const userId = await verifySession(this.#kv, token);
     if (userId === null) {
       this.#debug?.record(

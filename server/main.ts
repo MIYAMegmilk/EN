@@ -15,8 +15,7 @@
 import { loadSync } from "@std/dotenv";
 import { serveDir } from "@std/http/file-server";
 import { fromFileUrl } from "@std/path";
-import { getCookies } from "@std/http/cookie";
-import { AuthApi, SESSION_COOKIE_NAME, verifySession } from "./auth.ts";
+import { AuthApi, sessionToken, verifySession } from "./auth.ts";
 import {
   DEBUG_EVENTS_PATH,
   DEBUG_RESET_LIMITS_PATH,
@@ -281,8 +280,9 @@ async function handleWebSocket(
     });
     return new Response("forbidden origin", { status: 403 });
   }
-  // アップグレード時の Cookie でログイン状態を確定する（§3.0: createRoom の認証判定に使う）
-  const token = getCookies(req.headers)[SESSION_COOKIE_NAME];
+  // アップグレード時の Cookie でログイン状態を確定する（§3.0: createRoom の認証判定に使う）。
+  // 壊れた Cookie ヘッダーは sessionToken が undefined に倒すので、未ログインとして接続は通る
+  const token = sessionToken(req);
   const userId = kv !== null ? await verifySession(kv, token) : null;
   const { socket, response } = Deno.upgradeWebSocket(req);
   const link = new SocketLink(socket, userId);
@@ -474,7 +474,8 @@ async function handleStatic(
     // 招待 URL（/r/{code}）は同じ画面を返す（§2）
     path = "/index.html";
   } else if (url.pathname === "/") {
-    const token = getCookies(req.headers)[SESSION_COOKIE_NAME];
+    // 壊れた Cookie ヘッダーでトップページが 500 にならないよう、取り出しは sessionToken に任せる
+    const token = sessionToken(req);
     const userId = kv !== null ? await verifySession(kv, token) : null;
     path = userId !== null ? "/index.html" : "/login.html";
   }
@@ -860,7 +861,7 @@ export function startServer(
         return new Response("forbidden origin", { status: 403 });
       }
       if (kv === undefined) return new Response("auth not configured", { status: 501 });
-      const token = getCookies(req.headers)[SESSION_COOKIE_NAME];
+      const token = sessionToken(req);
       const userId = await verifySession(kv, token);
       if (userId === null) {
         debug.record(

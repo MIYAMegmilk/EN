@@ -12,15 +12,23 @@
  * 共有されるため、隣同士で食い違うことが原理的に起きない。
  *
  * 実体として置くのはカメラの周り VIEW_R マスぶんだけ。離れたマスは部品ごと
- * プールに戻して使い回すので、歩いた距離に関係なく物の数は一定になる。
+ * 使い回すので、歩いた距離に関係なく物の数は一定になる。
+ *
+ * ■ 描き方（ドローコール）
+ * 部品はマスごとに Mesh を作るのではなく、部品の「種類」ごとに1つの
+ * InstancedMesh を持ち、マスごとの置き場所は行列で渡す。マスが増えても
+ * ドローコールは種類の数（現状 22 本）で頭打ちになる。
+ * マスごとに Mesh を作っていた頃は 719〜944 枚あった（GLB は材質ごとにメッシュが
+ * 割れるので、扉1枚で 9 枚になる）。
  *
  * ■ 扉
  * 塞がった辺には扉が付く（一部は扉なしの壁にして単調さを避ける）。
- * どの扉がどの卓を受け持つかも座標のハッシュで決まる。卓の数より扉のほうが
- * 多いので、歩き続ければ同じ卓に何度も出会う。
+ * どの扉がどの卓を受け持つかは、ブロック内で扉に連番を振って決める（roomAt）。
+ * 卓の数より扉のほうが多いので、歩き続ければ同じ卓に何度も出会う。
  *
- * 扉ごとの情報は木札（Door_Sign）に canvas を貼って描く。DOM ではないので
- * innerHTML の経路は無く、サーバー由来の文字列は fillText にそのまま渡している。
+ * 卓名・卓コードなどの文字は 3D には描かず、visibleDoors() が返す画面座標に
+ * 呼び出し側が HTML の目印を重ねる。canvas を扉ごとに持たなくて済むので
+ * 材質を共有でき、上の InstancedMesh 化が効く。読み上げにも乗る。
  *
  * このビューは一覧カードの代わりではなく上乗せ。スクリーンリーダーや WebGL が
  * 無い環境では従来のカード一覧が本体として残る前提で作っている。
@@ -65,24 +73,41 @@ const P_LIGHT = 0.45;
 /** カメラのマスから何マスぶん実体を置くか。曲がり角で先が見えないので3で足りる */
 const VIEW_R = 3;
 
+/**
+ * 隅柱（Kit_Core の中の1本）の寸法と置き場所。GLB から測った実測値。
+ *
+ * マスの1辺は 3.00 だが壁板の幅は通路と同じ 2.00 しかないので、マスとマスの境目には
+ * 幅 1.00 の「壁の厚み」の区画が残る。その 1.00 四方の角を 4 つのマスが 0.50 ずつ
+ * 分け合う形になっているのに、Kit_Core は +X / -Z 側の1本しか持っていない。
+ * 隣のマスの柱は1マスぶん先の角を埋めるので、README にある「隣のマスの柱が残り3隅を
+ * 埋める」は成り立たず、**まっすぐな廊下でもマスの境目ごとに 0.5m 幅・天井まで届く
+ * 縦穴が開く**（目線の高さで塗り広げて測ると、-8..8 マスの範囲で 767 m² ぶん
+ * 「見えてはいけない場所」へ抜けられた）。
+ *
+ * そこで読み込み時に柱の三角形だけを取り出し、90 / 180 / 270° 回した3本を足して
+ * 四隅を埋める。同じ測り方で漏れ 0 になることを確認済み
+ * （tools/corridor-layout-check.js と検証台の「壁の穴」を参照）。
+ * GLB を作り直さずに済ませるため、この形にしてある。
+ */
+const CORR_H = 2.35;            // 天井高。柱はここまで届く
+const POST_W = CELL / 2 - HALF_W;   // 0.50。角の1/4ぶん
+/** 柱を取り出すための箱。ここに三角形が丸ごと入っているものだけを柱とみなす */
+const POST_BOX = {
+  minX: HALF_W, maxX: CELL / 2,
+  minY: 0, maxY: CORR_H,
+  minZ: -CELL / 2, maxZ: -HALF_W,
+};
+/** 四隅ぶんの回転。柱は Kit_Core から切り離して、この4本を置き直す */
+const POST_ROTS = [0, Math.PI / 2, Math.PI, -Math.PI / 2];
+
 /** 体の太さ。壁にめり込まないよう、この分だけ手前で止める */
 const BODY_R = 0.35;
 const LIMIT = HALF_W - BODY_R;
 
-/** 木札に貼る canvas。板（0.38 × 0.52）の縦横比に合わせる */
-const SIGN_W = 440;
-const SIGN_H = 602;
-
-/** 配色は en.css のトークンに合わせる（CSS 変数は canvas から読めないので写す） */
-const COLOR = {
-  paper: "#f6ecdc",
-  ink: "#2a1a06",
-  wood: "#3d2c1c",
-  muted: "#7b6750",
-  gold: "#c8862a",
-  red: "#8c1f1a",
-  green: "#4d6b31",
-};
+/** 歩く速さの上限（m/s）。これを超えると1フレームの移動が LIMIT に近づいて壁を抜ける */
+const MAX_SPEED = 3.2;
+/** その場旋回の速さ（rad/s）。キーボードの左右と同じ効き */
+const TURN_RATE = 1.8;
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
@@ -123,134 +148,136 @@ function cellUsed(x, z) {
   return DIRS.some((d) => edgeOpen(x, z, d.key));
 }
 
-/** 塞がった辺に扉を出すか */
+/**
+ * 塞がった辺に扉を出すか。
+ *
+ * **`edgeOpen` と違って「辺」ではなく「マス＋方向」で引いているのは意図的。**
+ * 直したくなるが、直さないこと。理由は3つある。
+ *
+ * 1. **壁板は辺そのものに建っていない。**マスの1辺は 3.00 だが板の幅は通路と同じ
+ *    2.00 で、板はマスの中心から HALF_W（1.00）の位置に立つ。隣のマスが建てる板は
+ *    0.72 離れた別の板であって、同じ1枚ではない。つまり「表と裏」ではなく、
+ *    それぞれの廊下に面した独立した2枚。片方が扉でもう片方が壁でも矛盾しない
+ *    （現実の建物でも、廊下Aから見て扉・廊下Bから見て壁は普通に起きる）。
+ * 2. **扉の向こうに部屋の実体は無い。**押して入るのは WebSocket の卓であって
+ *    3D の空間ではないので、「隣が廊下か行き止まりか」は表示上の意味を持たない。
+ * 3. **辺で引くように「揃える」と体験が壊れる。**実際に測った（12,379 マス）:
+ *    いまの扉の 73.4% は「両側とも廊下」の辺に立っている。そこを外すと
+ *    扉は 16,137 → 4,291（1.30枚/マス → 0.35枚/マス）まで落ち、
+ *    **扉が1枚も無い廊下のマスが 21.7% → 70.1% になる。**
+ *    P_DOOR を 1.00 まで上げても 0.48枚/マス・61.3% にしかならず届かない。
+ *
+ * なお「廊下の外に扉の裏側が見える」不具合は、辺の引き方ではなく隅柱の穴が原因
+ * だった（POST_BOX のコメントを参照）。塞いだ以上、原理的に画面へ出てこない。
+ */
 function hasDoor(x, z, i) {
   return hash01(x * 4 + i, z, 3) < P_DOOR;
 }
 
-/** その扉が受け持つ卓 */
-function roomAt(x, z, i, rooms) {
-  if (rooms.length === 0) return null;
-  return rooms[Math.floor(hash01(x * 4 + i, z * 3 + i, 4) * rooms.length) % rooms.length];
-}
+/**
+ * 卓を配る単位。8×8 マス（24m 四方）。
+ * 視界（VIEW_R = 3 マス ＝ 7×7）より大きく取ると、見えている扉が1つのブロックに
+ * 収まる地点が増えて重複が減る。4 / 8 / 16 / 32 を測ったところ 8 でほぼ頭打ちになり
+ * （卓7で 3.17 → 3.12 → 3.11 → 3.11）、割り当ての costs は 1.5 → 6.9 → 24 → 84 µs と
+ * 4倍ずつ増えるので 8 を採る。
+ * これ以上大きくしても効かないのは、ブロック内の扉数が卓数を超えると
+ * 結局ブロックの中で卓を一周してしまうため。
+ */
+const BLOCK = 8;
 
-/** epoch ms を HH:MM に。rooms.js と同じ書式 */
-function formatTime(at) {
-  const d = new Date(at);
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-}
-
-/** 幅に収まるところで折り返して、最大 maxLines 行で切る */
-function wrapText(ctx, text, maxWidth, maxLines) {
-  const lines = [];
-  let line = "";
-  for (const ch of String(text)) {
-    const next = line + ch;
-    if (ctx.measureText(next).width > maxWidth && line !== "") {
-      lines.push(line);
-      line = ch;
-      if (lines.length === maxLines) break;
-    } else {
-      line = next;
+/** (x, z) がヒルベルト曲線の何番目か。n は2の冪 */
+function hilbertIndex(n, x, z) {
+  let d = 0;
+  for (let s = n >> 1; s > 0; s >>= 1) {
+    const rx = (x & s) > 0 ? 1 : 0;
+    const rz = (z & s) > 0 ? 1 : 0;
+    d += s * s * ((3 * rx) ^ rz);
+    if (rz === 0) {                       // 象限に合わせて座標系を回す
+      if (rx === 1) {
+        x = s - 1 - x;
+        z = s - 1 - z;
+      }
+      const t = x;
+      x = z;
+      z = t;
     }
   }
-  if (lines.length < maxLines && line !== "") lines.push(line);
-  return lines;
+  return d;
 }
 
 /**
- * 木札1枚を描く。room が null なら「空室」の面にする。
- * 呼ばれるのは扉を別の卓に振り直した瞬間だけなので、毎フレームの負荷にはならない。
+ * ブロックの中をどの順に数えるか。ヒルベルト曲線（次の番号が必ず隣のマスになる並び）。
+ * 連番の近さが場所の近さとほぼ一致するので、卓を連番順に配ると、同じ卓が再び出るのは
+ * 「卓数ぶん先」＝場所としても離れた所になる。
+ * 素直な行走査だと行をまたぐたびに端から端へ飛ぶため、同じ卓が縦に並びやすかった。
+ * 中身は 0..BLOCK*BLOCK-1 を z * BLOCK + x で表したもの。読み込み時に1回だけ組む。
  */
-function drawSign(canvas, room, tagLabels) {
-  const ctx = canvas.getContext("2d");
-  const W = canvas.width;
-  const H = canvas.height;
-
-  const bg = ctx.createLinearGradient(0, 0, 0, H);
-  bg.addColorStop(0, "#fbf3e6");
-  bg.addColorStop(0.5, COLOR.paper);
-  bg.addColorStop(1, "#e8dbc4");
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, W, H);
-  ctx.strokeStyle = "rgba(61, 44, 28, 0.35)";
-  ctx.lineWidth = 7;
-  ctx.strokeRect(4, 4, W - 8, H - 8);
-
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-
-  if (room === null) {
-    ctx.fillStyle = COLOR.muted;
-    ctx.font = `86px "Yu Mincho", "Hiragino Mincho ProN", serif`;
-    ctx.fillText("空室", W / 2, H / 2 - 24);
-    ctx.font = `32px "Yu Gothic", "Hiragino Kaku Gothic ProN", sans-serif`;
-    ctx.fillText("準備中", W / 2, H / 2 + 58);
-    return;
+const BLOCK_ORDER = (() => {
+  const cells = [];
+  for (let z = 0; z < BLOCK; z++) {
+    for (let x = 0; x < BLOCK; x++) cells.push({ x, z, d: hilbertIndex(BLOCK, x, z) });
   }
+  cells.sort((a, b) => a.d - b.d);
+  return cells.map((c) => c.z * BLOCK + c.x);
+})();
 
-  const full = room.playerCount >= room.capacity;
-
-  // 卓コード。遠目にはこれが一番効く
-  ctx.fillStyle = COLOR.wood;
-  ctx.fillRect(28, 30, W - 56, 72);
-  ctx.fillStyle = COLOR.paper;
-  ctx.font = `bold 46px "Yu Gothic", "Hiragino Kaku Gothic ProN", monospace`;
-  ctx.fillText(String(room.code ?? ""), W / 2, 67);
-
-  // 卓名。長ければ 2 行で折り返す
-  ctx.fillStyle = COLOR.ink;
-  ctx.font = `50px "Yu Mincho", "Hiragino Mincho ProN", serif`;
-  wrapText(ctx, room.roomName ?? "", W - 70, 2)
-    .forEach((line, i) => ctx.fillText(line, W / 2, 152 + i * 60));
-
-  ctx.strokeStyle = "rgba(61, 44, 28, 0.25)";
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(46, 282);
-  ctx.lineTo(W - 46, 282);
-  ctx.stroke();
-
-  // 何をしているか
-  ctx.fillStyle = COLOR.muted;
-  ctx.font = `30px "Yu Gothic", "Hiragino Kaku Gothic ProN", sans-serif`;
-  const doing = room.gameTitle === undefined
-    ? (room.playing ? "遊んでいます" : "品定め中")
-    : `${room.gameTitle}${room.playing ? " で" : " を"}`;
-  wrapText(ctx, doing, W - 70, 1).forEach((l) => ctx.fillText(l, W / 2, 322));
-
-  // 好みのタグ。1つだけ拾って添える
-  const tagId = Array.isArray(room.tags) ? room.tags[0] : undefined;
-  if (tagId !== undefined) {
-    const label = tagLabels?.get(tagId) ?? tagId;
-    ctx.font = `25px "Yu Gothic", "Hiragino Kaku Gothic ProN", sans-serif`;
-    const w = ctx.measureText(label).width + 32;
-    ctx.fillStyle = "rgba(200, 134, 42, 0.18)";
-    ctx.fillRect((W - w) / 2, 350, w, 40);
-    ctx.fillStyle = COLOR.gold;
-    ctx.fillText(label, W / 2, 370);
+/**
+ * その扉が受け持つ卓。
+ *
+ * 扉ごとに独立してハッシュを引くと、卓が少ないときに近くへ同じ卓がいくつも並ぶ。
+ * そこで「ブロックの中に実在する扉だけを決まった順に数え、その連番で卓を順ぐりに配る」。
+ * 連番が密なので、卓数より扉が少ないブロックでは重複が原理的に出ない。
+ *
+ * 座標だけから決まるので決定性は保たれ、訪れたマスを覚える必要も無い
+ * （毎回ブロック 8×8 マスを数え直すだけ。1扉あたり 7µs 程度で、
+ *  扉を置き直すときと卓一覧が入れ替わったときにしか呼ばれない）。
+ *
+ * 1地点から見える扉（視線が通る扉）の重複数は tools/corridor-layout-check.js で測れる。
+ * 卓7で 3.68 → 3.12（鳩の巣による下限は 2.19）、
+ * 隣り合う扉が同じ卓になる率は 14.8% → 5.3% に下がる。
+ */
+function roomAt(x, z, i, rooms) {
+  if (rooms.length === 0) return null;
+  const bx = Math.floor(x / BLOCK);
+  const bz = Math.floor(z / BLOCK);
+  let k = 0;
+  for (const cell of BLOCK_ORDER) {
+    const cx = bx * BLOCK + (cell % BLOCK);
+    const cz = bz * BLOCK + ((cell / BLOCK) | 0);
+    const used = cellUsed(cx, cz);
+    for (let d = 0; d < 4; d++) {
+      if (cx === x && cz === z && d === i) {
+        // ブロックごとに配り始めをずらす。揃えると、どのブロックでも
+        // 同じ卓が同じ位置に来て、格子模様に見えてしまう。
+        const off = Math.floor(hash01(bx, bz, 11) * rooms.length);
+        return rooms[(off + k) % rooms.length];
+      }
+      if (used && !edgeOpen(cx, cz, DIRS[d].key) && hasDoor(cx, cz, d)) k++;
+    }
   }
-
-  // 人数
-  ctx.fillStyle = COLOR.ink;
-  ctx.font = `bold 54px "Yu Gothic", "Hiragino Kaku Gothic ProN", sans-serif`;
-  ctx.fillText(`${room.playerCount} / ${room.capacity}`, W / 2, 446);
-  ctx.font = `25px "Yu Gothic", "Hiragino Kaku Gothic ProN", sans-serif`;
-  ctx.fillStyle = COLOR.muted;
-  ctx.fillText("名", W / 2 + 92, 456);
-
-  // 空席の札
-  ctx.fillStyle = full ? COLOR.red : COLOR.green;
-  ctx.fillRect(68, 492, W - 136, 50);
-  ctx.fillStyle = COLOR.paper;
-  ctx.font = `30px "Yu Gothic", "Hiragino Kaku Gothic ProN", sans-serif`;
-  ctx.fillText(full ? "満席" : "空きあり", W / 2, 517);
-
-  ctx.fillStyle = COLOR.muted;
-  ctx.font = `23px "Yu Gothic", "Hiragino Kaku Gothic ProN", sans-serif`;
-  ctx.fillText(`${formatTime(room.createdAt)} から`, W / 2, 570);
+  return rooms[0];   // ブロックの外の扉を訊かれない限り来ない
 }
 
+/** 同時に置くマスの数と、その四方の辺の数。まとめ描きの枠はこの上限で確保する */
+const MAX_CELLS = (VIEW_R * 2 + 1) * (VIEW_R * 2 + 1);
+const MAX_EDGES = MAX_CELLS * 4;
+/** 隅柱はマスあたり4本 */
+const MAX_POSTS = MAX_CELLS * POST_ROTS.length;
+
+/** 提灯の見え方は「空室 / 空きあり / 満席」の3通りしかない */
+const lanternStateOf = (room) =>
+  room === null ? 0 : (room.playerCount >= room.capacity ? 2 : 1);
+/** 障子から漏れる灯りも「空室 / 品定め中 / 遊んでいる」の3通り */
+const paperStateOf = (room) => (room === null ? 0 : (room.playing ? 2 : 1));
+
+/** 提灯の3通りの見た目。遠くからの空席サインなので、色と光り方をはっきり分ける */
+const LANTERN_LOOK = [
+  { color: 0x4a3a2c, emissive: 0x2a1c10, intensity: 0.5 },   // 空室
+  { color: 0xf2b070, emissive: 0xff8828, intensity: 2.4 },   // 空きあり
+  { color: 0x8a5a4a, emissive: 0x7a2018, intensity: 1.1 },   // 満席
+];
+/** 障子の光り方3通り。並びは paperStateOf に合わせる */
+const PAPER_GLOW = [0.10, 0.30, 0.62];
 
 /**
  * 廊下ビューを作る。
@@ -260,18 +287,24 @@ function drawSign(canvas, room, tagLabels) {
  * @param {string} [options.modelUrl] 部品モデルの URL
  * @param {(code: string) => void} [options.onEnter] 扉を押したとき。卓コードを渡す
  * @param {(room: object|null) => void} [options.onFocus] 目の前の扉が変わったとき
- * @param {Map<string, string>} [options.tagLabels] タグID → 表示名
+ * @param {Map<string, string>} [options.tagLabels] タグID → 表示名。木札の文字を
+ *   HTML 側の目印へ移したのでこのビューでは読まないが、呼び出し側の書き方を
+ *   壊さないよう受け取りだけ残してある
  * @returns {{ready: Promise<void>, setRooms: Function, step: Function, turn: Function,
- *            focusedRoom: object|null, dispose: Function}}
+ *            setInput: Function, setLookLimit: Function, visibleDoors: Function,
+ *            pause: Function, resume: Function,
+ *            focusedRoom: object|null, position: object, dispose: Function}}
  */
 export function createCorridorView(container, options = {}) {
   const modelUrl = options.modelUrl ?? "/assets/3d/izakaya_corridor_kit.glb";
   const onEnter = options.onEnter ?? null;
   const onFocus = options.onFocus ?? null;
-  let tagLabels = options.tagLabels ?? new Map();
 
   let rooms = [];
   let disposed = false;
+  let loaded = false;
+  let paused = false;
+  let running = false;
   let raf = 0;
 
   // ── 描画の土台 ────────────────────────────────────
@@ -306,128 +339,332 @@ export function createCorridorView(container, options = {}) {
   let pz = 0;
   let yaw = 0;        // 0 で北（-Z）を向く
   let pitch = 0;
-  let speed = 0;
+  let speed = 0;      // キーと step() から入る撃力ぶんの前後速度
+  let inForward = 0;  // setInput() で押されっぱなしになっている量（-1..1）
+  let inStrafe = 0;
+  let inTurn = 0;
   let focused = null;
 
-  // ── 部品のプール ──────────────────────────────────
-  const proto = { core: null, wall: null, door: null, pendant: null };
-  const pools = { core: [], wall: [], door: [], pendant: [] };
+  // ── まとめ描き（InstancedMesh） ────────────────────
+  /** 空き枠に入れておく行列。大きさ0なので面が潰れて見えなくなる */
+  const HIDDEN = new THREE.Matrix4().makeScale(0, 0, 0);
+  /** 作ったまとめ描きの全部。解放に使う */
+  const batches = [];
+
+  /**
+   * 部品の中身を「メッシュ1枚ずつ ＋ 部品の根から見た行列」に開く。
+   * glTF は材質ごとにメッシュが分かれるので、ここで出てくる枚数がそのまま
+   * InstancedMesh の本数＝ドローコール数になる。
+   */
+  function collectParts(root, subtree, into = []) {
+    root.updateMatrixWorld(true);
+    const inv = new THREE.Matrix4().copy(root.matrixWorld).invert();
+    subtree.traverse((o) => {
+      if (o.isMesh !== true) return;
+      into.push({
+        geometry: o.geometry,
+        material: o.material,
+        offset: new THREE.Matrix4().multiplyMatrices(inv, o.matrixWorld),
+      });
+    });
+    return into;
+  }
+
+  /**
+   * 部品から隅柱の三角形を切り離す。柱1本ぶんの形と、柱を抜いた残りに分ける。
+   *
+   * 柱は床・天井・梁と1つのメッシュに結合されているので、名前や並び順では拾えない
+   * （並び順は書き出すたびに変わり得る）。そこで POST_BOX（GLB から測った
+   * 0.50 × 2.35 × 0.50 の角）に三角形が丸ごと入っているかどうかだけで選ぶ。
+   * 梁は必ず箱の外へはみ出す頂点を持つので混ざらない。
+   *
+   * 見つからない・寸法が違うときは例外にする。GLB を差し替えたときに黙って壁へ穴が
+   * 開くのが最悪なので、そこで止める。
+   */
+  function splitPost(parts) {
+    const eps = 1e-3;
+    const inside = (x, y, z) =>
+      x >= POST_BOX.minX - eps && x <= POST_BOX.maxX + eps &&
+      y >= POST_BOX.minY - eps && y <= POST_BOX.maxY + eps &&
+      z >= POST_BOX.minZ - eps && z <= POST_BOX.maxZ + eps;
+
+    const build = (px, nx) => {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute(px, 3));
+      if (nx.length === px.length) {
+        geometry.setAttribute("normal", new THREE.Float32BufferAttribute(nx, 3));
+      } else {
+        geometry.computeVertexNormals();
+      }
+      return geometry;
+    };
+
+    for (const part of parts) {
+      // 部品の根から見た形に直してから切る。以後この部品は行列を持たない。
+      const src = part.geometry.clone().applyMatrix4(part.offset);
+      const pos = src.attributes.position;
+      const nor = src.attributes.normal;
+      const index = src.index;
+      const count = index === null ? pos.count : index.count;
+      const at = (t) => (index === null ? t : index.getX(t));
+      const inP = [], inN = [], outP = [], outN = [];
+      for (let t = 0; t + 2 < count; t += 3) {
+        const v = [at(t), at(t + 1), at(t + 2)];
+        const hit = v.every((i) => inside(pos.getX(i), pos.getY(i), pos.getZ(i)));
+        const px = hit ? inP : outP;
+        const nx = hit ? inN : outN;
+        for (const i of v) {
+          px.push(pos.getX(i), pos.getY(i), pos.getZ(i));
+          if (nor !== undefined) nx.push(nor.getX(i), nor.getY(i), nor.getZ(i));
+        }
+      }
+      if (inP.length === 0) {
+        src.dispose();
+        continue;
+      }
+
+      const postGeometry = build(inP, inN);
+      postGeometry.computeBoundingBox();
+      const b = postGeometry.boundingBox;
+      const size = new THREE.Vector3();
+      b.getSize(size);
+      const near = (a, want) => Math.abs(a - want) < 0.01;
+      if (
+        inP.length / 9 !== 12 ||
+        !near(size.x, POST_W) || !near(size.z, POST_W) || !near(size.y, CORR_H) ||
+        !near(b.min.x, POST_BOX.minX) || !near(b.max.z, POST_BOX.maxZ)
+      ) {
+        throw new Error(
+          `隅柱の形が想定と違います（三角形 ${inP.length / 9} 枚 / ` +
+          `${size.x.toFixed(3)}×${size.y.toFixed(3)}×${size.z.toFixed(3)}）。` +
+          `GLB を差し替えたなら POST_BOX を測り直してください`,
+        );
+      }
+      const material = part.material;
+      part.geometry = build(outP, outN);      // 柱を抜いた残り（梁）
+      part.offset = new THREE.Matrix4();
+      src.dispose();
+      return { geometry: postGeometry, material, offset: new THREE.Matrix4() };
+    }
+    throw new Error("モデルに隅柱が見つかりません（GLB を作り直してください）");
+  }
+
+  /**
+   * 同じ形・同じ材質の部品をまとめて1回で描くための入れ物。
+   *
+   * 番号（インスタンス）を1つ配ると、その番号の枠が parts の枚数ぶん同時に埋まる。
+   * マスをいくつ置いてもメッシュは増えないので、ドローコールは「部品の種類数」で
+   * 頭打ちになる。マスごとに Mesh を作っていた頃は、置く物の数がそのまま効いて
+   * 平均 719 枚・最大 944 枚（扉 78 枚の地点）だった。いまは 22 本で動かない。
+   *
+   * @param {Array} parts collectParts の戻り
+   * @param {number} capacity 同時に置ける最大数。VIEW_R から決まる上限を渡す
+   */
+  function createBatch(parts, capacity) {
+    const meshes = parts.map((p) => {
+      const mesh = new THREE.InstancedMesh(p.geometry, p.material, capacity);
+      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      // InstancedMesh は中身がどこに散っていても「1つの物体」として視錐台に掛かる。
+      // 廊下は必ずカメラを取り囲む形に置かれ、塊ごと画面から外れることが無いので、
+      // 判定しても常に「描く」に倒れて無駄。しかも外れたと判定された日には
+      // 廊下が丸ごと消えるので、判定自体を切っておくほうが安全でもある。
+      mesh.frustumCulled = false;
+      mesh.count = 0;
+      scene.add(mesh);
+      return mesh;
+    });
+    const freed = [];
+    let next = 0;
+    const work = new THREE.Matrix4();
+    const batch = {
+      meshes,
+      /** 置き場所を渡して番号を貰う。空きが無ければ -1（VIEW_R から溢れない限り起きない） */
+      alloc(matrix) {
+        const id = freed.length > 0 ? freed.pop() : (next < capacity ? next++ : -1);
+        if (id < 0) return -1;
+        for (let i = 0; i < meshes.length; i++) {
+          work.multiplyMatrices(matrix, parts[i].offset);
+          meshes[i].setMatrixAt(id, work);
+          meshes[i].count = next;               // 一度も配っていない後ろの枠は描かせない
+          meshes[i].instanceMatrix.needsUpdate = true;
+        }
+        return id;
+      },
+      /** 番号を返す。空いた枠は大きさ0の行列で潰しておく */
+      free(id) {
+        if (id < 0) return;
+        for (const mesh of meshes) {
+          mesh.setMatrixAt(id, HIDDEN);
+          mesh.instanceMatrix.needsUpdate = true;
+        }
+        freed.push(id);
+      },
+    };
+    batches.push(batch);
+    return batch;
+  }
+
+  /** 部品の種類ごとのまとめ描き。読み込みが終わるまでは空 */
+  const kit = {
+    core: null, post: null, wall: null, pendant: null, door: null, hit: null,
+    lantern: [], paper: [],
+  };
+  /** 木札の板の中心。扉の根から見た位置。HTML の目印を置く的にする */
+  const signLocal = new THREE.Vector3();
+  /** 当たり板の番号 → 扉。押された枠から扉を引くため */
+  const doorById = [];
   const tiles = new Map();     // "x,z" → { x, z, parts: [], doors: [] }
 
-  function makeDoor() {
-    const root = proto.door.clone(true);
-    const sign = root.getObjectByName("Door_Sign");
-    const paper = root.getObjectByName("Door_Paper");
-    const lantern = root.getObjectByName("Door_Lantern");
-    const hit = root.getObjectByName("Door_Hit");
+  /**
+   * GLB から部品を取り出して、まとめ描きを組み立てる。
+   *
+   * 扉のうち「卓によって見え方が変わる」のは提灯と障子だけで、しかも3通りしかない。
+   * そこで材質を3つ作って共有し、扉はそのどれかの組に入る形にした。
+   * 扉ごとに material.clone() すると材質が全部別物になり、まとめ描きができなくなる。
+   */
+  function buildKit(gltf) {
+    const proto = {};
+    for (const name of ["Kit_Core", "Kit_Wall", "Kit_Door", "Kit_Pendant"]) {
+      const found = gltf.scene.getObjectByName(name);
+      if (found === undefined) {
+        throw new Error(`モデルに ${name} がありません（GLB を作り直してください）`);
+      }
+      found.removeFromParent();
+      proto[name.replace("Kit_", "").toLowerCase()] = found;
+    }
+    const doorRoot = proto.door;
+    const named = (name) => {
+      const found = doorRoot.getObjectByName(name);
+      if (found === undefined) {
+        throw new Error(`モデルに ${name} がありません（GLB を作り直してください）`);
+      }
+      return found;
+    };
+    const signObj = named("Door_Sign");
+    const lanternObj = named("Door_Lantern");
+    const paperObj = named("Door_Paper");
+    const hitObj = named("Door_Hit");
 
-    // clone() は材質を共有する。扉ごとに違う卓を出すので、ここだけ実体を分ける。
-    const canvas = document.createElement("canvas");
-    canvas.width = SIGN_W;
-    canvas.height = SIGN_H;
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    // glTF の UV は V が反転している。CanvasTexture の既定（flipY = true）のままだと
-    // そこで二重に反転して札が上下逆さまになる。
-    texture.flipY = false;
-    texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
-    sign.material = new THREE.MeshStandardMaterial({
-      map: texture,
-      emissiveMap: texture,
-      emissive: 0xffffff,
-      emissiveIntensity: 0.22,   // 暗い廊下でも札だけは読める程度に自分で光らせる
-      roughness: 0.9,
-      metalness: 0,
-    });
-    lantern.material = lantern.material.clone();
-    paper.material = paper.material.clone();
-    paper.material.color.setHex(0x9c8b73);
-    hit.material = new THREE.MeshBasicMaterial({
+    // 扉の「どの卓でも同じ」部分。木札の板もここに入れる（文字は HTML 側で出す）。
+    const doorParts = [];
+    for (const child of doorRoot.children) {
+      if (child === lanternObj || child === paperObj || child === hitObj) continue;
+      collectParts(doorRoot, child, doorParts);
+    }
+    // 当たり板は最後に足して、その1枚だけ透明な材質に差し替える
+    const hitIndex = doorParts.length;
+    collectParts(doorRoot, hitObj, doorParts);
+    doorParts[hitIndex].material = new THREE.MeshBasicMaterial({
       transparent: true, opacity: 0, depthWrite: false,
     });
 
-    const slot = { root, sign, canvas, texture, paper, lantern, hit, room: null, x: 0, z: 0 };
-    hit.userData.slot = slot;
-    return slot;
+    const coreParts = collectParts(proto.core, proto.core);
+    // 隅柱を切り離して、四隅ぶん置き直せるようにする（POST_BOX のコメント参照）
+    kit.post = createBatch([splitPost(coreParts)], MAX_POSTS);
+    kit.core = createBatch(coreParts, MAX_CELLS);
+    kit.pendant = createBatch(collectParts(proto.pendant, proto.pendant), MAX_CELLS);
+    kit.wall = createBatch(collectParts(proto.wall, proto.wall), MAX_EDGES);
+    kit.door = createBatch(doorParts, MAX_EDGES);
+    kit.hit = kit.door.meshes[hitIndex];
+
+    kit.lantern = LANTERN_LOOK.map((look) => {
+      const parts = collectParts(doorRoot, lanternObj);
+      for (const p of parts) {
+        const material = p.material.clone();
+        material.color.setHex(look.color);
+        material.emissive.setHex(look.emissive);
+        material.emissiveIntensity = look.intensity;
+        p.material = material;
+      }
+      return createBatch(parts, MAX_EDGES);
+    });
+    kit.paper = PAPER_GLOW.map((intensity) => {
+      const parts = collectParts(doorRoot, paperObj);
+      for (const p of parts) {
+        const material = p.material.clone();
+        material.color.setHex(0x9c8b73);   // 素のままだと明るすぎて紙が白飛びする
+        material.emissiveIntensity = intensity;
+        p.material = material;
+      }
+      return createBatch(parts, MAX_EDGES);
+    });
+
+    doorRoot.updateMatrixWorld(true);
+    signLocal.setFromMatrixPosition(
+      new THREE.Matrix4().copy(doorRoot.matrixWorld).invert().multiply(signObj.matrixWorld),
+    );
   }
 
-  function take(kind) {
-    const pooled = pools[kind].pop();
-    if (pooled !== undefined) return pooled;
-    if (kind === "door") return makeDoor();
-    return proto[kind].clone(true);
-  }
-
-  function give(kind, item) {
-    const obj = kind === "door" ? item.root : item;
-    scene.remove(obj);
-    pools[kind].push(item);
-  }
-
-  /** 扉に卓を割り当てて、木札・提灯・障子を書き換える */
+  /** 扉に卓を割り当てて、提灯と障子の灯りを差し替える */
   function bindDoor(slot, room) {
     slot.room = room;
-    drawSign(slot.canvas, room, tagLabels);
-    slot.texture.needsUpdate = true;
-    if (room === null) {
-      slot.lantern.material.color.setHex(0x4a3a2c);
-      slot.lantern.material.emissive.setHex(0x2a1c10);
-      slot.lantern.material.emissiveIntensity = 0.5;
-      slot.paper.material.emissiveIntensity = 0.10;
-      return;
+    const lantern = lanternStateOf(room);
+    if (lantern !== slot.lanternState) {
+      if (slot.lanternState >= 0) kit.lantern[slot.lanternState].free(slot.lanternId);
+      slot.lanternId = kit.lantern[lantern].alloc(slot.matrix);
+      slot.lanternState = lantern;
     }
-    const full = room.playerCount >= room.capacity;
-    slot.lantern.material.color.setHex(full ? 0x8a5a4a : 0xf2b070);
-    slot.lantern.material.emissive.setHex(full ? 0x7a2018 : 0xff8828);
-    slot.lantern.material.emissiveIntensity = full ? 1.1 : 2.4;
-    slot.paper.material.emissiveIntensity = room.playing ? 0.62 : 0.30;
+    const paper = paperStateOf(room);
+    if (paper !== slot.paperState) {
+      if (slot.paperState >= 0) kit.paper[slot.paperState].free(slot.paperId);
+      slot.paperId = kit.paper[paper].alloc(slot.matrix);
+      slot.paperState = paper;
+    }
   }
 
   /** マス1つ分を組む。開いている辺には何も置かない＝そこが通路になる */
   function buildTile(x, z) {
     const parts = [];
     const doors = [];
-    const core = take("core");
-    core.position.set(x * CELL, 0, z * CELL);
-    scene.add(core);
-    parts.push({ kind: "core", item: core });
+    const base = new THREE.Matrix4().makeTranslation(x * CELL, 0, z * CELL);
+    parts.push({ batch: kit.core, id: kit.core.alloc(base) });
+    // 隅柱は四隅ぶん置く。Kit_Core は +X / -Z の1本しか持っておらず、
+    // そのままだとマスの境目ごとに 0.5m 幅・天井までの縦穴が開く。
+    for (const rot of POST_ROTS) {
+      const m = new THREE.Matrix4().makeRotationY(rot).setPosition(x * CELL, 0, z * CELL);
+      parts.push({ batch: kit.post, id: kit.post.alloc(m) });
+    }
 
     if (hash01(x, z, 5) < P_LIGHT) {
-      const p = take("pendant");
-      p.position.set(x * CELL, 0, z * CELL);
-      scene.add(p);
-      parts.push({ kind: "pendant", item: p });
+      parts.push({ batch: kit.pendant, id: kit.pendant.alloc(base) });
     }
 
     DIRS.forEach((d, i) => {
       if (edgeOpen(x, z, d.key)) return;
+      const matrix = new THREE.Matrix4().makeRotationY(d.rot).setPosition(x * CELL, 0, z * CELL);
       if (hasDoor(x, z, i)) {
-        const slot = take("door");
-        slot.root.position.set(x * CELL, 0, z * CELL);
-        slot.root.rotation.y = d.rot;
-        slot.x = x;
-        slot.z = z;
-        slot.dir = d;
+        const instanceId = kit.door.alloc(matrix);
+        const slot = {
+          // まとめ描きの枠番号。空きが出れば別の扉に配り直されるので、外へは出さない
+          instanceId,
+          // 扉そのものを指す値。マスの座標と辺の番号だけで決まるので、視点にも
+          // 並び順にも枠の配り直しにも影響されない。visibleDoors() が返す id はこれ。
+          id: `${x},${z},${i}`,
+          x, z, dir: d, matrix,
+          anchor: signLocal.clone().applyMatrix4(matrix),
+          room: null, lanternState: -1, lanternId: -1, paperState: -1, paperId: -1,
+        };
+        if (instanceId >= 0) doorById[instanceId] = slot;
         bindDoor(slot, roomAt(x, z, i, rooms));
-        scene.add(slot.root);
-        parts.push({ kind: "door", item: slot });
+        parts.push({ batch: kit.door, id: instanceId });
         doors.push(slot);
       } else {
-        const w = take("wall");
-        w.position.set(x * CELL, 0, z * CELL);
-        w.rotation.y = d.rot;
-        scene.add(w);
-        parts.push({ kind: "wall", item: w });
+        parts.push({ batch: kit.wall, id: kit.wall.alloc(matrix) });
       }
     });
     return { x, z, parts, doors };
   }
 
   function dropTile(tile) {
-    for (const p of tile.parts) give(p.kind, p.item);
+    for (const slot of tile.doors) {
+      if (slot.lanternState >= 0) kit.lantern[slot.lanternState].free(slot.lanternId);
+      if (slot.paperState >= 0) kit.paper[slot.paperState].free(slot.paperId);
+      if (slot.instanceId >= 0) doorById[slot.instanceId] = null;
+    }
+    for (const p of tile.parts) p.batch.free(p.id);
   }
 
-  /** カメラの周りだけ実体を持つ。離れたマスは部品ごとプールへ返す */
+  /** カメラの周りだけ実体を持つ。離れたマスは枠ごと空きに戻す */
   function streamTiles() {
     const cx = Math.round(px / CELL);
     const cz = Math.round(pz / CELL);
@@ -530,23 +767,53 @@ export function createCorridorView(container, options = {}) {
     if (onFocus !== null) onFocus(room);
   }
 
+  /**
+   * 目から扉の板まで、塞がった辺を跨がずに届くか。
+   *
+   * 壁の向こうにある扉まで目印を出すと、何も無い壁に札が浮いて出る。距離で切っても
+   * 曲がった先の扉は落ちないので、辺の開閉そのものを見る。マスの境目だけを順に踏む
+   * 走査なので、跨ぐ辺は VIEW_R ぶんの数枚で済む。
+   */
+  function hasLineOfSight(ax, az, bx, bz) {
+    let cx = Math.round(ax / CELL);
+    let cz = Math.round(az / CELL);
+    const ex = Math.round(bx / CELL);
+    const ez = Math.round(bz / CELL);
+    const dx = bx - ax;
+    const dz = bz - az;
+    const sx = dx > 0 ? 1 : -1;
+    const sz = dz > 0 ? 1 : -1;
+    // t は線分を 0..1 で測った位置。次にどちらの境目へ先に着くかで進む向きを決める。
+    let tx = dx === 0 ? Infinity : (((cx + sx * 0.5) * CELL) - ax) / dx;
+    let tz = dz === 0 ? Infinity : (((cz + sz * 0.5) * CELL) - az) / dz;
+    const stepX = dx === 0 ? Infinity : CELL / Math.abs(dx);
+    const stepZ = dz === 0 ? Infinity : CELL / Math.abs(dz);
+    for (let guard = 0; guard < 32 && (cx !== ex || cz !== ez); guard++) {
+      if (tx > 1 && tz > 1) return false;      // 扉のマスへ着く前に線分が尽きた
+      if (tx < tz) {
+        if (!edgeOpen(cx, cz, sx > 0 ? "E" : "W")) return false;
+        cx += sx;
+        tx += stepX;
+      } else {
+        if (!edgeOpen(cx, cz, sz > 0 ? "S" : "N")) return false;
+        cz += sz;
+        tz += stepZ;
+      }
+    }
+    return cx === ex && cz === ez;
+  }
+
   // ── 読み込み ─────────────────────────────────────
   const ready = new Promise((resolve, reject) => {
     new GLTFLoader().load(modelUrl, (gltf) => {
       if (disposed) return;
       try {
-        for (const name of ["Kit_Core", "Kit_Wall", "Kit_Door", "Kit_Pendant"]) {
-          const found = gltf.scene.getObjectByName(name);
-          if (found === undefined) {
-            throw new Error(`モデルに ${name} がありません（GLB を作り直してください）`);
-          }
-          found.removeFromParent();
-          proto[name.replace("Kit_", "").toLowerCase()] = found;
-        }
+        buildKit(gltf);
+        loaded = true;
         findStart();
         streamTiles();
         resize();
-        loop();
+        start();
         resolve();
       } catch (err) {
         reject(err);
@@ -558,10 +825,14 @@ export function createCorridorView(container, options = {}) {
   const raycaster = new THREE.Raycaster();
   const ndc = new THREE.Vector2();
   const keys = new Set();
-  let dragging = false;
+  // 見回しは1本目の指だけに任せる。真偽値1つで持つと、canvas に2本目の指が乗った瞬間に
+  // 両方の pointermove が同じ yaw を動かして倍速になる（スティックを持つ手が滑ると起きる）。
+  let dragPointer = null;
   let dragMoved = 0;
   let lastX = 0;
   let lastY = 0;
+  /** 見上げ・見下ろしの上限（rad）。酔うようなら setLookLimit() で浅くできる */
+  let lookLimit = 0.9;
 
   /** イベントの位置を正規化デバイス座標へ。タップは pointermove を伴わない */
   function ndcFromEvent(ev) {
@@ -572,7 +843,8 @@ export function createCorridorView(container, options = {}) {
   }
 
   function onPointerDown(ev) {
-    dragging = true;
+    if (dragPointer !== null) return;   // 2本目以降の指は見回しに参加させない
+    dragPointer = ev.pointerId;
     dragMoved = 0;
     lastX = ev.clientX;
     lastY = ev.clientY;
@@ -580,31 +852,36 @@ export function createCorridorView(container, options = {}) {
   }
 
   function onPointerMove(ev) {
-    if (!dragging) return;
+    if (ev.pointerId !== dragPointer) return;
     const dx = ev.clientX - lastX;
     const dy = ev.clientY - lastY;
     lastX = ev.clientX;
     lastY = ev.clientY;
     dragMoved += Math.abs(dx) + Math.abs(dy);
     yaw -= dx * 0.005;
-    pitch = clamp(pitch - dy * 0.005, -0.9, 0.9);
+    pitch = clamp(pitch - dy * 0.005, -lookLimit, lookLimit);
   }
 
   function onPointerUp(ev) {
-    if (!dragging) return;
-    dragging = false;
+    if (ev.pointerId !== dragPointer) return;
+    dragPointer = null;
     try { el.releasePointerCapture(ev.pointerId); } catch { /* 解放済み */ }
     if (dragMoved > 8) return;   // 振り回していたら見回しとみなす
-    // いま置かれているマスの扉だけを対象にする。プール側は行列が古いままなので、
-    // 混ぜるとシーンに居ない扉に当たることがある。
-    const targets = [];
-    for (const tile of tiles.values()) {
-      for (const slot of tile.doors) targets.push(slot.hit);
-    }
+    if (kit.hit === null) return;
+    // 当たり板は全部の扉ぶんが1つの InstancedMesh に入っている。空き枠は大きさ0に
+    // 潰してあるので当たらない。当たった枠の番号から扉を引く。
+    // 枠を配り直すたびに中身が動くので、当たり判定用の球はここで作り直す。
+    kit.hit.computeBoundingSphere();
     raycaster.setFromCamera(ndcFromEvent(ev), camera);
-    const hits = raycaster.intersectObjects(targets, false);
-    const room = hits.length > 0 ? hits[0].object.userData.slot?.room ?? null : null;
-    if (room !== null && onEnter !== null) onEnter(room.code);
+    // 当たり板だけを見ているので、壁は光線を止めてくれない。手前から順に見て、
+    // 視線が通る最初の扉を採る。そうしないと壁の向こうの卓に入れてしまう。
+    for (const hit of raycaster.intersectObject(kit.hit, false)) {
+      const slot = doorById[hit.instanceId];
+      if (slot === undefined || slot === null || slot.room === null) continue;
+      if (!hasLineOfSight(px, pz, slot.anchor.x, slot.anchor.z)) continue;
+      if (onEnter !== null) onEnter(slot.room.code);
+      return;
+    }
   }
 
   function onWheel(ev) {
@@ -624,8 +901,25 @@ export function createCorridorView(container, options = {}) {
   // ── 毎フレーム ───────────────────────────────────
   const clock = new THREE.Clock();
 
+  /**
+   * rAF を回し始める。pause() 中や読み込み前は何もしない。
+   * 描画をフラグで飛ばすだけだと rAF は回り続けてしまい、電池を食うのは変わらない。
+   */
+  function start() {
+    if (running || paused || disposed || !loaded) return;
+    running = true;
+    clock.getDelta();          // 止まっていた間の時間を捨てる。再開で一気に飛ばないように
+    raf = requestAnimationFrame(loop);
+  }
+
+  function stop() {
+    running = false;
+    cancelAnimationFrame(raf);
+    raf = 0;
+  }
+
   function loop() {
-    if (disposed) return;
+    if (disposed || !running) return;
     raf = requestAnimationFrame(loop);
     const dt = Math.min(clock.getDelta(), 0.1);
 
@@ -633,11 +927,25 @@ export function createCorridorView(container, options = {}) {
     if (keys.has("s") || keys.has("S") || keys.has("ArrowDown")) speed -= 12 * dt;
     if (keys.has("a") || keys.has("A") || keys.has("ArrowLeft")) yaw += 1.8 * dt;
     if (keys.has("d") || keys.has("D") || keys.has("ArrowRight")) yaw -= 1.8 * dt;
+    yaw += inTurn * TURN_RATE * dt;
 
-    speed = clamp(speed, -3.2, 3.2);
+    speed = clamp(speed, -MAX_SPEED, MAX_SPEED);
     // yaw = 0 で -Z（北）を向く。three.js のカメラの既定の向きに合わせてある。
-    px += -Math.sin(yaw) * speed * dt;
-    pz += -Math.cos(yaw) * speed * dt;
+    // 右手は前を -90° 回した向きなので (cos yaw, -sin yaw)。
+    // キーの撃力（speed）と押しっぱなしの入力（inForward）は足し合わせる。
+    const forward = speed + inForward * MAX_SPEED;
+    const strafe = inStrafe * MAX_SPEED;
+    let vx = -Math.sin(yaw) * forward + Math.cos(yaw) * strafe;
+    let vz = -Math.cos(yaw) * forward - Math.sin(yaw) * strafe;
+    // 合成すると上限を超えうる。速すぎると1フレームの移動が LIMIT を跨いで壁を抜けるので、
+    // 向きは保ったまま長さだけ詰める。
+    const v = Math.hypot(vx, vz);
+    if (v > MAX_SPEED) {
+      vx *= MAX_SPEED / v;
+      vz *= MAX_SPEED / v;
+    }
+    px += vx * dt;
+    pz += vz * dt;
     speed *= Math.pow(0.0025, dt);   // 指数減衰。フレームレートに依らず同じ効き方になる
     if (Math.abs(speed) < 0.001) speed = 0;
 
@@ -680,26 +988,140 @@ export function createCorridorView(container, options = {}) {
   el.addEventListener("keyup", onKeyUp);
 
   // ── 外向きの API ─────────────────────────────────
+  /** visibleDoors() の作業用。毎フレーム呼ばれるので使い回す */
+  const probe = new THREE.Vector3();
+
   return {
     ready,
 
     /** 一覧を差し替える。ポーリングのたびに呼んでよい */
-    setRooms(next, labels) {
+    setRooms(next) {
       rooms = Array.isArray(next) ? next : [];
-      if (labels !== undefined) tagLabels = labels;
       rebindAll();
       focused = undefined;   // 同じ扉でも中身が変わっているので通知し直す
       updateFocus();
     },
 
-    /** 前後に歩く（+1 で前、-1 で後ろ）。画面上のボタンから呼ぶ用 */
+    /** 前後に歩く（+1 で前、-1 で後ろ）。画面上のボタンから呼ぶ用の撃力 */
     step(direction = 1) {
       speed += direction * 2.0;
     },
 
-    /** その場で向きを変える（+1 で左、-1 で右） */
+    /** その場で向きを変える（+1 で左、-1 で右）。こちらも1回ぶんの撃力 */
     turn(direction = 1) {
       yaw += direction * 0.45;
+    },
+
+    /**
+     * 押されている間の連続入力。毎フレーム呼ばれる前提で、次に呼ばれるまで保持される。
+     * step() / turn() は1回ぶんの撃力なので、毎フレーム叩くと speed の指数減衰と
+     * 噛み合ってガタつく。押しっぱなしの操作はこちらを使う。
+     *
+     * 加速の慣らしは呼び出し側の担当。ここでは受け取った値をそのまま速度に写す。
+     * キーボード入力とは足し合わせるので、PC の操作と同時に効く。
+     *
+     * @param {{forward?: number, strafe?: number, turn?: number}} input
+     *   forward: -1..1（+1 前進 / -1 後退）
+     *   strafe:  -1..1（+1 右へ平行移動 / -1 左へ）
+     *   turn:    -1..1（+1 左旋回 / -1 右旋回。turn() と同符号）
+     *   省略した項目は 0 扱い。setInput({}) で全解除。
+     */
+    setInput(input) {
+      const axis = (v) => (Number.isFinite(v) ? clamp(v, -1, 1) : 0);
+      inForward = axis(input?.forward);
+      inStrafe = axis(input?.strafe);
+      inTurn = axis(input?.turn);
+    },
+
+    /**
+     * 見上げ・見下ろしの上限（rad）を決める。既定は 0.9（≒52°）。
+     * 実機で酔うようなら浅くできるよう、外から触れるようにしてある。
+     * 0 から 1.5rad（≒86°）の間に収める。真上を向けると天井しか映らないため。
+     */
+    setLookLimit(rad) {
+      if (!Number.isFinite(rad)) return;
+      lookLimit = clamp(rad, 0, 1.5);
+      pitch = clamp(pitch, -lookLimit, lookLimit);
+    },
+
+    /**
+     * いま画面に出す価値のある扉の一覧。HTML の目印を重ねるために使う。
+     * 毎フレーム呼ばれる前提なので、置いてあるマスの扉を舐めるだけにしてある。
+     *
+     * 壁の向こうの扉は返さない（返すと、何も無い壁に札が浮いて出る）。
+     * 置いてあるのは 7×7 マスぶんで扉は 50 枚前後あるが、視線が通るのは平均 8.5 枚。
+     * 判定は辺の開閉を辿るだけなので、1フレームぶんで数百回のハッシュに収まる。
+     *
+     * 3D の点を画面座標へ移すとき、カメラの後ろにある点は符号が反転する
+     * （投影行列を掛けたあと w で割るが、後方では w < 0 になるため左右・上下が裏返る）。
+     * そこで前後と方位角は「投影する前」のカメラ空間で決めてから投影する。
+     * ここを投影後の値でやると、後ろの卓の矢印が画面の逆側に出る。
+     *
+     * @returns {Array<{id: string, code: string, room: object, x: number, y: number,
+     *                  distance: number, bearing: number,
+     *                  onScreen: boolean, behind: boolean}>}
+     *   x, y は container の左上を原点とする px。behind が true のときの x, y は
+     *   上記の反転を受けた値なので、向きには使わず bearing を見ること。
+     *
+     *   id は扉そのものを指す。マスの座標と辺の番号だけから決まるので、視点を振っても
+     *   歩いて戻っても、同じ扉なら必ず同じ値になる。**表示の状態を覚えておく鍵には
+     *   code ではなく id を使うこと。**卓は扉より少なく、同じ卓を複数の扉が受け持つので、
+     *   code だけでは扉を見分けられない。「code ＋ 近い順」で代用すると、視点を振って
+     *   見える扉の集合が変わったときに順位がずれ、同じ扉が二重に出たり消えたりする。
+     */
+    visibleDoors() {
+      const out = [];
+      const w = Math.max(1, container.clientWidth);
+      const h = Math.max(1, container.clientHeight);
+      camera.updateMatrixWorld();
+      camera.matrixWorldInverse.copy(camera.matrixWorld).invert();
+      for (const tile of tiles.values()) {
+        for (const slot of tile.doors) {
+          if (slot.room === null) continue;
+          // 壁越しの扉は「出す価値のある扉」ではないので落とす
+          if (!hasLineOfSight(px, pz, slot.anchor.x, slot.anchor.z)) continue;
+          probe.copy(slot.anchor).applyMatrix4(camera.matrixWorldInverse);
+          // カメラ空間では前方が -Z。z が 0 以上なら後方。
+          const behind = probe.z >= 0;
+          const inFront = probe.z < -camera.near;
+          const distance = probe.length();
+          // 方位角は正面が 0 で左が +。カメラ空間の左は -X 側なので -x を渡す。
+          const bearing = Math.atan2(-probe.x, -probe.z);
+          probe.applyMatrix4(camera.projectionMatrix);   // ここで w 除算が入る
+          const x = (probe.x * 0.5 + 0.5) * w;
+          const y = (-probe.y * 0.5 + 0.5) * h;
+          out.push({
+            id: slot.id,
+            code: slot.room.code,
+            room: slot.room,
+            x,
+            y,
+            distance,
+            bearing,
+            onScreen: inFront && x >= 0 && x <= w && y >= 0 && y <= h,
+            behind,
+          });
+        }
+      }
+      out.sort((a, b) => a.distance - b.distance);
+      return out;
+    },
+
+    /**
+     * 描画を止める。VC に入るときなど、見えていない間の電池を守るため。
+     * dispose() と違って壊さないので resume() で戻れる。
+     */
+    pause() {
+      if (paused || disposed) return;
+      paused = true;
+      stop();
+    },
+
+    /** 止めた描画を再開する。止めていなければ何もしない */
+    resume() {
+      if (!paused || disposed) return;
+      paused = false;
+      start();
     },
 
     /** いま目の前にある卓 */
@@ -722,7 +1144,7 @@ export function createCorridorView(container, options = {}) {
     dispose() {
       if (disposed) return;
       disposed = true;
-      cancelAnimationFrame(raf);
+      stop();
       ro.disconnect();
       el.removeEventListener("pointerdown", onPointerDown);
       el.removeEventListener("pointermove", onPointerMove);
@@ -731,17 +1153,26 @@ export function createCorridorView(container, options = {}) {
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("keydown", onKeyDown);
       el.removeEventListener("keyup", onKeyUp);
-      const free = (obj) => obj.traverse((o) => {
-        if (o.isMesh !== true) return;
-        o.geometry?.dispose();
-        for (const m of [].concat(o.material)) {
-          m?.map?.dispose();
-          m?.dispose();
+      // 形と材質はまとめ描きの間で共有している（提灯の3状態は同じ形を使う等）ので、
+      // 一度集めてから重複なく捨てる。
+      const geometries = new Set();
+      const materials = new Set();
+      for (const batch of batches) {
+        for (const mesh of batch.meshes) {
+          geometries.add(mesh.geometry);
+          for (const m of [].concat(mesh.material)) materials.add(m);
+          mesh.dispose();        // インスタンス用のバッファ
+          scene.remove(mesh);
         }
-      });
-      free(scene);
-      for (const [kind, list] of Object.entries(pools)) {
-        for (const item of list) free(kind === "door" ? item.root : item);
+      }
+      batches.length = 0;
+      tiles.clear();
+      doorById.length = 0;
+      for (const g of geometries) g.dispose();
+      for (const m of materials) {
+        m?.map?.dispose();
+        m?.emissiveMap?.dispose();
+        m?.dispose();
       }
       renderer.dispose();
       el.remove();

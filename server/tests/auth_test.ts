@@ -652,3 +652,72 @@ Deno.test("register: 別IPの枠は独立している（§3.8、回帰）", asyn
     kv.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// 壊れた Cookie ヘッダーの扱い（回帰）
+//
+// `getCookies()` は空文字・空白のみ・`"; ;"`・`"=abc"` の Cookie ヘッダーで例外を投げる。
+// セッションの取り出しが素の `getCookies()` だったころは、この例外がそのまま外まで抜けて
+// 認証不要のまま誰でも 500 を踏める状態だった。Cookie が無いのと同じ扱いになること。
+// ---------------------------------------------------------------------------
+
+/**
+ * サーバーまで届く「壊れた Cookie ヘッダー」。
+ * 空白のみのものは送信の途中で "" に詰められるが、いずれも getCookies が例外を投げる値。
+ */
+const BROKEN_COOKIES = ["", "   ", "; ;", "=abc"];
+
+// どのCookieでどのエンドポイントが落ちたかを取り違えないよう、組み合わせごとに1件ずつ立てる。
+// サーバーの起こし方（:memory: の KV → startServer → try/finally で後始末）は他のテストと同じ。
+for (const cookie of BROKEN_COOKIES) {
+  const label = JSON.stringify(cookie);
+
+  Deno.test(`GET /api/me は壊れたCookie ${label} を500ではなく401で返す（回帰）`, async () => {
+    const kv = await Deno.openKv(":memory:");
+    const server = startServer(0, "127.0.0.1", kv);
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/me`, {
+        headers: { cookie },
+      });
+      await res.body?.cancel();
+      assertEquals(res.status, 401);
+    } finally {
+      await server.shutdown();
+      kv.close();
+    }
+  });
+
+  Deno.test(`POST /api/auth/logout は壊れたCookie ${label} でも500にならない（回帰）`, async () => {
+    const kv = await Deno.openKv(":memory:");
+    const server = startServer(0, "127.0.0.1", kv);
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/auth/logout`, {
+        method: "POST",
+        headers: { cookie },
+      });
+      await res.body?.cancel();
+      // logout は消すセッションが無いだけなので、未ログインでも従来どおり200で終わる
+      assertEquals(res.status, 200);
+    } finally {
+      await server.shutdown();
+      kv.close();
+    }
+  });
+
+  Deno.test(`PUT /api/profile は壊れたCookie ${label} を500ではなく401で返す（回帰）`, async () => {
+    const kv = await Deno.openKv(":memory:");
+    const server = startServer(0, "127.0.0.1", kv);
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/profile`, {
+        method: "PUT",
+        headers: { "content-type": "application/json", cookie },
+        body: JSON.stringify({ nickname: "たろう", tags: ["game"] }),
+      });
+      await res.body?.cancel();
+      assertEquals(res.status, 401);
+    } finally {
+      await server.shutdown();
+      kv.close();
+    }
+  });
+}

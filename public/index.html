@@ -331,6 +331,99 @@
         white-space: nowrap;
       }
 
+      /* ── 廊下ビュー（#entry の中） ── */
+      /*
+       * 卓の見せ方は「一覧で選ぶ」と「店内を歩く」の2通り。どちらからでも入店できる。
+       * 廊下そのものの見た目は en.css の「廊下ビュー」の節にあり、
+       * corridor.html と共通。ここに書くのは、ホームに埋めるための寸法だけ。
+       *
+       * 既定は一覧。3D は three.js と GLB を引き連れてくるので、
+       * 選ばれてから読み込む（corridor.js の動的 import）。
+       */
+
+      /* 切り替えは見出しの行の右端に置く。一覧を見ている人の目に必ず入る位置 */
+      .corridor-modes {
+        display: flex;
+        align-items: center;
+        /* .home-head は baseline 揃え。囲みごとベースラインに乗ると沈むので中央で揃える */
+        align-self: center;
+        gap: 8px;
+        padding: 4px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-pill);
+        background: var(--panel);
+      }
+
+      .corridor-modes .btn {
+        min-height: 40px;
+        padding: 8px 16px;
+        border-radius: var(--r-pill);
+        font-size: 13px;
+        touch-action: manipulation;
+      }
+
+      .corridor-modes-hint {
+        font-size: 11.5px;
+        color: var(--dim);
+      }
+
+      /*
+       * 廊下の場の高さ。
+       * 100vh ではなく dvh を使う（スマホの 100vh はアドレスバーが引っ込んだときの
+       * 高さなので、バーが出ている間はその分はみ出す）。
+       * 下限 240px は横向きの iPhone（高さ390px）でも歩ける最小、
+       * 上限 560px は PC で場が間延びしないための頭打ち。
+       *
+       * flex: none は en.css の .corridor-stage { flex: 1 } を打ち消すためのもの。
+       * 親の #entry.home は縦並びのフレックス枠（flex: 1; min-height: 0;
+       * overflow-y: auto）なので、この要素はフレックスアイテムとして並ぶ。
+       * flex: 1 のままだと主軸（縦）の大きさは flex-basis: 0% を起点に親の余りから
+       * 決まり、上の height が参照されない。結果、余白いっぱいに伸びるか、余りが
+       * 無ければ min-height: 0 まで潰れて、240px〜560px の頭打ちが意味を失う。
+       * flex: none（= 0 0 auto）に戻せば height が主軸サイズとして効き、
+       * 上に書いた下限・上限の意図がそのまま保たれる。
+       */
+      #corridor-stage {
+        flex: none;
+        height: clamp(240px, 60dvh, 560px);
+        border: 1px solid var(--line);
+        border-radius: var(--r-lg);
+      }
+
+      /*
+       * 歩くボタン。狭い画面では折り返さず横に流す
+       * （幅390px で折り返すと2行 96px を食い、そのぶん場が押し出される）。
+       */
+      .corridor-walk {
+        display: flex;
+        gap: 8px;
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+
+      .corridor-walk::-webkit-scrollbar {
+        display: none;
+      }
+
+      .corridor-walk .btn {
+        flex: none;
+        min-height: 44px;
+        touch-action: manipulation;
+      }
+
+      /* 一覧側のひとまとまり。店内を歩いている間はこれごと畳む */
+      .corridor-home-list {
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
+
+      @media (max-width: 640px) {
+        .corridor-modes-hint {
+          display: none;
+        }
+      }
+
       /* ══ 入店後 ══════════════════════════════════════════════════
        * 3列に組む。左＝卓の情報と進行の操作、中央＝卓上・テロップ・あそび、
        * 右＝やりとり。全体の高さはビューポートに固定し、溢れた分は
@@ -1553,6 +1646,12 @@
         text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9), 0 0 10px rgba(0, 0, 0, 0.7);
       }
 
+      /* 見出しの脇に地無しで置く案内文。#rooms-count と同じ扱いにする */
+      .corridor-modes-hint {
+        color: #dcc7a5;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9), 0 0 10px rgba(0, 0, 0, 0.7);
+      }
+
       /* 帯状の部品は地を濃くして、下の明るい部分を遮ってから文字を乗せる */
       .notice {
         background: rgba(16, 11, 7, 0.72);
@@ -1659,14 +1758,102 @@
         <div class="home-head">
           <h1>今夜、灯りのついている卓</h1>
           <span id="rooms-count" class="muted">読み込んでいます…</span>
+          <span class="spacer"></span>
+          <span class="corridor-modes-hint">扉の並ぶ廊下からも選べます</span>
+          <div class="corridor-modes" role="group" aria-label="卓の見せ方">
+            <button
+              id="corridor-mode-list"
+              class="btn corridor-mode"
+              type="button"
+              aria-pressed="true"
+            >
+              一覧で選ぶ
+            </button>
+            <button
+              id="corridor-mode-3d"
+              class="btn corridor-mode"
+              type="button"
+              aria-pressed="false"
+            >
+              店内を歩く
+            </button>
+          </div>
         </div>
 
-        <div id="rooms-list"></div>
+        <!-- 3D を諦めた理由などの注記。空のあいだは場所を取らない（en.css の :empty） -->
+        <p id="corridor-error" class="corridor-error" role="status"></p>
 
-        <p class="notice">
-          合言葉・承認制（ノック）・ランダムマッチ（いますぐ飲む）はまだ実装されていません。
-          一覧に出ている卓へは承認なしでそのまま入店できます。
-        </p>
+        <!--
+          廊下の場。canvas は corridor-view.js がこの中に1枚足す。
+          札・矢印・焦点・スティックは HTML のまま canvas の上に重ねる
+          （3D に文字を描かないので、読み上げにもタップにもそのまま乗る）。
+        -->
+        <div id="corridor-stage" class="corridor-stage hidden">
+          <div class="corridor-aim" aria-hidden="true"></div>
+
+          <div
+            id="corridor-signs"
+            class="corridor-layer"
+            role="group"
+            aria-label="いま見えている卓の札"
+          ></div>
+          <div
+            id="corridor-edges"
+            class="corridor-layer"
+            role="group"
+            aria-label="画面の外にある卓"
+          ></div>
+
+          <div class="corridor-layer">
+            <p id="corridor-note" class="corridor-note"></p>
+
+            <div class="corridor-focus">
+              <h2 id="corridor-focus-name">—</h2>
+              <p id="corridor-focus-meta" aria-live="polite">通りかかった扉の札がここに出ます</p>
+            </div>
+
+            <div id="corridor-stick" class="corridor-stick" aria-hidden="true">
+              <div id="corridor-knob" class="corridor-stick-knob"></div>
+              <span class="corridor-stick-label">歩く</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 指以外の歩き方。キーボードは canvas 側（corridor-view.js）が受ける -->
+        <div id="corridor-walk" class="corridor-walk hidden" role="group" aria-label="廊下を歩く">
+          <button id="corridor-left" class="btn" type="button">左を向く</button>
+          <button id="corridor-back" class="btn" type="button">下がる</button>
+          <button id="corridor-fwd" class="btn" type="button">進む</button>
+          <button id="corridor-right" class="btn" type="button">右を向く</button>
+          <button id="corridor-enter" class="btn btn-gold" type="button" disabled>
+            この卓に入る
+          </button>
+        </div>
+
+        <div id="corridor-list" class="corridor-home-list">
+          <div id="rooms-list"></div>
+
+          <p class="notice">
+            合言葉・承認制（ノック）・ランダムマッチ（いますぐ飲む）はまだ実装されていません。
+            一覧に出ている卓へは承認なしでそのまま入店できます。
+          </p>
+        </div>
+
+        <!-- 押し間違いを止める確認。廊下でも一覧でも、入店は必ずここを通る -->
+        <dialog
+          id="corridor-confirm"
+          class="corridor-confirm card"
+          aria-labelledby="corridor-confirm-name"
+        >
+          <h2 id="corridor-confirm-name"></h2>
+          <p id="corridor-confirm-state"></p>
+          <p id="corridor-confirm-meta"></p>
+          <p id="corridor-confirm-since"></p>
+          <div class="corridor-confirm-foot">
+            <button id="corridor-confirm-cancel" class="btn" type="button">やめる</button>
+            <button id="corridor-confirm-ok" class="btn btn-gold" type="button">入店する</button>
+          </div>
+        </dialog>
       </section>
 
       <!--
@@ -1876,5 +2063,11 @@
     <script src="./room/bot.js"></script>
     <script src="./room/sandbox.js"></script>
     <script src="./app.js"></script>
+    <!--
+      廊下ビュー（店内を歩いて卓を選ぶ）。ESM なので type="module"。
+      three.js は「店内を歩く」を選ばれてから動的 import で読む（corridor.js）。
+      インラインの importmap は CSP（default-src 'self'）に弾かれるので使わない。
+    -->
+    <script type="module" src="./corridor.js"></script>
   </body>
 </html>

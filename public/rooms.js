@@ -34,6 +34,40 @@
   /** タグID → 表示名。GET /api/room-tags の結果から作る */
   let tagLabels = new Map();
 
+  /**
+   * 直近の取得結果。購読者が後から現れたときに、次のポーリングを待たせないため。
+   * まだ一度も取れていない間は null（「0卓」と区別する）。
+   */
+  let lastRooms = null;
+
+  /**
+   * 一覧が更新されたときの通知先。
+   * 廊下ビュー（corridor-ui.js）が同じ結果を使い回すための口で、
+   * これが無いと廊下が /api/rooms を別に叩き、同じ画面から二重に取りに行くことになる。
+   */
+  const listeners = new Set();
+
+  /** 購読する。すでに結果があればその場で1回渡す。戻り値を呼ぶと解除できる */
+  function subscribe(fn) {
+    if (typeof fn !== "function") return () => {};
+    listeners.add(fn);
+    if (lastRooms !== null) notify(fn);
+    return () => listeners.delete(fn);
+  }
+
+  /** 購読者1人に渡す。相手が落ちても一覧の描画は続ける */
+  function notify(fn) {
+    try {
+      fn(lastRooms ?? [], tagLabels);
+    } catch (err) {
+      console.warn("Rooms: 購読者でエラー", err);
+    }
+  }
+
+  function emit() {
+    for (const fn of [...listeners]) notify(fn);
+  }
+
   /** 要素を取得する */
   function $(id) {
     return document.getElementById(id);
@@ -122,7 +156,7 @@
   }
 
   /**
-   * 一覧から入店する。
+   * 卓に入る。一覧のカードと、廊下ビューの扉・札の両方がここを通る。
    * 参加コード欄を埋めて既存の入店ボタンを押すだけにして、WS の送信経路を1本に保つ。
    *
    * あだ名は空欄でよい（省略するとしゅんぴが二つ名を付ける。§3.10）ので、
@@ -134,8 +168,10 @@
     els.join.click();
   }
 
-  /** 取得結果を描画する */
+  /** 取得結果を描画する。廊下ビューにも同じ結果を配る */
   function render(rooms) {
+    lastRooms = rooms;
+    emit();
     clear(els.list);
     els.count.textContent = rooms.length === 0
       ? "いまは灯りのついた卓がありません"
@@ -184,6 +220,8 @@
       const body = await res.json();
       const tags = Array.isArray(body?.tags) ? body.tags : [];
       tagLabels = new Map(tags.map((t) => [t.id, t.label]));
+      // 一覧より後にタグが届くことがある。届いた時点で廊下の札にも反映させる
+      if (lastRooms !== null) emit();
     } catch {
       // 読み込めなくても一覧自体は表示できるので無視する（タグはIDのまま出す）
     }
@@ -217,7 +255,7 @@
     timer = null;
   }
 
-  global.Rooms = { init, refresh, stop };
+  global.Rooms = { init, refresh, stop, subscribe, enterRoom };
 
   init();
 })(window);
