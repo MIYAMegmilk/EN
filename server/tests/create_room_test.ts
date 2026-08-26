@@ -30,9 +30,7 @@ function load() {
   let pending: Pending | null = null;
 
   const fetchStub = (path: string) => {
-    const body = path === "/api/me"
-      ? { userId: "taro2026", nickname: "ホスト太郎" }
-      : { tags: [] };
+    const body = path === "/api/me" ? { userId: "taro2026", nickname: "ホスト太郎" } : { tags: [] };
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
   };
 
@@ -127,4 +125,3 @@ Deno.test("create-room.js: 一覧に出す卓で名前が空欄なら送らな�
   assertEquals(page.location.href, "/create-room.html", "遷移しない");
   assert(page.el("error").textContent.length > 0, "理由を出す");
 });
-

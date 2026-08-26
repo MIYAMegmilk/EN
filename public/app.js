@@ -235,13 +235,25 @@ async function loadGameModule(gameId) {
   }
 }
 
-/** ビューモジュールを片付ける。ゲームが終わったとき・卓を出たときに呼ぶ */
+/**
+ * ビューモジュールを片付ける。ゲームが終わったとき・卓を出たとき、
+ * および loadGameModule が新しいモジュールに差し替える直前に呼ぶ。
+ *
+ * pending はここで消さない。loadGameModule はまだ mount していない新しい
+ * gameView を pending に積んだ直後にこの関数を呼ぶため、ここで pending を
+ * null に戻すと「サーバーから1通しか届かない gameView」を mount 前に
+ * 取りこぼしてしまう（届いた view はもう二度と再送されない）。
+ *
+ * 消さなくても誤配信にはならない: flushGameView は
+ * `pending.gameId !== gameModuleState.gameId` のときは何もしないので、
+ * ここで gameId を null にしておけば、mount が完了して gameId が入り直すまで
+ * 古い pending が別のハンドルへ渡ることはない。
+ */
 function unmountGameModule() {
   const handle = gameModuleState.handle;
   gameModuleState.gameId = null;
   gameModuleState.handle = null;
   gameModuleState.loadingId = null;
-  gameModuleState.pending = null;
   if (handle !== null) {
     try {
       handle.unmount();

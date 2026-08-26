@@ -311,6 +311,38 @@ Deno.test("reflex: 範囲外・型違いのタップは捨てる", async () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// 初回 view だけで起動するか（public/app.js 側の pending 消失バグの再現）。
+//
+// もぐらたたき・反射神経・絵合わせのようなクライアント専用ゲームは、イベントが
+// 起きなければ gameView が1通しか届かない。app.js 側の配線（gameModuleState.pending）
+// が壊れると mount 後に一度も update が呼ばれず、ここから先には進めなくなる。
+// ここでは「1通目の update だけで、遊べる状態まで組み上がる」ことを保証する。
+// ---------------------------------------------------------------------------
+
+Deno.test("mogura: 初回 view 1件だけで盤面が組み上がる", async () => {
+  await exercise("mogura", ({ handle, container, frames }) => {
+    handle.update(makeView(), null);
+    frames.forEach((f) => f());
+    assert(container.findAll("canvas")[0] !== undefined, "1通目の view だけで盤面が出ていない");
+  });
+});
+
+Deno.test("reflex: 初回 view 1件だけで押す場所が組み上がる", async () => {
+  await exercise("reflex", ({ handle, container }) => {
+    handle.update(makeView(), null);
+    const pad = container.findAll("div").find((d) => d.handlers.has("pointerdown"));
+    assert(pad !== undefined, "1通目の view だけで押す場所が出ていない");
+  });
+});
+
+Deno.test("emoawase: 初回 view 1件だけで見出しが組み上がる", async () => {
+  await exercise("emoawase", ({ handle, container }) => {
+    handle.update(makeView(), null);
+    assert(container.text().includes("絵合わせ"), "1通目の view だけで見出しが出ていない");
+  });
+});
+
 Deno.test("emoawase: 中継されたタイムを出し、壊れた payload は捨てる", async () => {
   await exercise("emoawase", ({ handle, container, sent }) => {
     handle.update(makeView(), null);
