@@ -355,6 +355,48 @@ function connect() {
 }
 
 /**
+ * 「お引き取り」を押した相手と、その待ち受けを捨てるタイマー。
+ * 一度押しただけでは送らず、二度目で確定させる（§3.1）。
+ */
+let pendingKick = null;
+
+/** 待ち受けを畳む。確定・取り消し・卓を出たときのどれでも通る */
+function clearPendingKick() {
+  if (pendingKick === null) return;
+  clearTimeout(pendingKick.timer);
+  pendingKick = null;
+}
+
+/**
+ * ホストが参加者を退出させる（§3.1）。
+ *
+ * キックされた人は同じブラウザのままこの卓に戻れなくなる。取り消せない操作なので、
+ * 一度目は確認だけ出して、続けてもう一度押されたときに送る。
+ * ブラウザの confirm() は使わない。呼ぶと以降のイベントが止まるうえ、
+ * 卓の中では VC もゲームも同じタブで動いているので巻き添えが大きい。
+ */
+function confirmKick(player) {
+  if (pendingKick !== null && pendingKick.playerId === player.id) {
+    clearPendingKick();
+    send({ t: "kick", playerId: player.id });
+    showError("");
+    return;
+  }
+  clearPendingKick();
+  showNotice(
+    `${player.nickname} さんにお引き取りいただきます。` +
+      "よろしければもう一度押してください（この卓には戻れなくなります）",
+  );
+  pendingKick = {
+    playerId: player.id,
+    timer: setTimeout(() => {
+      pendingKick = null;
+      showError("");
+    }, 6000),
+  };
+}
+
+/**
  * 卓から離れた状態に戻し、一覧の見える画面を描き直す。
  * #entry の hidden が外れると rooms.js が MutationObserver で一覧を取り直すので、
  * ここでは一覧の更新を明示的に呼ばなくてよい。
@@ -362,6 +404,7 @@ function connect() {
  */
 function resetToEntry() {
   store.drop();
+  clearPendingKick();
   state.snapshot = null;
   state.rejoinAfterRestart = false;
   Chat.reset();
@@ -516,7 +559,18 @@ function renderAll() {
     if (!p.connected) marks.push("切断中");
     if (p.id === snapshot.youId) marks.push("あなた");
     const suffix = marks.length > 0 ? `（${marks.join("・")}）` : "";
-    players.appendChild(el("li", `${p.nickname}${suffix} ${p.score}点`));
+    const row = el("li");
+    row.appendChild(el("span", `${p.nickname}${suffix} ${p.score}点`));
+    // お引き取り（§3.1）。ホストにだけ、自分以外の行に出す。
+    // 押した相手はこの卓に戻れなくなるので、確認を1枚挟む
+    if (snapshot.youAreHost && p.id !== snapshot.youId) {
+      const kick = el("button", "お引き取り", "btn btn-red btn-mini");
+      kick.type = "button";
+      kick.dataset.playerId = p.id;
+      kick.addEventListener("click", () => confirmKick(p));
+      row.appendChild(kick);
+    }
+    players.appendChild(row);
   }
 
   const inLobby = state.phase === "lobby";
