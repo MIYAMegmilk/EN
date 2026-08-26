@@ -4,7 +4,7 @@
  * EN 本体（`server/`）とは完全に独立させる（§3）。同じリポジトリに置くが、プロセスも
  * ポートも KV も別で、`server/` からは何も import しない。
  *
- * 提供する口（すべて `Authorization: Bearer <token>` 必須、§6 / §7-6）:
+ * 提供する口（`/api/*` はすべて `Authorization: Bearer <token>` 必須、§6 / §7-6）:
  *
  *   GET    /api/claims             表明の一覧
  *   POST   /api/claims             表明の作成（1セッション1表明）
@@ -15,10 +15,18 @@
  *   PATCH  /api/tasks/:id          タスクの更新
  *   GET    /api/prs                PR 索引（キャッシュ）
  *   POST   /api/messages           **未実装**（501。github.ts にコメント投稿が無いため）
- *   GET    /                       画面（HTML）
+ *   GET    /                       画面のシェル HTML。**ここだけ認証を求めない**（§7-6）
+ *
+ * `GET /` を無認証にしてある理由（§7-6）:
+ *   ブラウザはトップレベルのページ遷移に `Authorization` ヘッダーを付けられない。
+ *   画面まで認証必須にすると「トークンを入力する画面」自体に到達できず、
+ *   **誰も画面を開けない**。そこで `public/index.html` を「情報を持たないシェル」に保ち、
+ *   シェルだけ無認証で配る。表明・タスク・PR・あだ名といった中身は例外なく
+ *   認証付きの `/api/*` から取り、トークンは画面が `sessionStorage` に持つ。
+ *   **シェルにデータを埋め込まないことが、この判断の前提条件**（tools/board/server_test.ts が見張る）。
  *
  * 守っていること:
- *   - すべての口でトークン認証。画面（`GET /`）も例外にしない（§7-6）
+ *   - `/api/*` と、それ以外の未知のパスはすべてトークン認証（緩めているのは `GET /` だけ、§7-6）
  *   - 自由文（title / note / タスクの title / body）の秘密検出（§7-7）
  *   - リクエストボディのサイズ上限（§7-8）。ストリームを読みながら打ち切る
  *   - CORS は許可しない（`access-control-allow-*` を一切返さない、§7-8）
@@ -88,11 +96,7 @@ const PR_NUMBER_MAX = 1_000_000;
  * 応答に付けるセキュリティヘッダ。`server/main.ts` の SECURITY_HEADERS と同じ流儀。
  * **CORS のヘッダは1つも含めない**（§7-8「CORS は許可しない」）。
  *
- * `script-src` は `default-src 'self'` に従うので、**インラインの `<script>` は動かない**。
- * 画面（別担当）がインライン JS を書く必要が出た場合は、ここを緩めるのではなく
- * まず「画面をどう認証するか」（§7-6 と、ブラウザが Authorization ヘッダーを付けられない
- * という制約の折り合い）を決めること。決まり方によっては、画面用の .js を別ファイルで
- * 配信できるようになり、緩める必要そのものが無くなる。
+ * これは **JSON の応答用**。画面（HTML）には下の HTML_SECURITY_HEADERS を使う。
  */
 const SECURITY_HEADERS: ReadonlyArray<[string, string]> = [
   [
@@ -113,14 +117,56 @@ const SECURITY_HEADERS: ReadonlyArray<[string, string]> = [
   ["cache-control", "no-store"],
 ];
 
+/**
+ * 画面のシェル HTML（`GET /`）に付けるセキュリティヘッダ。流儀は SECURITY_HEADERS と同じ
+ * （CORS のヘッダは1つも含めない・`cache-control: no-store` は維持）だが、CSP だけ別にする。
+ *
+ * シェルは**無認証で誰にでも配る**ので、JSON より締める。`public/index.html` の
+ * `<meta http-equiv="Content-Security-Policy">` と同じ内容を、**ヘッダー側にも**張る
+ * （meta は `frame-ancestors` を無視する仕様があり、クリックジャッキング対策は
+ * ヘッダーでしか効かない。逆に meta 側は、ファイルを直接開いたときの保険として残す）。
+ *
+ * - `default-src 'none'`: 外部からは何も読み込ませない
+ * - `connect-src 'self'`: 画面が叩くのは同一オリジンの `/api/*` だけ
+ * - `script-src 'sha256-…'`: index.html のインライン `<script>` **1本だけ**を許す。
+ *   **index.html のスクリプトを1文字でも変えたら、この値も index.html の meta も
+ *   更新すること。** tools/board/ui_test.ts がハッシュを、tools/board/server_test.ts が
+ *   「ヘッダーと meta が一致していること」を見張っていて、ずれると失敗する
+ * - `style-src 'unsafe-inline'`: 見た目を1ファイルに収める都合（EN 本体の流儀に揃える）
+ * - `frame-ancestors 'none'` / `base-uri 'none'` / `form-action 'none'`
+ */
+const HTML_SECURITY_HEADERS: ReadonlyArray<[string, string]> = [
+  [
+    "content-security-policy",
+    [
+      "default-src 'none'",
+      "connect-src 'self'",
+      "style-src 'unsafe-inline'",
+      "script-src 'sha256-OVTcZldVFAY84De7bZ+QjtYS5OhcO0FIoLeTdt9zRc8='",
+      "base-uri 'none'",
+      "form-action 'none'",
+      "frame-ancestors 'none'",
+    ].join("; "),
+  ],
+  ["x-content-type-options", "nosniff"],
+  ["referrer-policy", "no-referrer"],
+  // シェル自体は誰でも取れるが、共用 PC の履歴やプロキシに残さない
+  ["cache-control", "no-store"],
+];
+
 // ---------------------------------------------------------------------------
 // 応答の組み立て
 // ---------------------------------------------------------------------------
 
 /** 共通ヘッダを載せた Response を作る */
-function respond(body: BodyInit | null, status: number, contentType: string): Response {
+function respond(
+  body: BodyInit | null,
+  status: number,
+  contentType: string,
+  securityHeaders: ReadonlyArray<[string, string]> = SECURITY_HEADERS,
+): Response {
   const headers = new Headers({ "content-type": contentType });
-  for (const [key, value] of SECURITY_HEADERS) headers.set(key, value);
+  for (const [key, value] of securityHeaders) headers.set(key, value);
   return new Response(body, { status, headers });
 }
 
@@ -136,6 +182,16 @@ export function jsonResponse(value: unknown, status = 200): Response {
  */
 export function jsonError(status: number, message: string): Response {
   return jsonResponse({ error: message }, status);
+}
+
+/**
+ * ルーティングに使うパス。末尾のスラッシュを落とし、空になったら `/` に戻す。
+ * **認証の分岐（`GET /`）とルーティングで同じ値を使う**ため、1か所に切り出してある
+ * （片方だけ `/` を `//` と別物に見てしまうと、認証を迂回する穴になりかねない）。
+ */
+function routePath(url: URL): string {
+  const trimmed = url.pathname.replace(/\/+$/, "");
+  return trimmed === "" ? "/" : trimmed;
 }
 
 /** 405。許可メソッドを添える */
@@ -735,12 +791,27 @@ export class BoardServer {
   /**
    * 1リクエストを処理する。
    *
-   * **認証をルーティングより先に行う**（§6「すべてトークン必須」/ §7-6「画面も認証必須」）。
-   * こうしておけば、後から口を足したときに認証を書き忘れる余地が無い。
+   * **認証をルーティングより先に行う**（§6「すべてトークン必須」）。こうしておけば、
+   * 後から口を足したときに認証を書き忘れる余地が無い。
+   *
+   * 例外は `GET /`（画面のシェル HTML）**1本だけ**（§7-6）。
+   * ブラウザはトップレベルのページ遷移に `Authorization` ヘッダーを付けられないので、
+   * ここを認証必須にすると「トークンを入力する画面」に到達する経路が無くなり、
+   * 誰も画面を開けない。シェルは情報を持たない器なので、そこだけ先に返す。
+   * **この分岐に足せるのは「情報を持たない静的な器」だけで、`/api/*` は決して通さない。**
    */
   async handle(req: Request, ip: string): Promise<Response> {
     const url = new URL(req.url);
     const now = this.#now();
+    const path = routePath(url);
+
+    if (req.method === "GET" && path === "/") {
+      try {
+        return await this.#handleIndex();
+      } catch {
+        return jsonError(500, "サーバー内部でエラーが発生しました");
+      }
+    }
 
     const outcome = await this.#auth.authenticate(req, ip, now);
     if (!outcome.ok) {
@@ -763,20 +834,27 @@ export class BoardServer {
     }
 
     try {
-      return await this.#route(req, url, member.id, now);
+      return await this.#route(req, url, path, member.id, now);
     } catch {
       // 想定外の例外でも中身を漏らさない（§7-4）。500 とだけ伝える
       return jsonError(500, "サーバー内部でエラーが発生しました");
     }
   }
 
-  /** 認証済みのリクエストを各処理へ振り分ける */
-  async #route(req: Request, url: URL, memberId: string, now: number): Promise<Response> {
-    const path = url.pathname.replace(/\/+$/, "") === "" ? "/" : url.pathname.replace(/\/+$/, "");
-
+  /**
+   * 認証済みのリクエストを各処理へ振り分ける。
+   * `path` は `handle()` が正規化済み（`GET /` だけは既にここへ来る前に返している）。
+   */
+  async #route(
+    req: Request,
+    url: URL,
+    path: string,
+    memberId: string,
+    now: number,
+  ): Promise<Response> {
     if (path === "/") {
-      if (req.method !== "GET") return methodNotAllowed("GET");
-      return await this.#handleIndex();
+      // GET は handle() が先に返しているので、ここへ来るのは他のメソッドだけ
+      return methodNotAllowed("GET");
     }
     if (path === "/api/claims") {
       if (req.method === "GET") return await this.#listClaims(now);
@@ -823,11 +901,17 @@ export class BoardServer {
   // -------------------------------------------------------------------------
 
   /**
-   * 画面（HTML）を返す。**認証済みのときしかここへ来ない**（handle 冒頭で弾いている）。
+   * 画面のシェル HTML を返す。**認証を通っていなくてもここへ来る**（§7-6）。
    *
-   * 画面は別担当が作るので、まだ置かれていないことがある。その場合に 500 や
-   * 素の Deno のエラーを見せると原因が分からないので、**どこに何を置けばよいかを
-   * 述べた 503** を返す。
+   * したがって、ここから返してよいのは `public/index.html` の中身そのものだけで、
+   * **表明・タスク・メンバーのあだ名・トークンなどを一切混ぜてはいけない**。
+   * 画面は起動後に自分でトークンを受け取り、認証付きの `/api/*` から中身を取りに行く。
+   *
+   * 画面が置かれていないことがある（撤去したときや、配布物を取り違えたとき）。
+   * その場合に 500 や素の Deno のエラーを見せると原因が分からないので、
+   * **何が足りないのかを述べた 503** を返す。
+   * ただしこの応答は**無認証で誰でも引ける**ので、サーバー上の絶対パスは載せない
+   * （ファイル名だけにする。運用の置き場所は tools/board/README.md にある）。
    */
   async #handleIndex(): Promise<Response> {
     let html: string;
@@ -838,7 +922,7 @@ export class BoardServer {
         return jsonError(
           503,
           `画面（HTML）がまだ置かれていません: ${this.#describeHtmlPath()}` +
-            "。API は使えます（GET /api/claims など）",
+            "（既定は tools/board/public/index.html）。API は使えます（GET /api/claims など）",
         );
       }
       if (e instanceof Deno.errors.PermissionDenied) {
@@ -850,14 +934,23 @@ export class BoardServer {
       }
       return jsonError(500, "画面（HTML）を読めませんでした");
     }
-    return respond(html, 200, "text/html; charset=utf-8");
+    return respond(html, 200, "text/html; charset=utf-8", HTML_SECURITY_HEADERS);
   }
 
-  /** 画面のパスを人が読める形にする（トークン等は含まない） */
+  /**
+   * 画面のパスを人が読める形にする。**ファイル名だけ**を返す。
+   * この文字列は無認証の 503 / 500 に載るので、サーバーの絶対パス（配置場所や
+   * ユーザー名が透ける）を外へ出さない。トークン等はもとより含まない。
+   */
   #describeHtmlPath(): string {
     const path = this.#htmlPath;
-    if (typeof path === "string") return path;
-    return path.protocol === "file:" ? decodeURIComponent(path.pathname) : path.toString();
+    const full = typeof path === "string"
+      ? path
+      : path.protocol === "file:"
+      ? decodeURIComponent(path.pathname)
+      : path.toString();
+    const name = full.split(/[\\/]/).filter((part) => part.length > 0).pop();
+    return name ?? "index.html";
   }
 
   // -------------------------------------------------------------------------
