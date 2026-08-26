@@ -669,3 +669,61 @@ Deno.test("reset-limits: 実行するとdebug.resetLimitsとして記録され�
     }
   });
 });
+
+Deno.test("reset-limits: 応答の cleared にプロフィール保存の枠の件数も入る", async () => {
+  await withDebugToken("the-correct-token", async () => {
+    const kv = await Deno.openKv(":memory:");
+    const server = startServer(0, "127.0.0.1", kv);
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      const resetRes = await fetch(`${base}/api/debug/reset-limits`, {
+        method: "POST",
+        headers: { [DEBUG_TOKEN_HEADER]: "the-correct-token" },
+      });
+      assertEquals(resetRes.status, 200);
+
+      // どの枠も使っていないので全部0。デバッグ画面が login / register / profile の
+      // 3枠すべてを見られること（枠が増えたのに表示が片手落ちにならないこと）の確認
+      const resetBody = await resetRes.json();
+      assertEquals(resetBody.scope, "all");
+      assertEquals(resetBody.cleared, { login: 0, register: 0, profile: 0 });
+    } finally {
+      await server.shutdown();
+      kv.close();
+    }
+  });
+});
+
+Deno.test("reset-limits: 記録の文言と detail にプロフィール保存の枠が出る", async () => {
+  await withDebugToken("the-correct-token", async () => {
+    const kv = await Deno.openKv(":memory:");
+    const server = startServer(0, "127.0.0.1", kv);
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      const resetRes = await fetch(`${base}/api/debug/reset-limits`, {
+        method: "POST",
+        headers: {
+          [DEBUG_TOKEN_HEADER]: "the-correct-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ ip: "198.51.100.2" }),
+      });
+      assertEquals(resetRes.status, 200);
+
+      const eventsRes = await fetch(`${base}/api/debug/events?kind=debug.resetLimits`, {
+        headers: { [DEBUG_TOKEN_HEADER]: "the-correct-token" },
+      });
+      // deno-lint-ignore no-explicit-any
+      const { events } = await eventsRes.json() as { events: any[] };
+      assertEquals(events.length, 1);
+      assertEquals(typeof events[0].detail.clearedProfile, "number");
+      assert(
+        events[0].message.includes("profile:0件"),
+        `記録の文言に profile 件数が入ること: ${events[0].message}`,
+      );
+    } finally {
+      await server.shutdown();
+      kv.close();
+    }
+  });
+});

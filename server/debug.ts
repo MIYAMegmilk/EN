@@ -192,14 +192,14 @@ export function hasValidDebugToken(req: Request, token: string | null): boolean 
 export const DEBUG_EVENTS_PATH = "/api/debug/events";
 export const DEBUG_SUMMARY_PATH = "/api/debug/summary";
 /**
- * 開発中にログイン・登録のレート制限（server/auth.ts の #loginLimiter /
- * #registerLimiter）で詰まったとき、待たずに解除するための口。
+ * 開発中にログイン・登録・プロフィール保存のレート制限（server/auth.ts の #loginLimiter /
+ * #registerLimiter / #profileLimiter）で詰まったとき、待たずに解除するための口。
  * 「消す」操作なので必ず POST（GET だと誤って踏んだリンクやプリフェッチで消えてしまう）。
  */
 export const DEBUG_RESET_LIMITS_PATH = "/api/debug/reset-limits";
 
 /** POST /api/debug/reset-limits が返す、実際に消えた枠（IP）の件数 */
-export type ResetLimitsResult = { login: number; register: number };
+export type ResetLimitsResult = { login: number; register: number; profile: number };
 
 function jsonNoStore(body: unknown, init?: ResponseInit): Response {
   return new Response(JSON.stringify(body), {
@@ -341,13 +341,14 @@ export class DebugApi {
     this.recorder.record(
       "debug.resetLimits",
       scope === "ip"
-        ? `デバッグ操作: IP ${ip} のレート制限をリセットしました（login:${cleared.login}件, register:${cleared.register}件）`
-        : `デバッグ操作: 全IPのレート制限をリセットしました（login:${cleared.login}件, register:${cleared.register}件）`,
+        ? `デバッグ操作: IP ${ip} のレート制限をリセットしました（login:${cleared.login}件, register:${cleared.register}件, profile:${cleared.profile}件）`
+        : `デバッグ操作: 全IPのレート制限をリセットしました（login:${cleared.login}件, register:${cleared.register}件, profile:${cleared.profile}件）`,
       {
         scope,
         ip: ip ?? "",
         clearedLogin: cleared.login,
         clearedRegister: cleared.register,
+        clearedProfile: cleared.profile,
       },
     );
     return jsonNoStore({ cleared, scope });
