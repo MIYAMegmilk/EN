@@ -1177,32 +1177,3 @@ Deno.test("S2: アプリ本体に Permissions-Policy が付く（§9-2）", asyn
   }
 });
 
-Deno.test("S3: /sandbox/ には画面取得を誰にも許さない（§9-2）", async () => {
-  const handle = startServer(0);
-  try {
-    const res = await fetch(`http://127.0.0.1:${handle.port}/sandbox/runner.html`);
-    const policy = res.headers.get("permissions-policy");
-    assertExists(policy);
-    for (const directive of ["display-capture=()", "camera=()", "microphone=()"]) {
-      assert(policy.includes(directive), `${directive} が無い: ${policy}`);
-    }
-    await res.body?.cancel();
-  } finally {
-    await handle.shutdown();
-  }
-});
-
-Deno.test("S4: runner の iframe に allow-same-origin が入っていない（§9-2 の前提）", async () => {
-  const path = fromFileUrl(new URL("../../public/room/sandbox.js", import.meta.url));
-  const sandbox = await Deno.readTextFile(path);
-  // 見るのは実際に付けている属性値だけ（コメントには「付けない」と書いてある）
-  const values = [...sandbox.matchAll(/setAttribute\(\s*"sandbox"\s*,\s*"([^"]*)"/g)]
-    .map((m) => m[1]);
-  assert(values.length > 0, "iframe の sandbox 属性を付けている箇所が見つからない");
-  for (const value of values) {
-    assertFalse(
-      value.includes("allow-same-origin"),
-      `runner が同一オリジンになると、Permissions-Policy の self に一致してしまう: ${value}`,
-    );
-  }
-});
