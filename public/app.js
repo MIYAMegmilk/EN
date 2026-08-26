@@ -27,8 +27,19 @@ function el(tag, text, className) {
   return node;
 }
 
-/** VC への自動参加が進行中か（マイクの許可を待っている間だけ true） */
+/**
+ * VC への自動参加が進行中か（マイクの許可を待っている間だけ true）。
+ * 表示（「マイクの許可を待っています…」）だけでなく、autoJoinVc の
+ * 再入ガードも兼ねる。roomState は得点確定やノックでも飛んでくるので、
+ * 許可ダイアログを見ているあいだに二度目の join を始めさせない。
+ */
 let vcJoining = false;
+
+/**
+ * カメラの入切が進行中か（getUserMedia の応答待ちを含む）。
+ * 進行中はカメラのボタンを閉じる。閉じないと連打で取得が二重に走る。
+ */
+let vcCameraBusy = false;
 
 /**
  * いま選ばれているあそび（"official:<id>"）。
@@ -1474,7 +1485,8 @@ function setVcControl(button, on, label) {
 function renderVc() {
   const vc = VC.getState();
   $("vc-mute").disabled = !vc.active;
-  $("vc-camera").disabled = !vc.active;
+  // 入切の処理中は閉じる。他の通知で renderVc が走っても開き直さない
+  $("vc-camera").disabled = !vc.active || vcCameraBusy;
   // 文言は「押すとどうなるか」、絵は「いまどうなっているか」を出す（Zoom と同じ流儀）
   setVcControl($("vc-mute"), !vc.muted, vc.muted ? "ミュート解除" : "ミュート");
   // 画面共有中はカメラを実際に止めている（LED を消すため）。それでも
@@ -1597,6 +1609,10 @@ function isSelfVcPromotion(msg) {
 function autoJoinVc(msg) {
   if (msg.t !== "roomState" && !isSelfVcPromotion(msg)) return;
   if (VC.getState().active) return;
+  // 参加処理が走っている最中の roomState では何もしない。VC 側の active は
+  // マイクを掴んだ**後**にしか立たないので、許可ダイアログを見ているあいだは
+  // 上の判定だけでは素通りしてしまい、マイクを二重に掴むことになる
+  if (vcJoining) return;
   // 先に一度描き直す。renderAll() は VC.handleServerMessage より前に走るので、
   // ここで描き直さないと「VC枠外」（selfId 未設定のときの既定）が残ってしまう
   vcJoining = true;
@@ -1721,7 +1737,17 @@ function bindVc(iceServers) {
     renderVc();
   });
   $("vc-camera").addEventListener("click", () => {
-    VC.toggleCamera().then(renderVc);
+    // 処理中はボタンを閉じる（画面共有のクールダウンと同じ趣旨）。
+    // 開けたままだと連打で getUserMedia が二重に走り、先に掴んだカメラが
+    // 参照を失って止められなくなる（ランプが消えない）
+    if (vcCameraBusy) return;
+    vcCameraBusy = true;
+    renderVc();
+    const done = () => {
+      vcCameraBusy = false;
+      renderVc();
+    };
+    Promise.resolve(VC.toggleCamera()).then(done, done);
   });
   $("vc-screen").addEventListener("click", () => {
     // 開始・停止の連打を抑える（§9-4）。押した直後は数秒ボタンを閉じる

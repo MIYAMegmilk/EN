@@ -174,12 +174,38 @@
     players: new Map(),
     /** VC に参加中か */
     active: false,
+    /**
+     * join() がマイクの応答を待っている最中か（多重参加よけ）。
+     * state.active は getUserMedia の**後**にしか立たないので、許可ダイアログを
+     * 出しているあいだ（数秒〜数十秒）は active だけでは門にならない。
+     * その窓に別の roomState が届くとマイクを二重に掴んでしまう。
+     */
+    joining: false,
+    /**
+     * join() の世代。VC を畳むたびに進める。
+     * 許可ダイアログを見ているあいだに退室・切断された join を、
+     * await から戻った時点で見分けて掴んだマイクを捨てるために持つ。
+     */
+    joinGen: 0,
     /** 自分の接続世代。join のたびに新しくする */
     session: null,
     /** マイクの MediaStream */
     micStream: null,
     /** カメラの MediaStream */
     camStream: null,
+    /**
+     * カメラ取得の進行中管理。画面共有の screen.starting / screen.gen と同じ方式。
+     * getUserMedia は許可ダイアログや他アプリとの取り合いで待たされ得るので、
+     * 「待っているあいだに割り込まれたか」を await の後で必ず見分ける。
+     * 見分けないと掴んだストリームが参照を失い、二度と stop() されない
+     * （＝カメラのランプが点いたまま消えない）。
+     */
+    camera: {
+      /** getUserMedia の応答待ちか（連打よけ） */
+      starting: false,
+      /** 取得処理の世代。カメラを手放すたびに進める */
+      gen: 0,
+    },
     /**
      * 画面共有の MediaStream。null でなければ「共有中」。
      * カメラと同時に持つことはある（共有中もカメラは切らない）が、
@@ -1717,8 +1743,7 @@
     // 共有中はカメラを手元に持ったままのことがある（送ってはいない）ので、
     // ここで両方を落として映像ソースを "none" にそろえる
     if (source === "screen") releaseScreenStream();
-    stopStream(state.camStream);
-    state.camStream = null;
+    releaseCameraStream();
     renderLocalVideo();
     // 自分の共有を拡大表示していたなら、中身が死んだ枠を残さない
     if (source === "screen" && state.selfId !== null) closeZoom(state.selfId);
@@ -1892,6 +1917,14 @@
    */
   async function join() {
     if (state.active) return true;
+    // ------------------------------------------------------------------
+    // 多重参加よけ。roomState は入室時だけでなく得点確定やノックでも配られる
+    // ので、マイクの許可ダイアログを見ているあいだに次の roomState が届く。
+    // state.active は getUserMedia の**後**にしか立たないため、ここに門が
+    // 無いと2本目のマイクを掴み、1本目が参照を失って二度と止まらなくなる。
+    // （孤児のトラックは setMuted() の対象からも外れるのでミュートも効かない）
+    // ------------------------------------------------------------------
+    if (state.joining) return false;
     if (state.selfId === null) {
       notify("error", "ルームに入ってから VC に参加してください");
       return false;
@@ -1904,8 +1937,12 @@
       notify("error", "このブラウザではマイクを利用できません。音声なしで参加します");
       return false;
     }
+    state.joinGen += 1;
+    const gen = state.joinGen;
+    state.joining = true;
+    let stream = null;
     try {
-      state.micStream = await global.navigator.mediaDevices.getUserMedia({
+      stream = await global.navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
@@ -1914,10 +1951,19 @@
         video: false,
       });
     } catch (e) {
+      state.joining = false;
       console.error("VC getUserMedia failed:", e);
       notify("error", "マイクを使用できませんでした。音声なしで参加します");
       return false;
     }
+    state.joining = false;
+    // 許可ダイアログを見ているあいだに参加が成立した／卓を離れたなら、
+    // 掴んだマイクを捨てる。捨て損ねるとブラウザの「使用中」表示が消えない
+    if (state.active || state.micStream !== null || state.joinGen !== gen) {
+      stopStream(stream);
+      return state.active;
+    }
+    state.micStream = stream;
     state.active = true;
     state.muted = false;
     state.session = randomId();
@@ -1961,6 +2007,10 @@
    * VC に参加していないときは何もしない（トラックも接続も持っていないため）
    */
   function shutdownVc(options) {
+    // 参加していないときでも世代だけは進める。マイクの許可ダイアログを
+    // 出したまま卓を離れる場合、この時点ではまだ active が立っていないので、
+    // ここで無効にしておかないと後から解決した join がマイクを掴んでしまう
+    state.joinGen += 1;
     if (!state.active) return;
     // タイマーを残さないよう、ピアを畳む前に監視を止める
     resetQuality();
@@ -1970,8 +2020,7 @@
     closeAllPeers();
     stopStream(state.micStream);
     state.micStream = null;
-    stopStream(state.camStream);
-    state.camStream = null;
+    releaseCameraStream();
     // 画面のトラックも必ず止める。止め損ねるとブラウザの「共有中」バーが
     // 残り続ける（カメラのランプを消すのと同じ趣旨・§5 T12）
     releaseScreenStream();
@@ -1991,6 +2040,20 @@
   function stopStream(stream) {
     if (stream === null) return;
     for (const track of stream.getTracks()) track.stop();
+  }
+
+  /**
+   * カメラのストリームを手放す。releaseScreenStream() のカメラ版で、
+   * 「止める」だけでなく**選択待ちの取得を無効にする**（世代を進める）のが要点。
+   *
+   * 進めないと、応答待ちの getUserMedia が後から解決して state.camStream を
+   * 埋め直してしまう。退室後にランプが点く・OFF にしたのに点く、という
+   * 「利用者の最後の操作と逆になる」状態はここで断つ。
+   */
+  function releaseCameraStream() {
+    state.camera.gen += 1;
+    stopStream(state.camStream);
+    state.camStream = null;
   }
 
   /** ミュートを切り替える。戻り値は切り替え後の状態 */
@@ -2027,6 +2090,62 @@
     return state.camStream !== null;
   }
 
+  /** acquireCamera() の結果。掴めて state.camStream に入った */
+  const CAMERA_OK = "ok";
+  /** 別の取得が進行中なので何もしなかった（連打・多重呼び出し） */
+  const CAMERA_BUSY = "busy";
+  /** 待っているあいだに割り込まれたので、掴んだものを捨てた */
+  const CAMERA_STALE = "stale";
+  /** getUserMedia が失敗した（拒否・デバイス無し・他アプリが占有 等） */
+  const CAMERA_FAILED = "failed";
+  /** 映像トラックが1本も返らなかったので捨てた */
+  const CAMERA_NOTRACK = "notrack";
+
+  /**
+   * カメラを1本だけ掴む共通処理。カメラの getUserMedia はここに一本化する。
+   *
+   * getUserMedia は許可の問い合わせや他アプリとの取り合いで待たされ得るので、
+   * 画面共有の startScreenShare と同じ **starting（連打よけ）＋ gen（世代）**
+   * の二重ガードを掛ける。await から戻ったら必ず割り込みの有無を見て、
+   * 割り込まれていたら掴んだストリームを stopStream() で捨てる。
+   * 捨て損ねると参照を失ったまま止められなくなり、退室してもカメラの
+   * ランプが消えない（§3.6 のプライバシー配慮が破れる）。
+   *
+   * 成功時だけ state.camStream に入れる。呼び出し側は結果コードを見て、
+   * 通知を出すか・送出を組み替えるかを決める。
+   */
+  async function acquireCamera() {
+    if (!state.active) return CAMERA_STALE;
+    if (state.camStream !== null) return CAMERA_OK;
+    if (state.camera.starting) return CAMERA_BUSY;
+    const devices = global.navigator === undefined ? undefined : global.navigator.mediaDevices;
+    if (devices === undefined || devices === null) return CAMERA_FAILED;
+    state.camera.gen += 1;
+    const gen = state.camera.gen;
+    state.camera.starting = true;
+    let stream = null;
+    try {
+      stream = await devices.getUserMedia(CAMERA_CONSTRAINTS);
+    } catch (e) {
+      state.camera.starting = false;
+      console.error("VC camera failed:", e);
+      return CAMERA_FAILED;
+    }
+    state.camera.starting = false;
+    // 待っているあいだに卓を離れた・OFF にされた・画面共有が始まった・
+    // 別の取得が先に入った。いずれも掴んだものはもう要らない
+    if (!state.active || state.camera.gen !== gen || state.camStream !== null) {
+      stopStream(stream);
+      return CAMERA_STALE;
+    }
+    if (stream.getVideoTracks()[0] === undefined) {
+      stopStream(stream);
+      return CAMERA_NOTRACK;
+    }
+    state.camStream = stream;
+    return CAMERA_OK;
+  }
+
   /**
    * カメラの ON / OFF（初期 OFF・本人の明示操作でのみ ON、§3.6）。
    * ON は既存の全ピアへ映像を載せ、OFF は replaceTrack(null) で送出だけを外す。
@@ -2059,21 +2178,25 @@
     }
     if (on === true) {
       if (state.camStream !== null) return true;
-      try {
-        state.camStream = await global.navigator.mediaDevices.getUserMedia(CAMERA_CONSTRAINTS);
-      } catch (e) {
-        console.error("VC camera failed:", e);
+      const result = await acquireCamera();
+      if (result === CAMERA_FAILED) {
         notify("error", "カメラを使用できませんでした");
         return false;
       }
-      const track = state.camStream.getVideoTracks()[0];
-      if (track === undefined) {
-        stopStream(state.camStream);
-        state.camStream = null;
-        return false;
-      }
+      // busy（別の取得が進行中）・stale（待つあいだに割り込まれた）・
+      // notrack（映像トラックが無かった）は、掴んだものを acquireCamera() が
+      // 既に捨てている。ここで送出をいじると割り込んだ側の状態を壊す
+      if (result !== CAMERA_OK) return false;
+      const stream = state.camStream;
+      const track = stream.getVideoTracks()[0];
       // 自動停止で外した sender は使い回す（再ネゴシエーションを避ける）
       await applyVideoTrackAll(track);
+      if (state.camStream !== stream) {
+        // 差し替えを待つあいだに OFF・画面共有・退室が割り込んだ。
+        // 送出を今の状態へそろえ直して抜ける（画面共有と同じ作法）
+        await applyVideoTrackAll(activeVideoTrack());
+        return false;
+      }
       markVideoSourceChanged(track);
       announceVideoState();
       renderLocalVideo();
@@ -2082,7 +2205,10 @@
       return true;
     }
     if (state.camStream === null) {
-      // カメラを持っていないなら、掛け金だけ外して戻る（従来どおり）
+      // カメラを持っていないなら、掛け金だけ外して戻る（従来どおり）。
+      // ただし応答待ちの取得があるなら無効にする。利用者の最後の操作は OFF
+      // なのだから、後から解決した ON でカメラが点くのは筋が通らない
+      if (state.camera.starting) state.camera.gen += 1;
       if (currentVideoSource() === "none") {
         stopQualityMonitor();
         clearAutoStop();
@@ -2092,8 +2218,7 @@
       return false;
     }
     const wasSending = currentVideoSource() === "camera";
-    stopStream(state.camStream);
-    state.camStream = null;
+    releaseCameraStream();
     if (wasSending) {
       // removeTrack はしない。sender を残しておけば次の映像で再ネゴが要らない（T1）
       await applyVideoTrackAll(activeVideoTrack());
@@ -2206,8 +2331,7 @@
     // 共有をやめたときに戻せるよう、ON だったことだけを覚えておく。
     // ------------------------------------------------------------------
     state.screen.cameraWasOn = state.camStream !== null;
-    stopStream(state.camStream);
-    state.camStream = null;
+    releaseCameraStream();
     // 取り込み側だけ先に絞る。送出パラメータは差し替えの後に当てる（§4.2 の順序）
     applyCaptureProfile(track, profileName);
     await applyVideoTrackAll(track);
@@ -2275,28 +2399,20 @@
    *
    * 他のアプリがカメラを掴んでいる等で失敗し得る。呼び出し側が「カメラ OFF」
    * として整合を保てるよう、例外は外へ出さず真偽値だけを返す。
+   *
+   * 取得そのものは acquireCamera() に任せる。共有をやめてから取り直すまでの
+   * 数百 ms は「カメラを持っていない」状態なので、その隙に利用者がカメラの
+   * ボタンを押すと取得が二重に走り得る。世代管理を1か所に集めておかないと
+   * どちらかのストリームが孤児になる。
    */
   async function reacquireCamera() {
-    if (state.camStream !== null) return true;
     // 卓を離れた後に戻しても意味が無い（ランプだけが点く）
     if (!state.active) return false;
-    let stream = null;
-    try {
-      stream = await global.navigator.mediaDevices.getUserMedia(CAMERA_CONSTRAINTS);
-    } catch (e) {
-      console.error("VC camera restore failed:", e);
-      return false;
-    }
-    if (!state.active) {
-      stopStream(stream);
-      return false;
-    }
-    if (stream.getVideoTracks()[0] === undefined) {
-      stopStream(stream);
-      return false;
-    }
-    state.camStream = stream;
-    return true;
+    // 失敗の記録は acquireCamera() が済ませている。busy / stale は
+    // 「別の経路がカメラを面倒みている」ということなので、結果コードではなく
+    // 「いまカメラを持っているか」で成否を返す（呼び出し側が見たいのはそれ）
+    await acquireCamera();
+    return state.camStream !== null;
   }
 
   /**
