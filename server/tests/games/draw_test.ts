@@ -936,6 +936,34 @@ Deno.test("卓: 期限に達すると schedule で自動的に進み、最後は
   room.manager.dispose();
 });
 
+Deno.test("卓: 正解して加点があっても、終了後に配信される roomState に反映される（バグ回帰）", () => {
+  // server/games/chicken.ts の finish() で実機確認されたバグ（viewChanged → schedule → score
+  // → ended の順で効果が来ると、score が加算される前に配信されてしまい、しかも score 自体は
+  // 誰にも再配信されない）は、同じ効果順序を返す draw.ts の finish() にも起こりうる。
+  // 2ターンとも正解させて score を0点でなくし、実際に届いた roomState で確かめる
+  const room = playingRoom();
+  for (let turn = 1; turn <= 2; turn++) {
+    const { drawer, guesser } = roles(room);
+    const topic = lastDrawView(drawer).topic;
+    assertExists(topic, "出題者にお題が届いていない");
+    room.manager.handle(guesser, { t: "chat", text: topic });
+    assertEquals(lastDrawView(room.host).phase, "reveal");
+    room.clock.advance(8_000); // 答え合わせの表示時間
+  }
+  room.clock.advance(10_000); // 最終結果の表示時間 → 終了
+  assertEquals(last(room.host, "phase")?.phase, "lobby");
+
+  const internalTotal = [...(room.manager.getRoom(room.code)?.players.values() ?? [])]
+    .reduce((sum, p) => sum + p.score, 0);
+  assert(internalTotal > 0, "テストの前提が崩れている（誰も加点されていない）");
+
+  const delivered = last(room.host, "roomState")?.snapshot;
+  assertExists(delivered, "終了後に roomState が届いていない");
+  const deliveredTotal = delivered.players.reduce((sum, p) => sum + p.score, 0);
+  assertEquals(deliveredTotal, internalTotal, "配信された roomState の得点が内部状態と一致しない");
+  room.manager.dispose();
+});
+
 Deno.test("卓: ゲーム外（ロビー）のチャットは今までどおり配信される", () => {
   const clock = new FakeClock();
   const manager = new RoomManager({

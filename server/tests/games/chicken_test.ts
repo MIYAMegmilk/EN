@@ -680,6 +680,74 @@ Deno.test("卓: 進行中は別のゲームを選べない。終了で lobby へ
   room.manager.dispose();
 });
 
+Deno.test("卓: 終了後は roomState が配り直され、参加者一覧の得点にも加点が反映される（バグ回帰）", () => {
+  // 実機で確認されたバグ: チキンレースを終えると、ゲーム内の順位表（gameView.standings）は
+  // 正しいのに、卓の参加者一覧（RoomSnapshot.players[].score）が 0 のまま届かなかった。
+  // 原因は rooms.ts の applyEffects が効果を配列順に処理していたこと（viewChanged → schedule
+  // → score → ended の順で finish() が返すため、score が加算される前に配信されてしまい、
+  // かつ score 自体は "phase" にも "gameView" にも乗らないので誰にも再配信されなかった）。
+  // ここでは RoomManager 越しに実際に配信された S2C "roomState" を読み、
+  // Player.score が正しく加算されていることを確認する（getRoom で内部状態を覗くだけでは
+  // 「配信されない」バグは捕まらないので、必ず届いたメッセージそのものを見る）
+  const room = playingRoom();
+  for (let round = 1; round <= 3; round++) {
+    room.manager.handle(room.host, { t: "gameEvent", payload: { k: "submit", value: 50 } });
+    room.manager.handle(room.guest, { t: "gameEvent", payload: { k: "submit", value: 10 } });
+    room.clock.advance(8_000); // 公開の表示時間
+  }
+  room.clock.advance(10_000); // 最終結果の表示時間 → 終了
+
+  // ホスト・客のどちらの画面にも、終了後に roomState が届き、得点が乗っている
+  for (
+    const [link, id, expectedScore] of [
+      [room.host, room.hostId, 3],
+      [room.guest, room.guestId, 0],
+    ] as const
+  ) {
+    const snapshot = last(link, "roomState")?.snapshot;
+    assertExists(snapshot, "終了後に roomState が届いていない");
+    const player = snapshot.players.find((p) => p.id === id);
+    assertExists(player, "参加者一覧から本人が消えている");
+    assertEquals(player.score, expectedScore, "参加者一覧の得点に加点が反映されていない");
+  }
+  room.manager.dispose();
+});
+
+Deno.test("卓: score 効果が viewChanged より前に来ても、後に来ても同じように反映される（順序非依存）", () => {
+  // rooms.ts の applyEffects は「モジュールが返す効果の順序に依存しない」ことが仕様
+  // （score をどこに置いても Player.score は正しく加算され、roomState として配り直される）。
+  // 実在するモジュールは全て viewChanged → schedule → score → ended の順でしか効果を返さない
+  // ため、"順序を変えても壊れない" こと自体は実モジュールだけでは検証できない。
+  // ここでは RoomManager の内部（applyEffects）に直接、順序を変えた効果配列を渡して確かめる
+  function scoreThenViewChangedWins(order: "scoreFirst" | "scoreLast", expectedScore: number) {
+    const room = playingRoom();
+    // deno-lint-ignore no-explicit-any
+    const manager = room.manager as any;
+    const entry = manager.rooms.get(room.code);
+    assertExists(entry, "内部の RoomEntry が取れない");
+    const scoreEffect = {
+      t: "score",
+      totals: [
+        { playerId: room.hostId, totalScore: expectedScore, rank: 1 },
+        { playerId: room.guestId, totalScore: 0, rank: 2 },
+      ],
+    };
+    const effects = order === "scoreFirst"
+      ? [scoreEffect, { t: "viewChanged" }, { t: "ended", reason: "hostEnded" }]
+      : [{ t: "viewChanged" }, scoreEffect, { t: "ended", reason: "hostEnded" }];
+    manager.applyEffects(entry, effects, "playing");
+
+    const hostSnapshot = last(room.host, "roomState")?.snapshot;
+    assertExists(hostSnapshot, "roomState が配信されていない");
+    const hostPlayer = hostSnapshot.players.find((p) => p.id === room.hostId);
+    assertEquals(hostPlayer?.score, expectedScore);
+    room.manager.dispose();
+  }
+
+  scoreThenViewChangedWins("scoreLast", 5); // 実モジュールと同じ順序（viewChanged → score）
+  scoreThenViewChangedWins("scoreFirst", 7); // 仮に score を先に返すモジュールがあっても同じ結果になる
+});
+
 Deno.test("卓: 期限に達すると schedule で自動的に進む", () => {
   const room = playingRoom();
   room.manager.handle(room.host, { t: "gameEvent", payload: { k: "submit", value: 7 } });

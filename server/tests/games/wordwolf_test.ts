@@ -1262,5 +1262,13 @@ Deno.test("卓: 期限に達すると schedule で自動的に進み、最後は
   assertExists(roomState);
   const total = [...roomState.players.values()].reduce((sum, p) => sum + p.score, 0);
   assertEquals(total, finalView.wolfId === room.hostId ? 2 : 1);
+  // バグ回帰: rooms.ts の score/viewChanged/ended の処理順によっては、内部の Player.score は
+  // 正しくても実際に配信される roomState（参加者一覧）には加点が乗らないことがあった
+  // （server/games/chicken.ts で実機確認されたバグと同じ効果順序を wordwolf も使っている）。
+  // getRoom（内部状態）だけでなく、実際に届いた S2C "roomState" でも同じ値になることを確かめる
+  const delivered = last(room.host, "roomState")?.snapshot;
+  assertExists(delivered, "終了後に roomState が届いていない");
+  const deliveredTotal = delivered.players.reduce((sum, p) => sum + p.score, 0);
+  assertEquals(deliveredTotal, total, "配信された roomState の得点が内部状態と一致しない");
   room.manager.dispose();
 });

@@ -994,3 +994,43 @@ Deno.test("卓: 再接続・途中参加は RoomSnapshot.game で復元できる
   assertEquals(lateView.players.length, 2);
   room.manager.dispose();
 });
+
+Deno.test("卓: 正解して加点があっても、終了後に配信される roomState に反映される（バグ回帰）", () => {
+  // server/games/chicken.ts の finish() で実機確認されたバグ（viewChanged → schedule → score
+  // → ended の順で効果が来ると、score が加算される前に配信されてしまい、しかも score 自体は
+  // 誰にも再配信されない）は、同じ効果順序を返す hayaoshi.ts の finish() にも起こりうる。
+  // ホストが毎問正解して score を0点でなくし、実際に届いた roomState で確かめる
+  const room = playingRoom();
+  let guard = 0;
+  while (lastView(room.host).phase !== "final") {
+    guard++;
+    assert(guard < 30, "問題が終わらない（テストの前提が崩れている）");
+    room.clock.advance(3_000); // ready → buzz
+    room.manager.handle(room.host, { t: "gameEvent", payload: { k: "buzz" } });
+    assertEquals(lastView(room.host).iAmAnswerer, true);
+    // 正解番号は秘密（view に載らない）なので、内部状態から読む
+    // deno-lint-ignore no-explicit-any
+    const gameState = (room.manager.getRoom(room.code)?.game as any)?.state as HayaoshiState;
+    assertExists(gameState);
+    const question = gameState.questions[gameState.questionNo - 1];
+    assertExists(question);
+    room.manager.handle(room.host, {
+      t: "gameEvent",
+      payload: { k: "answer", choice: question.answer },
+    });
+    assertEquals(lastView(room.host).phase, "reveal");
+    room.clock.advance(5_000); // 正解発表 → 次の問題（最終問題なら final）
+  }
+  room.clock.advance(10_000); // 最終結果の表示時間 → 終了
+  assertEquals(last(room.host, "phase")?.phase, "lobby");
+
+  const internalTotal = [...(room.manager.getRoom(room.code)?.players.values() ?? [])]
+    .reduce((sum, p) => sum + p.score, 0);
+  assert(internalTotal > 0, "テストの前提が崩れている（誰も加点されていない）");
+
+  const delivered = last(room.host, "roomState")?.snapshot;
+  assertExists(delivered, "終了後に roomState が届いていない");
+  const deliveredTotal = delivered.players.reduce((sum, p) => sum + p.score, 0);
+  assertEquals(deliveredTotal, internalTotal, "配信された roomState の得点が内部状態と一致しない");
+  room.manager.dispose();
+});
