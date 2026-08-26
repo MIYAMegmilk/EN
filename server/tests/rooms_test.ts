@@ -4,7 +4,7 @@
  * 時刻とタイマーは差し替え可能なため、待機せずに猶予超過を再現できる。
  */
 
-import { assert, assertEquals, assertExists, assertFalse } from "@std/assert";
+import { assert, assertEquals, assertExists, assertFalse, assertNotEquals } from "@std/assert";
 import {
   type ClientLink,
   NON_VOTE_JUDGE_SEC,
@@ -34,6 +34,7 @@ import {
   MATCH_GROUP_MAX,
   MATCH_INTERVAL_MS,
   MATCH_QUEUE_MAX,
+  PENDING_KNOCK_MAX,
   ROOM_CAPACITY,
   ROOM_NAME_MAX,
   SANDBOX_PAYLOAD_MAX_BYTES,
@@ -1558,6 +1559,84 @@ Deno.test("ノック: 同じ接続からの二重申請は DUPLICATE", () => {
   manager.dispose();
 });
 
+Deno.test("ノック: 申請者の切断で保留枠を解放する（幽霊ノックを残さない）", () => {
+  const { manager } = setup();
+  const host = createKnockRoom(manager);
+
+  // 使い捨ての接続から保留枠いっぱいまで叩いて、すぐ切る
+  for (let i = 0; i < PENDING_KNOCK_MAX; i++) {
+    const throwaway = new MockLink();
+    manager.handle(throwaway, { t: "knock", roomCode: host.snapshot.code, nickname: `幽霊${i}` });
+    manager.disconnect(throwaway);
+  }
+
+  // 掃除されていないと、ここで RATE_LIMITED になって誰も申請できない
+  const guest = new MockLink();
+  manager.handle(guest, { t: "knock", roomCode: host.snapshot.code, nickname: "ゲスト" });
+  assertEquals(last(guest, "error"), undefined, "正規の申請者が締め出されない");
+  const request = last(host.link, "knockRequest");
+  assertExists(request);
+  assertEquals(request.nickname, "ゲスト");
+
+  // ホストの手元にも幽霊が残っていない
+  const hostState = last(host.link, "roomState");
+  assertExists(hostState);
+  assertEquals(hostState.snapshot.pendingKnocks?.length, 1);
+  manager.dispose();
+});
+
+Deno.test("ノック: 申請者が名乗った session を参加者のトークンに使わない", () => {
+  const { manager } = setup();
+  const host = createKnockRoom(manager);
+
+  // クライアントは session を自由に決められる。空文字も送れる
+  const attacker = new MockLink();
+  manager.handle(attacker, {
+    t: "knock",
+    roomCode: host.snapshot.code,
+    nickname: "やまだ",
+    session: "",
+  });
+  const request = last(host.link, "knockRequest");
+  assertExists(request);
+  // ホストには名前しか見えないので、ふつうに承認される
+  manager.handle(host.link, { t: "approveKnock", knockId: request.knockId });
+  const token = last(attacker, "knockResult")?.entryToken;
+  assertExists(token);
+  manager.handle(attacker, {
+    t: "join",
+    roomCode: host.snapshot.code,
+    nickname: "やまだ",
+    entryToken: token,
+  });
+  const joined = last(attacker, "roomState");
+  assertExists(joined);
+  assertNotEquals(joined.snapshot.session, "", "名乗った値がそのままトークンにならない");
+
+  // 名乗った値を知っている第三者が、承認も entryToken も無しに入れてはいけない。
+  // doJoin は session を見つけると entryToken の検査より前に reconnect する
+  const stranger = new MockLink();
+  manager.handle(stranger, { t: "join", roomCode: host.snapshot.code, session: "" });
+  assertEquals(last(stranger, "roomState"), undefined, "席を乗っ取れない");
+  assertEquals(last(stranger, "error")?.code, "INVALID_TOKEN");
+  manager.dispose();
+});
+
+Deno.test("ノック: session を名乗ってもブロックの照合にだけ使う", () => {
+  const { manager } = setup();
+  const host = createKnockRoom(manager);
+  const guest = new MockLink();
+  manager.handle(guest, {
+    t: "knock",
+    roomCode: host.snapshot.code,
+    nickname: "ゲスト",
+    session: "すきな値",
+  });
+  // 名乗り自体は拒否しない（ブロックされていなければ通る）
+  assertExists(last(host.link, "knockRequest"));
+  manager.dispose();
+});
+
 Deno.test("ノック: オープン入室の卓はノックを受け付けない", () => {
   const { manager } = setup();
   const open = createPublicRoom(manager, "オープンの卓");
@@ -1753,7 +1832,7 @@ Deno.test("相席: 卓に入っている人は並べない", () => {
 Deno.test("相席: あだ名を省くと しゅんぴ が二つ名を付ける", () => {
   const { manager, clock } = setup();
   const a = queueUp(manager);
-  const b = queueUp(manager);
+  queueUp(manager);
   clock.advance(MATCH_INTERVAL_MS + 1);
 
   const state = last(a, "roomState");

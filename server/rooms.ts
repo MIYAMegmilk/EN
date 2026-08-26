@@ -560,6 +560,8 @@ export class RoomManager {
   disconnect(link: ClientLink): void {
     // 待機列に並んだまま切れた人を残さない（§3.1.2）
     if (this.removeFromQueue(link)) this.sendQueueStatus();
+    // ノックしたまま切れた人も残さない（§3.1.1）
+    this.dropKnocksFrom(link);
     const state = this.links.get(link.id);
     if (state === undefined) return;
     this.links.delete(link.id);
@@ -1394,8 +1396,12 @@ export class RoomManager {
         sendError(link, nickname.code, nickname.message);
         return;
       }
-      // 前に同じ卓へ関わったときのトークンがあれば、それでブロックを判定する
-      const known = typeof msg.session === "string" ? msg.session : undefined;
+      // 名乗られた session は「前にこの卓へ関わった証」の自己申告でしかない。
+      // クライアントが自由に決められる値なので、**ブロックの照合にだけ**使う。
+      // 空文字は名乗っていないのと同じ扱いにする
+      const known = typeof msg.session === "string" && msg.session.length > 0
+        ? msg.session
+        : undefined;
       if (known !== undefined && room.blockedSessions.has(known)) {
         sendError(link, "BLOCKED", "この卓には入れません");
         return;
@@ -1423,7 +1429,10 @@ export class RoomManager {
         knockId,
         roomCode: code,
         nickname: nickname.value,
-        sessionToken: known ?? crypto.randomUUID(),
+        // 必ずサーバーが新規発行する。名乗られた値を採ると、その値を知る第三者が
+        // join の session から reconnect でき、entryToken もホストの承認も無しに
+        // 入室できてしまう（doJoin は findBySession を entryToken 検査より前に見る）
+        sessionToken: crypto.randomUUID(),
         createdAt: now,
         expiresAt: now + KNOCK_TTL_MS,
       };
@@ -1527,6 +1536,31 @@ export class RoomManager {
     entry?.room.pendingKnocks.delete(knockId);
     this.settleKnocker(knockId, { t: "knockResult", accepted: false });
     if (entry !== undefined) this.sendHostSnapshotRefresh(entry);
+  }
+
+  /**
+   * 切れた接続が出していたノックを畳む（§3.1.1）。
+   *
+   * 申請者は卓に入っていないので links に載らず、disconnect() の通常経路では
+   * 掃除されない。放置すると保留枠（PENDING_KNOCK_MAX）を占めたまま60秒残り、
+   * 使い捨ての接続から繰り返されると、承認制の卓へ誰も申請できなくなる。
+   * ホストの手元にも「承認しても届かない幽霊」が並び続ける。
+   */
+  private dropKnocksFrom(link: ClientLink): void {
+    for (const [knockId, knocker] of [...this.knockers]) {
+      if (knocker.link.id !== link.id) continue;
+      this.clearTimer(knocker.timer);
+      this.knockers.delete(knockId);
+      const code = knocker.roomCode;
+      this.enqueue(code, () => {
+        const entry = this.rooms.get(code);
+        if (entry === undefined) return;
+        // レート制限の記録も一緒に捨てる。接続IDごとに増えるだけで刈られないため
+        entry.knockTimes.delete(link.id);
+        if (!entry.room.pendingKnocks.delete(knockId)) return;
+        this.sendHostSnapshotRefresh(entry);
+      });
+    }
   }
 
   /** 申請者へ返事を送り、待ち受けを畳む */
