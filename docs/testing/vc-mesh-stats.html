@@ -1,0 +1,1694 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VC フルメッシュ実測ツール</title>
+    <style>
+      /* 計測ページの最小限の見た目。外部ライブラリ・CDN は使わない */
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 0 auto;
+        padding: 1rem;
+        max-width: 78rem;
+        line-height: 1.6;
+      }
+      h1 {
+        font-size: 1.2rem;
+      }
+      h2 {
+        font-size: 1rem;
+        margin: 1.4rem 0 0.4rem;
+      }
+      h3 {
+        font-size: 0.92rem;
+        margin: 1rem 0 0.3rem;
+      }
+      .muted {
+        color: #666;
+        font-size: 0.85rem;
+      }
+      .bar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        align-items: center;
+        margin: 0.4rem 0;
+      }
+      button {
+        font: inherit;
+        padding: 0.25rem 0.7rem;
+        border: 1px solid #888;
+        border-radius: 5px;
+        background: #f4f4f4;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #e8e8e8;
+      }
+      input[type="text"],
+      input[type="number"] {
+        font: inherit;
+        padding: 0.2rem 0.4rem;
+        border: 1px solid #aaa;
+        border-radius: 4px;
+      }
+      #status {
+        border: 1px solid #ccc;
+        border-radius: 6px;
+        padding: 0.5rem 0.8rem;
+        font-size: 0.9rem;
+      }
+      #status.live {
+        border-color: #0b6b3a;
+        color: #0b6b3a;
+      }
+      #status.idle {
+        border-color: #a06000;
+        color: #a06000;
+      }
+      #notice {
+        border: 2px solid #b00020;
+        border-radius: 6px;
+        padding: 0.5rem 0.8rem;
+        color: #b00020;
+      }
+      #notice:empty {
+        display: none;
+      }
+      table {
+        border-collapse: collapse;
+        font-size: 0.8rem;
+        width: 100%;
+      }
+      th,
+      td {
+        border: 1px solid #ddd;
+        padding: 0.2rem 0.4rem;
+        text-align: right;
+        white-space: nowrap;
+      }
+      th {
+        background: #f6f6f6;
+        text-align: center;
+      }
+      td.name,
+      th.name {
+        text-align: left;
+        white-space: normal;
+      }
+      .scroll {
+        overflow-x: auto;
+      }
+      .g {
+        background: #e6f5ec;
+        color: #0b6b3a;
+        font-weight: bold;
+      }
+      .y {
+        background: #fff6e0;
+        color: #a06000;
+        font-weight: bold;
+      }
+      .r {
+        background: #fff0f2;
+        color: #b00020;
+        font-weight: bold;
+      }
+      .n {
+        color: #888;
+      }
+      .relay {
+        color: #b00020;
+        font-weight: bold;
+      }
+      pre {
+        background: #f6f6f6;
+        padding: 0.5rem;
+        overflow-x: auto;
+        font-size: 0.75rem;
+        max-height: 22rem;
+        border: 1px solid #ddd;
+        border-radius: 5px;
+      }
+      textarea {
+        width: 100%;
+        min-height: 6rem;
+        font-family: ui-monospace, monospace;
+        font-size: 0.75rem;
+      }
+      code {
+        background: #f2f2f2;
+        padding: 0 0.2rem;
+        border-radius: 3px;
+      }
+      details {
+        margin: 0.5rem 0;
+      }
+      summary {
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>VC フルメッシュ実測ツール</h1>
+    <p class="muted">
+      フルメッシュ6人が本当に破綻するかを測る（<a href="vc-mesh-measurement.md"
+      >vc-mesh-measurement.md</a>）。 本番の通話ページからは独立して動き、<code
+      >public/room/vc.js</code> は読み込まない。
+      <code>file://</code> で直接開いてよい。外部ライブラリは使わない。
+    </p>
+
+    <p id="notice" role="alert"></p>
+
+    <h2>1. 収集を始める</h2>
+    <div class="bar">
+      <label>ルーム URL <input
+          id="roomUrl"
+          type="text"
+          size="34"
+          value="http://localhost:8000/"
+        /></label>
+      <button id="openRoom" type="button">計測対象のルームを開く</button>
+      <button id="copySnippet" type="button">収集スニペットをコピー</button>
+    </div>
+    <p class="muted">
+      <strong>この順番で行う。</strong>
+      ①
+      上の［計測対象のルームを開く］を押す（ここから開かないとライブモードにならない）→
+      ② 開いたタブで DevTools（F12）→ Console にスニペットを貼って Enter →
+      ③ <strong>そのあとで</strong> VC に参加する。 スニペットは <code
+      >RTCPeerConnection</code> を差し替えて全ピアを捕まえるため、
+      <strong>ピアが立った後に貼っても遅い</strong>。
+    </p>
+
+    <details>
+      <summary>収集スニペット（手動でコピーする場合はここから）</summary>
+      <pre id="snippet"></pre>
+    </details>
+
+    <details>
+      <summary>貼り付けモード（ライブで繋がらないとき）</summary>
+      <p class="muted">
+        ルーム画面のコンソールで <code>copy(__vcMesh.json())</code>
+        を実行し、その中身をここに貼って［取り込み］。 CSV（<code
+        >__vcMesh.csv()</code> の出力）も同じ欄に貼れる。
+      </p>
+      <textarea
+        id="pasteBox"
+        placeholder="__vcMesh.json() または __vcMesh.csv() の出力を貼る"
+      ></textarea>
+      <div class="bar">
+        <button id="importPaste" type="button">取り込み</button>
+      </div>
+    </details>
+
+    <h2>2. 計測</h2>
+    <div class="bar">
+      <button id="startBtn" type="button">計測開始</button>
+      <button id="stopBtn" type="button">計測停止</button>
+      <button id="clearBtn" type="button">全消去</button>
+      <label>上り実測 <input id="uplink" type="number" min="0" step="0.1" size="5" value="" />
+        Mbps</label>
+      <span class="muted">（C5 / C6 の判定に使う。空なら測定不能扱い）</span>
+    </div>
+    <p id="status" class="idle">未接続</p>
+
+    <h2>3. ピアごとの直近値</h2>
+    <p class="muted">
+      フルメッシュなので6人なら5行出る。<strong
+      >1本だけ見ても意味がない。</strong>
+      <code>-</code>
+      はそのブラウザが値を出していない（測定不能）ことを表す。推測で埋めていない。
+    </p>
+    <div class="scroll">
+      <table id="liveTable">
+        <thead id="liveHead"></thead>
+        <tbody id="liveBody"></tbody>
+      </table>
+    </div>
+
+    <h2>4. 判定（vc-mesh-measurement.md 第5節）</h2>
+    <p class="muted">
+      計測区間（［計測開始］〜［計測停止］。未開始なら全サンプル）を集計した結果。
+      <strong>閾値は RTT を除きすべて暫定値</strong>（詳細は手順書
+      第5.1節）。
+    </p>
+    <div class="scroll">
+      <table id="verdictTable">
+        <thead id="verdictHead"></thead>
+        <tbody id="verdictBody"></tbody>
+      </table>
+    </div>
+
+    <h3>全ピア合算の判定</h3>
+    <div class="scroll">
+      <table id="aggTable">
+        <thead id="aggHead"></thead>
+        <tbody id="aggBody"></tbody>
+      </table>
+    </div>
+
+    <h2>5. 持ち出し</h2>
+    <div class="bar">
+      <button id="copyCsv" type="button">CSV をコピー</button>
+      <button id="copyJson" type="button">JSON をコピー</button>
+      <span class="muted" id="rowCount"></span>
+    </div>
+    <details>
+      <summary>CSV プレビュー（先頭 30 行）</summary>
+      <pre id="csvPreview"></pre>
+    </details>
+
+    <script>
+      "use strict";
+
+      // =====================================================================
+      // 収集スニペット
+      //
+      // この関数の中身は「ルーム画面の DevTools コンソール」で実行される。
+      // このページのスコープには一切依存しない（toString() して配るため）。
+      //
+      // 掴み方の設計:
+      //   vc.js の VC.getState() は RTCPeerConnection そのものを返さない
+      //   （connectionState などの文字列だけ）。公開 API のどこからも生の
+      //   PeerConnection は取れない。一方 vc.js は createPeer() の中で
+      //   new global.RTCPeerConnection(...) と「呼び出し時に window を参照して」
+      //   いるため、VC 参加前に window.RTCPeerConnection を差し替えておけば
+      //   以後に作られる全ピアを捕まえられる。vc.js は一切変更しない。
+      // =====================================================================
+
+      function vcMeshCollector() {
+        "use strict";
+
+        var NS = "__vcMesh";
+        var INTERVAL_MS = 2000;
+
+        if (window[NS] && typeof window[NS].stop === "function") window[NS].stop();
+
+        var OrigPC = window.RTCPeerConnection;
+        if (typeof OrigPC !== "function") {
+          console.error("[vc-mesh] RTCPeerConnection が見つからない。中止する。");
+          return;
+        }
+
+        /** 捕まえたピア。{ index, pc, peerId, label, prev } */
+        var entries = [];
+        /** 収集済みの行。CSV / JSON の元になる */
+        var rows = [];
+        /** opener へ送った行数（差分だけ送る） */
+        var sent = 0;
+        var timer = null;
+        var startedAt = Date.now();
+
+        function num(v) {
+          return typeof v === "number" && isFinite(v) ? v : null;
+        }
+        function addN(a, b) {
+          if (b === null) return a;
+          return a === null ? b : a + b;
+        }
+        function sub(cur, prev) {
+          if (cur === null || prev === null) return null;
+          var d = cur - prev;
+          // 累積カウンタなので巻き戻り（統計のリセット）は捨てる
+          return d < 0 ? null : d;
+        }
+        function div(a, b) {
+          if (a === null || b === null || b === 0) return null;
+          return a / b;
+        }
+        function round(v, digits) {
+          if (v === null) return null;
+          var f = Math.pow(10, digits);
+          return Math.round(v * f) / f;
+        }
+
+        /**
+         * ピアに「誰か」のラベルを付ける。
+         * createPeer() は new RTCPeerConnection の直後に state.peers.set() を
+         * 同期で行うので、setTimeout(0) 後に VC.getState() を読めば新しい id が
+         * 見えている。同時に複数のピアが立つと取り違えうるため、あくまで推定。
+         */
+        function labelPeer(entry) {
+          try {
+            var vc = window.VC;
+            if (!vc || typeof vc.getState !== "function") return;
+            var st = vc.getState();
+            if (!st || !Array.isArray(st.peers)) return;
+            var used = Object.create(null);
+            for (var i = 0; i < entries.length; i += 1) {
+              if (entries[i].peerId !== null) used[entries[i].peerId] = true;
+            }
+            for (var j = 0; j < st.peers.length; j += 1) {
+              var p = st.peers[j];
+              if (p && typeof p.id === "string" && used[p.id] !== true) {
+                entry.peerId = p.id;
+                entry.label = typeof p.nickname === "string" && p.nickname !== ""
+                  ? p.nickname
+                  : p.id;
+                return;
+              }
+            }
+          } catch (e) {
+            // 取れなくても収集は続ける（pc#N のまま）
+          }
+        }
+
+        function PatchedPC(configuration) {
+          var pc = new OrigPC(configuration);
+          var entry = {
+            index: entries.length + 1,
+            pc: pc,
+            peerId: null,
+            label: null,
+            prev: null,
+          };
+          entries.push(entry);
+          setTimeout(function () {
+            labelPeer(entry);
+          }, 0);
+          return pc;
+        }
+        PatchedPC.prototype = OrigPC.prototype;
+        if (typeof OrigPC.generateCertificate === "function") {
+          PatchedPC.generateCertificate = OrigPC.generateCertificate.bind(OrigPC);
+        }
+
+        /** 送信中のカメラトラックが実際に何 fps を要求しているか */
+        function requestedFps(pc) {
+          try {
+            var senders = pc.getSenders();
+            for (var i = 0; i < senders.length; i += 1) {
+              var t = senders[i].track;
+              if (t && t.kind === "video" && typeof t.getSettings === "function") {
+                var s = t.getSettings();
+                if (typeof s.frameRate === "number") return s.frameRate;
+              }
+            }
+          } catch (e) {
+            // getSettings を持たないブラウザでは null に倒す
+          }
+          return null;
+        }
+
+        /** 実際に使われている candidate-pair を選ぶ（vc.js の pickCandidatePair と同じ順序） */
+        function pickPair(pairs, selectedId) {
+          var i;
+          if (selectedId !== null) {
+            for (i = 0; i < pairs.length; i += 1) {
+              if (pairs[i].id === selectedId) return pairs[i];
+            }
+          }
+          for (i = 0; i < pairs.length; i += 1) {
+            if (pairs[i].selected === true) return pairs[i];
+            if (pairs[i].nominated === true && pairs[i].state === "succeeded") return pairs[i];
+          }
+          return null;
+        }
+
+        /** RTCStatsReport から使う値だけを抜き出す（判定はしない） */
+        function extract(report, at) {
+          var o = {
+            framesEncoded: null,
+            fpsReported: null,
+            qlr: null,
+            qldCpu: null,
+            qldBw: null,
+            qldOther: null,
+            encodeTime: null,
+            bytesSent: null,
+            packetsSent: null,
+            retrans: null,
+            w: null,
+            h: null,
+            ts: null,
+          };
+          var oa = { bytesSent: null };
+          var iv = {
+            framesDecoded: null,
+            framesDropped: null,
+            freezeCount: null,
+            freezeDur: null,
+            jitter: null,
+            lost: null,
+            received: null,
+          };
+          var ia = {
+            concealed: null,
+            samples: null,
+            lost: null,
+            received: null,
+            jitter: null,
+            bytes: null,
+          };
+          var pairs = [];
+          var cands = Object.create(null);
+          var selectedId = null;
+
+          report.forEach(function (s) {
+            if (s.type === "outbound-rtp" && s.kind === "video") {
+              o.framesEncoded = addN(o.framesEncoded, num(s.framesEncoded));
+              o.bytesSent = addN(o.bytesSent, num(s.bytesSent));
+              o.packetsSent = addN(o.packetsSent, num(s.packetsSent));
+              o.retrans = addN(o.retrans, num(s.retransmittedPacketsSent));
+              o.encodeTime = addN(o.encodeTime, num(s.totalEncodeTime));
+              if (o.fpsReported === null) o.fpsReported = num(s.framesPerSecond);
+              if (o.w === null) o.w = num(s.frameWidth);
+              if (o.h === null) o.h = num(s.frameHeight);
+              if (o.ts === null) o.ts = num(s.timestamp);
+              // 実行時 feature detection。文字列で来たときだけ使う
+              if (o.qlr === null && typeof s.qualityLimitationReason === "string") {
+                o.qlr = s.qualityLimitationReason;
+              }
+              var d = s.qualityLimitationDurations;
+              if (d && typeof d === "object") {
+                o.qldCpu = addN(o.qldCpu, num(d.cpu));
+                o.qldBw = addN(o.qldBw, num(d.bandwidth));
+                o.qldOther = addN(o.qldOther, num(d.other));
+              }
+            } else if (s.type === "outbound-rtp" && s.kind === "audio") {
+              oa.bytesSent = addN(oa.bytesSent, num(s.bytesSent));
+            } else if (s.type === "inbound-rtp" && s.kind === "video") {
+              iv.framesDecoded = addN(iv.framesDecoded, num(s.framesDecoded));
+              iv.framesDropped = addN(iv.framesDropped, num(s.framesDropped));
+              iv.freezeCount = addN(iv.freezeCount, num(s.freezeCount));
+              iv.freezeDur = addN(iv.freezeDur, num(s.totalFreezesDuration));
+              iv.lost = addN(iv.lost, num(s.packetsLost));
+              iv.received = addN(iv.received, num(s.packetsReceived));
+              if (iv.jitter === null) iv.jitter = num(s.jitter);
+            } else if (s.type === "inbound-rtp" && s.kind === "audio") {
+              ia.concealed = addN(ia.concealed, num(s.concealedSamples));
+              ia.samples = addN(ia.samples, num(s.totalSamplesReceived));
+              ia.lost = addN(ia.lost, num(s.packetsLost));
+              ia.received = addN(ia.received, num(s.packetsReceived));
+              ia.bytes = addN(ia.bytes, num(s.bytesReceived));
+              if (ia.jitter === null) ia.jitter = num(s.jitter);
+            } else if (s.type === "transport") {
+              if (typeof s.selectedCandidatePairId === "string") {
+                selectedId = s.selectedCandidatePairId;
+              }
+            } else if (s.type === "candidate-pair") {
+              pairs.push(s);
+            } else if (s.type === "local-candidate" || s.type === "remote-candidate") {
+              cands[s.id] = s;
+            }
+          });
+
+          var pair = pickPair(pairs, selectedId);
+          var cp = {
+            rtt: null,
+            availOut: null,
+            availIn: null,
+            localType: null,
+            remoteType: null,
+            remoteAddr: null,
+            relay: null,
+          };
+          if (pair !== null) {
+            cp.rtt = num(pair.currentRoundTripTime);
+            cp.availOut = num(pair.availableOutgoingBitrate);
+            cp.availIn = num(pair.availableIncomingBitrate);
+            var lc = cands[pair.localCandidateId];
+            var rc = cands[pair.remoteCandidateId];
+            if (lc && typeof lc.candidateType === "string") cp.localType = lc.candidateType;
+            if (rc && typeof rc.candidateType === "string") cp.remoteType = rc.candidateType;
+            if (rc) {
+              var addr = rc.address !== undefined ? rc.address : rc.ip;
+              if (typeof addr === "string") {
+                cp.remoteAddr = addr + (num(rc.port) === null ? "" : ":" + rc.port);
+              }
+            }
+            if (cp.localType !== null || cp.remoteType !== null) {
+              cp.relay = cp.localType === "relay" || cp.remoteType === "relay";
+            }
+          }
+
+          return { at: at, o: o, oa: oa, iv: iv, ia: ia, cp: cp };
+        }
+
+        /** 前回サンプルとの差分を取って1行にする。累積値は必ず差分で見る */
+        function derive(entry, cur, reqFps) {
+          var prev = entry.prev;
+          if (prev === null) return null;
+          var curTs = cur.o.ts === null ? cur.at : cur.o.ts;
+          var prevTs = prev.o.ts === null ? prev.at : prev.o.ts;
+          var dt = (curTs - prevTs) / 1000;
+          if (!(dt > 0)) dt = (cur.at - prev.at) / 1000;
+          if (!(dt > 0)) return null;
+
+          var dFramesEnc = sub(cur.o.framesEncoded, prev.o.framesEncoded);
+          var dEncTime = sub(cur.o.encodeTime, prev.o.encodeTime);
+          var dBytesV = sub(cur.o.bytesSent, prev.o.bytesSent);
+          var dBytesA = sub(cur.oa.bytesSent, prev.oa.bytesSent);
+          var dPkts = sub(cur.o.packetsSent, prev.o.packetsSent);
+          var dRetrans = sub(cur.o.retrans, prev.o.retrans);
+          var dQldCpu = sub(cur.o.qldCpu, prev.o.qldCpu);
+          var dQldBw = sub(cur.o.qldBw, prev.o.qldBw);
+          var dQldOther = sub(cur.o.qldOther, prev.o.qldOther);
+          var dDec = sub(cur.iv.framesDecoded, prev.iv.framesDecoded);
+          var dDrop = sub(cur.iv.framesDropped, prev.iv.framesDropped);
+          var dFreezeCnt = sub(cur.iv.freezeCount, prev.iv.freezeCount);
+          var dFreezeDur = sub(cur.iv.freezeDur, prev.iv.freezeDur);
+          var dVLost = sub(cur.iv.lost, prev.iv.lost);
+          var dVRecv = sub(cur.iv.received, prev.iv.received);
+          var dConceal = sub(cur.ia.concealed, prev.ia.concealed);
+          var dSamples = sub(cur.ia.samples, prev.ia.samples);
+          var dALost = sub(cur.ia.lost, prev.ia.lost);
+          var dARecv = sub(cur.ia.received, prev.ia.received);
+          var dABytes = sub(cur.ia.bytes, prev.ia.bytes);
+
+          var encFps = div(dFramesEnc, dt);
+
+          return {
+            t_iso: new Date(cur.at).toISOString(),
+            t_sec: round((cur.at - startedAt) / 1000, 1),
+            dt_s: round(dt, 3),
+            pc: "pc#" + entry.index,
+            peer: entry.label === null ? "-" : entry.label,
+            relay: cur.cp.relay === null ? "-" : cur.cp.relay ? "relay" : "p2p",
+            remote_addr: cur.cp.remoteAddr === null ? "-" : cur.cp.remoteAddr,
+            local_type: cur.cp.localType === null ? "-" : cur.cp.localType,
+            remote_type: cur.cp.remoteType === null ? "-" : cur.cp.remoteType,
+            conn: entry.pc.connectionState,
+
+            rtt_s: round(cur.cp.rtt, 4),
+            avail_out_bps: round(cur.cp.availOut, 0),
+            avail_in_bps: round(cur.cp.availIn, 0),
+
+            qlr: cur.o.qlr === null ? "-" : cur.o.qlr,
+            enc_fps: round(encFps, 2),
+            enc_fps_reported: round(cur.o.fpsReported, 2),
+            req_fps: round(reqFps, 2),
+            fps_ratio: round(div(encFps, reqFps), 3),
+            send_w: cur.o.w,
+            send_h: cur.o.h,
+            send_kbps_v: round(div(dBytesV === null ? null : dBytesV * 8 / 1000, dt), 1),
+            send_kbps_a: round(div(dBytesA === null ? null : dBytesA * 8 / 1000, dt), 1),
+            enc_occupancy: round(div(dEncTime, dt), 4),
+            retrans_rate: round(div(dRetrans, dPkts), 4),
+            qld_cpu_ratio: round(div(dQldCpu, dt), 3),
+            qld_bw_ratio: round(div(dQldBw, dt), 3),
+            qld_other_ratio: round(div(dQldOther, dt), 3),
+
+            dec_fps: round(div(dDec, dt), 2),
+            drop_rate: round(
+              dDec === null || dDrop === null ? null : div(dDrop, dDec + dDrop),
+              4,
+            ),
+            freeze_cnt: dFreezeCnt,
+            freeze_dur_ratio: round(div(dFreezeDur, dt), 4),
+            v_jitter_s: round(cur.iv.jitter, 4),
+            v_loss_rate: round(
+              dVLost === null || dVRecv === null ? null : div(dVLost, dVLost + dVRecv),
+              4,
+            ),
+
+            a_conceal_rate: round(div(dConceal, dSamples), 5),
+            a_loss_rate: round(
+              dALost === null || dARecv === null ? null : div(dALost, dALost + dARecv),
+              4,
+            ),
+            a_jitter_s: round(cur.ia.jitter, 4),
+            a_bytes_d: dABytes,
+
+            d_frames_enc: dFramesEnc,
+            d_enc_time_s: round(dEncTime, 4),
+            d_bytes_v: dBytesV,
+            d_pkts_v: dPkts,
+            d_retrans: dRetrans,
+            d_qld_cpu: round(dQldCpu, 3),
+            d_qld_bw: round(dQldBw, 3),
+            d_qld_other: round(dQldOther, 3),
+            d_frames_dec: dDec,
+            d_frames_drop: dDrop,
+            d_freeze_dur: round(dFreezeDur, 3),
+            d_v_lost: dVLost,
+            d_v_recv: dVRecv,
+            d_a_conceal: dConceal,
+            d_a_samples: dSamples,
+            d_a_lost: dALost,
+            d_a_recv: dARecv,
+          };
+        }
+
+        var COLUMNS = [
+          "t_iso",
+          "t_sec",
+          "dt_s",
+          "pc",
+          "peer",
+          "relay",
+          "remote_addr",
+          "local_type",
+          "remote_type",
+          "conn",
+          "rtt_s",
+          "avail_out_bps",
+          "avail_in_bps",
+          "qlr",
+          "enc_fps",
+          "enc_fps_reported",
+          "req_fps",
+          "fps_ratio",
+          "send_w",
+          "send_h",
+          "send_kbps_v",
+          "send_kbps_a",
+          "enc_occupancy",
+          "retrans_rate",
+          "qld_cpu_ratio",
+          "qld_bw_ratio",
+          "qld_other_ratio",
+          "dec_fps",
+          "drop_rate",
+          "freeze_cnt",
+          "freeze_dur_ratio",
+          "v_jitter_s",
+          "v_loss_rate",
+          "a_conceal_rate",
+          "a_loss_rate",
+          "a_jitter_s",
+          "a_bytes_d",
+          "d_frames_enc",
+          "d_enc_time_s",
+          "d_bytes_v",
+          "d_pkts_v",
+          "d_retrans",
+          "d_qld_cpu",
+          "d_qld_bw",
+          "d_qld_other",
+          "d_frames_dec",
+          "d_frames_drop",
+          "d_freeze_dur",
+          "d_v_lost",
+          "d_v_recv",
+          "d_a_conceal",
+          "d_a_samples",
+          "d_a_lost",
+          "d_a_recv",
+        ];
+
+        function csvCell(v) {
+          if (v === null || v === undefined) return "";
+          var s = String(v);
+          return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+        }
+
+        function toCsv(list) {
+          var out = [COLUMNS.join(",")];
+          for (var i = 0; i < list.length; i += 1) {
+            var r = list[i];
+            var cells = [];
+            for (var j = 0; j < COLUMNS.length; j += 1) cells.push(csvCell(r[COLUMNS[j]]));
+            out.push(cells.join(","));
+          }
+          return out.join("\n");
+        }
+
+        function meta() {
+          return {
+            ua: navigator.userAgent,
+            cores: navigator.hardwareConcurrency === undefined
+              ? null
+              : navigator.hardwareConcurrency,
+            peerCount: entries.length,
+            columns: COLUMNS,
+            startedAt: startedAt,
+          };
+        }
+
+        function post() {
+          if (sent >= rows.length) return;
+          var fresh = rows.slice(sent);
+          sent = rows.length;
+          try {
+            if (window.opener && !window.opener.closed) {
+              window.opener.postMessage(
+                { source: "vc-mesh", type: "samples", rows: fresh, meta: meta() },
+                "*",
+              );
+            }
+          } catch (e) {
+            // opener が無い／閉じられている場合は貼り付けモードで運ぶ
+          }
+        }
+
+        function tick() {
+          var live = [];
+          var i;
+          for (i = 0; i < entries.length; i += 1) {
+            if (entries[i].pc.connectionState !== "closed") live.push(entries[i]);
+          }
+          var at = Date.now();
+          var pending = live.length;
+          if (pending === 0) {
+            post();
+            return;
+          }
+          for (i = 0; i < live.length; i += 1) {
+            (function (entry) {
+              var reqFps = requestedFps(entry.pc);
+              entry.pc.getStats().then(function (report) {
+                var cur = extract(report, at);
+                var row = derive(entry, cur, reqFps);
+                if (row !== null) rows.push(row);
+                entry.prev = cur;
+              }).catch(function () {
+                // 1本失敗しても収集全体は止めない
+              }).then(function () {
+                pending -= 1;
+                if (pending === 0) post();
+              });
+            })(live[i]);
+          }
+        }
+
+        window.RTCPeerConnection = PatchedPC;
+        timer = setInterval(tick, INTERVAL_MS);
+
+        window[NS] = {
+          status: function () {
+            return {
+              peers: entries.length,
+              rows: rows.length,
+              openerConnected: !!(window.opener && !window.opener.closed),
+              elapsedSec: Math.round((Date.now() - startedAt) / 1000),
+            };
+          },
+          rows: function () {
+            return rows;
+          },
+          csv: function () {
+            return toCsv(rows);
+          },
+          json: function () {
+            return JSON.stringify({ source: "vc-mesh", type: "samples", meta: meta(), rows: rows });
+          },
+          stop: function () {
+            if (timer !== null) clearInterval(timer);
+            timer = null;
+            window.RTCPeerConnection = OrigPC;
+            console.log("[vc-mesh] 収集を停止した。RTCPeerConnection を元に戻した。");
+          },
+        };
+
+        console.log(
+          "[vc-mesh] 収集を開始しました。VC に参加してください。" +
+            " 停止: __vcMesh.stop() / 取り出し: copy(__vcMesh.csv())",
+        );
+      }
+
+      // =====================================================================
+      // 判定の閾値（vc-mesh-measurement.md 第5節と同じ値を持つ）
+      //
+      //   dir "hi" … 値が大きいほど悪い（v < g:緑 / v < r:黄 / else:赤）
+      //   dir "lo" … 値が小さいほど悪い（v > g:緑 / v > r:黄 / else:赤）
+      //
+      // 【重要】RTT（0.8 / 0.3 秒・ITU-T G.114 の往復換算）以外はすべて暫定値。
+      // vc.js から流用した値には source に "vc.js" を入れてある。
+      // =====================================================================
+
+      const PEER_METRICS = [
+        {
+          id: "A1",
+          label: "A1 音声補間率",
+          dir: "hi",
+          g: 0.01,
+          r: 0.03,
+          fmt: "pct",
+          source: "暫定",
+        },
+        {
+          id: "A2",
+          label: "A2 音声ロス率",
+          dir: "hi",
+          g: 0.02,
+          r: 0.05,
+          fmt: "pct",
+          source: "暫定",
+        },
+        { id: "A3", label: "A3 音声断(秒)", dir: "hi", g: 1, r: 5, fmt: "num", source: "暫定" },
+        {
+          id: "A4",
+          label: "A4 RTT(秒)",
+          dir: "hi",
+          g: 0.3,
+          r: 0.8,
+          fmt: "num",
+          source: "ITU-T G.114",
+        },
+        {
+          id: "B1",
+          label: "B1 cpu時間比",
+          dir: "hi",
+          g: 0.05,
+          r: 0.2,
+          fmt: "pct",
+          source: "暫定",
+        },
+        {
+          id: "B1d",
+          label: "B1' cpu時間比(停止水準)",
+          dir: "hi",
+          g: 0.2,
+          r: 0.6,
+          fmt: "pct",
+          source: "vc.js 3/5",
+        },
+        {
+          id: "B2",
+          label: "B2 エンコード占有率(1本あたり)",
+          dir: "hi",
+          g: 0.06,
+          r: 0.1,
+          fmt: "num",
+          source: "暫定（判定は合計側）",
+        },
+        {
+          id: "B3",
+          label: "B3 送信FPS比",
+          dir: "lo",
+          g: 0.75,
+          r: 0.5,
+          fmt: "num",
+          source: "vc.js",
+        },
+        {
+          id: "B6",
+          label: "B6 解像度低下の割合",
+          dir: "hi",
+          g: 0.1,
+          r: 0.5,
+          fmt: "pct",
+          source: "暫定",
+        },
+        {
+          id: "C1",
+          label: "C1 上り推定(bps)",
+          dir: "lo",
+          g: 800000,
+          r: 320000,
+          fmt: "num",
+          source: "vc.js",
+        },
+        {
+          id: "C3",
+          label: "C3 bandwidth時間比",
+          dir: "hi",
+          g: 0.2,
+          r: 0.6,
+          fmt: "pct",
+          source: "vc.js 3/5",
+        },
+        { id: "C4", label: "C4 再送率", dir: "hi", g: 0.02, r: 0.1, fmt: "pct", source: "暫定" },
+        { id: "D1", label: "D1 フリーズ回/分", dir: "hi", g: 1, r: 3, fmt: "num", source: "暫定" },
+        {
+          id: "D2",
+          label: "D2 フリーズ時間比",
+          dir: "hi",
+          g: 0.02,
+          r: 0.1,
+          fmt: "pct",
+          source: "暫定",
+        },
+        {
+          id: "D3",
+          label: "D3 フレーム破棄率",
+          dir: "hi",
+          g: 0.01,
+          r: 0.05,
+          fmt: "pct",
+          source: "暫定",
+        },
+        {
+          id: "D4",
+          label: "D4 受信ロス率(映像)",
+          dir: "hi",
+          g: 0.02,
+          r: 0.05,
+          fmt: "pct",
+          source: "暫定",
+        },
+        {
+          id: "D5",
+          label: "D5 受信jitter(秒)",
+          dir: "hi",
+          g: 0.03,
+          r: 0.1,
+          fmt: "num",
+          source: "暫定",
+        },
+      ];
+
+      const AGG_METRICS = [
+        {
+          id: "B2sum",
+          label: "B2 エンコード占有率 合計（全ピア）",
+          dir: "hi",
+          g: 0.3,
+          r: 0.5,
+          fmt: "num",
+          note: "CPU 1 コアを 1.0 とした値。SFU 移行後の見積もりは この値 ÷ ピア数",
+        },
+        {
+          id: "C5",
+          label: "C5 上り推定の総和 ÷ 上り実測",
+          dir: "hi",
+          g: 0.8,
+          r: 1.2,
+          fmt: "num",
+          note: "1.2 以上なら 5 本の輻輳制御が互いを過大評価している（メッシュ固有の症状）",
+        },
+        {
+          id: "C6",
+          label: "C6 実効送信の総和 ÷ 上り実測",
+          dir: "hi",
+          g: 0.5,
+          r: 0.8,
+          fmt: "num",
+          note: "上り帯域を実際に食い潰している割合",
+        },
+        {
+          id: "C7",
+          label: "C7 relay(TURN) 経由のピア数",
+          dir: "hi",
+          g: 1,
+          r: 3,
+          fmt: "num",
+          note: "TURN 未導入のため通常は 0。0 でなければ ICE 設定を確認する",
+        },
+      ];
+
+      // =====================================================================
+      // 受け取り側の状態
+      // =====================================================================
+
+      /** 受け取った全サンプル行 */
+      const store = { rows: [], meta: null, live: false, lastAt: 0 };
+      /** 計測区間。null なら未開始（＝全サンプルを集計対象にする） */
+      const window_ = { start: null, end: null };
+
+      /** postMessage / 貼り付けの両方が通る唯一の入口。ここで必ず検証する */
+      function ingestRows(list) {
+        if (!Array.isArray(list)) return 0;
+        let n = 0;
+        for (const raw of list) {
+          if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
+          const row = {};
+          // 既知のキーだけを、既知の型に丸めて取り込む（未知のキーは捨てる）
+          for (const key of CSV_COLUMNS) {
+            const v = raw[key];
+            if (v === null || v === undefined || v === "") row[key] = null;
+            else if (typeof v === "number") row[key] = isFinite(v) ? v : null;
+            else if (typeof v === "boolean") row[key] = v ? 1 : 0;
+            else if (typeof v === "string") {
+              row[key] = NUMERIC_COLUMNS.has(key) ? toNum(v) : v.slice(0, 200);
+            } else row[key] = null;
+          }
+          if (typeof row.pc !== "string" || row.pc === "") continue;
+          if (typeof row.t_sec !== "number") continue;
+          store.rows.push(row);
+          n += 1;
+        }
+        return n;
+      }
+
+      function toNum(s) {
+        const v = Number(s);
+        return isFinite(v) ? v : null;
+      }
+
+      const CSV_COLUMNS = [
+        "t_iso",
+        "t_sec",
+        "dt_s",
+        "pc",
+        "peer",
+        "relay",
+        "remote_addr",
+        "local_type",
+        "remote_type",
+        "conn",
+        "rtt_s",
+        "avail_out_bps",
+        "avail_in_bps",
+        "qlr",
+        "enc_fps",
+        "enc_fps_reported",
+        "req_fps",
+        "fps_ratio",
+        "send_w",
+        "send_h",
+        "send_kbps_v",
+        "send_kbps_a",
+        "enc_occupancy",
+        "retrans_rate",
+        "qld_cpu_ratio",
+        "qld_bw_ratio",
+        "qld_other_ratio",
+        "dec_fps",
+        "drop_rate",
+        "freeze_cnt",
+        "freeze_dur_ratio",
+        "v_jitter_s",
+        "v_loss_rate",
+        "a_conceal_rate",
+        "a_loss_rate",
+        "a_jitter_s",
+        "a_bytes_d",
+        "d_frames_enc",
+        "d_enc_time_s",
+        "d_bytes_v",
+        "d_pkts_v",
+        "d_retrans",
+        "d_qld_cpu",
+        "d_qld_bw",
+        "d_qld_other",
+        "d_frames_dec",
+        "d_frames_drop",
+        "d_freeze_dur",
+        "d_v_lost",
+        "d_v_recv",
+        "d_a_conceal",
+        "d_a_samples",
+        "d_a_lost",
+        "d_a_recv",
+      ];
+
+      const TEXT_COLUMNS = new Set([
+        "t_iso",
+        "pc",
+        "peer",
+        "relay",
+        "remote_addr",
+        "local_type",
+        "remote_type",
+        "conn",
+        "qlr",
+      ]);
+      const NUMERIC_COLUMNS = new Set(CSV_COLUMNS.filter((c) => !TEXT_COLUMNS.has(c)));
+
+      // =====================================================================
+      // 集計
+      // =====================================================================
+
+      /** 計測区間に入っている行だけを返す */
+      function windowRows() {
+        if (window_.start === null) return store.rows;
+        const end = window_.end === null ? Infinity : window_.end;
+        return store.rows.filter((r) => r.t_sec >= window_.start && r.t_sec <= end);
+      }
+
+      function sumOf(rows, key) {
+        let total = null;
+        for (const r of rows) {
+          const v = r[key];
+          if (typeof v === "number") total = total === null ? v : total + v;
+        }
+        return total;
+      }
+
+      function maxOf(rows, key) {
+        let best = null;
+        for (const r of rows) {
+          const v = r[key];
+          if (typeof v === "number" && (best === null || v > best)) best = v;
+        }
+        return best;
+      }
+
+      function minOf(rows, key) {
+        let best = null;
+        for (const r of rows) {
+          const v = r[key];
+          if (typeof v === "number" && (best === null || v < best)) best = v;
+        }
+        return best;
+      }
+
+      function meanOf(rows, key) {
+        let total = 0;
+        let n = 0;
+        for (const r of rows) {
+          const v = r[key];
+          if (typeof v === "number") {
+            total += v;
+            n += 1;
+          }
+        }
+        return n === 0 ? null : total / n;
+      }
+
+      function ratio(a, b) {
+        if (a === null || b === null || b === 0) return null;
+        return a / b;
+      }
+
+      /** 音声の完全断（a_bytes_d が 0 の行が連続した最長秒数） */
+      function longestSilence(rows) {
+        let run = 0;
+        let best = 0;
+        let seen = false;
+        for (const r of rows) {
+          if (typeof r.a_bytes_d !== "number") continue;
+          seen = true;
+          if (r.a_bytes_d === 0) {
+            run += typeof r.dt_s === "number" ? r.dt_s : 0;
+            if (run > best) best = run;
+          } else run = 0;
+        }
+        return seen ? best : null;
+      }
+
+      /** 1ピアぶんの集計値を出す */
+      function summarizePeer(rows) {
+        const dt = sumOf(rows, "dt_s");
+        const dConceal = sumOf(rows, "d_a_conceal");
+        const dSamples = sumOf(rows, "d_a_samples");
+        const dALost = sumOf(rows, "d_a_lost");
+        const dARecv = sumOf(rows, "d_a_recv");
+        const dVLost = sumOf(rows, "d_v_lost");
+        const dVRecv = sumOf(rows, "d_v_recv");
+        const dDec = sumOf(rows, "d_frames_dec");
+        const dDrop = sumOf(rows, "d_frames_drop");
+        const dRetrans = sumOf(rows, "d_retrans");
+        const dPkts = sumOf(rows, "d_pkts_v");
+        const dEncFrames = sumOf(rows, "d_frames_enc");
+        const reqFps = meanOf(rows, "req_fps");
+
+        let lowRes = null;
+        let resSamples = 0;
+        let lowCount = 0;
+        for (const r of rows) {
+          if (typeof r.send_w === "number" && typeof r.send_h === "number" && r.send_w > 0) {
+            resSamples += 1;
+            if (r.send_w * r.send_h < 640 * 360) lowCount += 1;
+          }
+        }
+        if (resSamples > 0) lowRes = lowCount / resSamples;
+
+        const values = {
+          A1: ratio(dConceal, dSamples),
+          A2: dALost === null || dARecv === null ? null : ratio(dALost, dALost + dARecv),
+          A3: longestSilence(rows),
+          A4: maxOf(rows, "rtt_s"),
+          B1: ratio(sumOf(rows, "d_qld_cpu"), dt),
+          B1d: ratio(sumOf(rows, "d_qld_cpu"), dt),
+          B2: ratio(sumOf(rows, "d_enc_time_s"), dt),
+          B3: reqFps === null || reqFps === 0 ? null : ratio(ratio(dEncFrames, dt), reqFps),
+          B6: lowRes,
+          C1: minOf(rows, "avail_out_bps"),
+          C3: ratio(sumOf(rows, "d_qld_bw"), dt),
+          C4: ratio(dRetrans, dPkts),
+          D1: dt === null || dt === 0 ? null : ratio(sumOf(rows, "freeze_cnt"), dt / 60),
+          D2: ratio(sumOf(rows, "d_freeze_dur"), dt),
+          D3: dDec === null || dDrop === null ? null : ratio(dDrop, dDec + dDrop),
+          D4: dVLost === null || dVRecv === null ? null : ratio(dVLost, dVLost + dVRecv),
+          D5: maxOf(rows, "v_jitter_s"),
+        };
+        return {
+          values,
+          dt,
+          peer: rows.length === 0 ? "-" : rows[rows.length - 1].peer,
+          relay: rows.length === 0 ? "-" : rows[rows.length - 1].relay,
+          remote: rows.length === 0 ? "-" : rows[rows.length - 1].remote_addr,
+          meanAvailOut: meanOf(rows, "avail_out_bps"),
+          meanSendBps: (() => {
+            const v = meanOf(rows, "send_kbps_v");
+            const a = meanOf(rows, "send_kbps_a");
+            if (v === null && a === null) return null;
+            return ((v === null ? 0 : v) + (a === null ? 0 : a)) * 1000;
+          })(),
+        };
+      }
+
+      /** ピア（pc#N）ごとに行を分ける。順序は登場順を保つ */
+      function groupByPc(rows) {
+        const map = new Map();
+        for (const r of rows) {
+          let list = map.get(r.pc);
+          if (list === undefined) {
+            list = [];
+            map.set(r.pc, list);
+          }
+          list.push(r);
+        }
+        return map;
+      }
+
+      function grade(value, metric) {
+        if (value === null || value === undefined || !isFinite(value)) return "n";
+        if (metric.dir === "hi") {
+          if (value < metric.g) return "g";
+          if (value < metric.r) return "y";
+          return "r";
+        }
+        if (value > metric.g) return "g";
+        if (value > metric.r) return "y";
+        return "r";
+      }
+
+      function fmtValue(value, metric) {
+        if (value === null || value === undefined || !isFinite(value)) return "-";
+        if (metric.fmt === "pct") return (value * 100).toFixed(2) + "%";
+        if (Math.abs(value) >= 1000) return String(Math.round(value));
+        return String(Math.round(value * 1000) / 1000);
+      }
+
+      // =====================================================================
+      // 描画（textContent のみを使う。innerHTML は使わない）
+      // =====================================================================
+
+      function el(tag, text, className) {
+        const node = document.createElement(tag);
+        if (text !== undefined) node.textContent = text;
+        if (className !== undefined) node.className = className;
+        return node;
+      }
+
+      function clear(node) {
+        while (node.firstChild !== null) node.removeChild(node.firstChild);
+      }
+
+      const LIVE_COLUMNS = [
+        ["pc", "ピア"],
+        ["peer", "あだ名(推定)"],
+        ["relay", "経路"],
+        ["remote_addr", "相手"],
+        ["conn", "接続"],
+        ["qlr", "律速"],
+        ["rtt_s", "RTT秒"],
+        ["avail_out_bps", "上り推定bps"],
+        ["avail_in_bps", "下り推定bps"],
+        ["enc_fps", "送信fps"],
+        ["req_fps", "要求fps"],
+        ["send_w", "幅"],
+        ["send_h", "高"],
+        ["send_kbps_v", "送信kbps(映像)"],
+        ["enc_occupancy", "エンコ占有"],
+        ["retrans_rate", "再送率"],
+        ["dec_fps", "受信fps"],
+        ["freeze_cnt", "凍結回"],
+        ["freeze_dur_ratio", "凍結時間比"],
+        ["a_conceal_rate", "音声補間率"],
+        ["a_loss_rate", "音声ロス率"],
+      ];
+
+      function renderLive() {
+        const head = document.getElementById("liveHead");
+        const body = document.getElementById("liveBody");
+        clear(head);
+        clear(body);
+
+        const headRow = el("tr");
+        for (const [, label] of LIVE_COLUMNS) {
+          const th = el("th", label);
+          th.className = "name";
+          headRow.appendChild(th);
+        }
+        head.appendChild(headRow);
+
+        const groups = groupByPc(store.rows);
+        for (const [pc, list] of groups) {
+          const last = list[list.length - 1];
+          const tr = el("tr");
+          for (const [key] of LIVE_COLUMNS) {
+            const v = last[key];
+            const td = el("td", v === null || v === undefined ? "-" : String(v));
+            if (key === "pc" || key === "peer" || key === "remote_addr") td.className = "name";
+            if (v === null || v === undefined) td.classList.add("n");
+            if (key === "relay" && v === "relay") td.classList.add("relay");
+            tr.appendChild(td);
+          }
+          tr.dataset.pc = pc;
+          body.appendChild(tr);
+        }
+        if (groups.size === 0) {
+          const tr = el("tr");
+          const td = el("td", "まだサンプルがない", "name");
+          td.colSpan = LIVE_COLUMNS.length;
+          tr.appendChild(td);
+          body.appendChild(tr);
+        }
+      }
+
+      function renderVerdict() {
+        const head = document.getElementById("verdictHead");
+        const body = document.getElementById("verdictBody");
+        clear(head);
+        clear(body);
+
+        const rows = windowRows();
+        const groups = groupByPc(rows);
+        const pcs = [...groups.keys()];
+
+        const summaries = new Map();
+        for (const pc of pcs) summaries.set(pc, summarizePeer(groups.get(pc)));
+
+        const headRow = el("tr");
+        const first = el("th", "指標");
+        first.className = "name";
+        headRow.appendChild(first);
+        for (const pc of pcs) {
+          headRow.appendChild(el("th", pc + "（" + summaries.get(pc).peer + "）"));
+        }
+        headRow.appendChild(el("th", "閾値 緑/赤"));
+        headRow.appendChild(el("th", "根拠"));
+        head.appendChild(headRow);
+
+        for (const metric of PEER_METRICS) {
+          const tr = el("tr");
+          const nameCell = el("td", metric.label);
+          nameCell.className = "name";
+          tr.appendChild(nameCell);
+          for (const pc of pcs) {
+            const v = summaries.get(pc).values[metric.id];
+            const td = el("td", fmtValue(v, metric));
+            td.className = grade(v, metric);
+            tr.appendChild(td);
+          }
+          tr.appendChild(el("td", fmtValue(metric.g, metric) + " / " + fmtValue(metric.r, metric)));
+          const src = el("td", metric.source);
+          src.className = "name";
+          tr.appendChild(src);
+          body.appendChild(tr);
+        }
+
+        if (pcs.length === 0) {
+          const tr = el("tr");
+          const td = el("td", "計測区間にサンプルがない", "name");
+          td.colSpan = 3;
+          tr.appendChild(td);
+          body.appendChild(tr);
+        }
+      }
+
+      function renderAgg() {
+        const head = document.getElementById("aggHead");
+        const body = document.getElementById("aggBody");
+        clear(head);
+        clear(body);
+
+        const headRow = el("tr");
+        for (const label of ["指標", "値", "判定", "閾値 緑/赤", "意味"]) {
+          const th = el("th", label);
+          th.className = "name";
+          headRow.appendChild(th);
+        }
+        head.appendChild(headRow);
+
+        const rows = windowRows();
+        const groups = groupByPc(rows);
+        const summaries = [...groups.values()].map(summarizePeer);
+        const uplinkMbps = Number(document.getElementById("uplink").value);
+        const uplinkBps = isFinite(uplinkMbps) && uplinkMbps > 0 ? uplinkMbps * 1e6 : null;
+
+        let encSum = null;
+        let availSum = null;
+        let sendSum = null;
+        let relayCount = 0;
+        for (const s of summaries) {
+          if (s.values.B2 !== null) encSum = (encSum === null ? 0 : encSum) + s.values.B2;
+          if (s.meanAvailOut !== null) {
+            availSum = (availSum === null ? 0 : availSum) + s.meanAvailOut;
+          }
+          if (s.meanSendBps !== null) sendSum = (sendSum === null ? 0 : sendSum) + s.meanSendBps;
+          if (s.relay === "relay") relayCount += 1;
+        }
+
+        const values = {
+          B2sum: encSum,
+          C5: ratio(availSum, uplinkBps),
+          C6: ratio(sendSum, uplinkBps),
+          C7: summaries.length === 0 ? null : relayCount,
+        };
+
+        for (const metric of AGG_METRICS) {
+          const v = values[metric.id];
+          const tr = el("tr");
+          const nameCell = el("td", metric.label);
+          nameCell.className = "name";
+          tr.appendChild(nameCell);
+          tr.appendChild(el("td", fmtValue(v, metric)));
+          const verdict = el("td", { g: "緑", y: "黄", r: "赤", n: "測定不能" }[grade(v, metric)]);
+          verdict.className = grade(v, metric);
+          tr.appendChild(verdict);
+          tr.appendChild(el("td", fmtValue(metric.g, metric) + " / " + fmtValue(metric.r, metric)));
+          const note = el("td", metric.note);
+          note.className = "name";
+          tr.appendChild(note);
+          body.appendChild(tr);
+        }
+
+        const info = el("tr");
+        const infoCell = el(
+          "td",
+          "ピア数 " + summaries.length + " / 上り実測 " +
+            (uplinkBps === null ? "未入力（C5・C6 は測定不能）" : uplinkMbps + " Mbps"),
+          "name",
+        );
+        infoCell.colSpan = 5;
+        info.appendChild(infoCell);
+        body.appendChild(info);
+      }
+
+      function renderStatus() {
+        const node = document.getElementById("status");
+        const groups = groupByPc(store.rows);
+        const parts = [
+          store.live ? "ライブ受信中" : "未接続（貼り付けモードで取り込める）",
+          "ピア " + groups.size + " 本",
+          "サンプル " + store.rows.length + " 行",
+          window_.start === null
+            ? "計測区間: 未開始（全サンプルを集計）"
+            : "計測区間: " + window_.start + "s 〜 " +
+              (window_.end === null ? "計測中" : window_.end + "s"),
+        ];
+        if (store.meta !== null && store.meta.cores !== null) {
+          parts.push("論理コア " + store.meta.cores);
+        }
+        node.textContent = parts.join(" / ");
+        node.className = store.live ? "live" : "idle";
+        document.getElementById("rowCount").textContent = store.rows.length + " 行";
+      }
+
+      function renderAll() {
+        renderLive();
+        renderVerdict();
+        renderAgg();
+        renderStatus();
+        const csv = toCsvText(store.rows);
+        const lines = csv.split("\n").slice(0, 30);
+        document.getElementById("csvPreview").textContent = lines.join("\n");
+      }
+
+      // =====================================================================
+      // CSV 入出力
+      // =====================================================================
+
+      function csvCell(v) {
+        if (v === null || v === undefined) return "";
+        const s = String(v);
+        return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+      }
+
+      function toCsvText(rows) {
+        const out = [CSV_COLUMNS.join(",")];
+        for (const r of rows) {
+          out.push(CSV_COLUMNS.map((c) => csvCell(r[c])).join(","));
+        }
+        return out.join("\n");
+      }
+
+      /** 素朴な CSV パーサ（引用符つきセルに対応する） */
+      function parseCsv(text) {
+        const rows = [];
+        let row = [];
+        let cell = "";
+        let quoted = false;
+        for (let i = 0; i < text.length; i += 1) {
+          const ch = text[i];
+          if (quoted) {
+            if (ch === '"') {
+              if (text[i + 1] === '"') {
+                cell += '"';
+                i += 1;
+              } else quoted = false;
+            } else cell += ch;
+            continue;
+          }
+          if (ch === '"') quoted = true;
+          else if (ch === ",") {
+            row.push(cell);
+            cell = "";
+          } else if (ch === "\n") {
+            row.push(cell);
+            rows.push(row);
+            row = [];
+            cell = "";
+          } else if (ch !== "\r") cell += ch;
+        }
+        if (cell !== "" || row.length > 0) {
+          row.push(cell);
+          rows.push(row);
+        }
+        return rows;
+      }
+
+      function importText(text) {
+        const trimmed = text.trim();
+        if (trimmed === "") return 0;
+        if (trimmed.charAt(0) === "{" || trimmed.charAt(0) === "[") {
+          let parsed;
+          try {
+            parsed = JSON.parse(trimmed);
+          } catch (e) {
+            notify("JSON として読めなかった: " + String(e));
+            return 0;
+          }
+          if (Array.isArray(parsed)) return ingestRows(parsed);
+          if (parsed !== null && typeof parsed === "object" && Array.isArray(parsed.rows)) {
+            if (parsed.meta !== null && typeof parsed.meta === "object") store.meta = parsed.meta;
+            return ingestRows(parsed.rows);
+          }
+          notify("rows 配列が見つからない JSON だった");
+          return 0;
+        }
+        const table = parseCsv(trimmed);
+        if (table.length < 2) {
+          notify("CSV の行が足りない");
+          return 0;
+        }
+        const header = table[0];
+        const list = [];
+        for (let i = 1; i < table.length; i += 1) {
+          const cells = table[i];
+          if (cells.length === 1 && cells[0] === "") continue;
+          const obj = {};
+          for (let j = 0; j < header.length; j += 1) obj[header[j]] = cells[j];
+          list.push(obj);
+        }
+        return ingestRows(list);
+      }
+
+      function notify(message) {
+        document.getElementById("notice").textContent = message;
+      }
+
+      async function copyText(text, label) {
+        try {
+          await navigator.clipboard.writeText(text);
+          notify(label + " をクリップボードにコピーした");
+        } catch (e) {
+          // file:// や権限拒否では clipboard API が使えない。手動コピーに倒す
+          notify(label + " をコピーできなかった。下のプレビューから手動でコピーすること。");
+        }
+      }
+
+      // =====================================================================
+      // 配線
+      // =====================================================================
+
+      const SNIPPET = "(" + vcMeshCollector.toString() + ")();";
+      document.getElementById("snippet").textContent = SNIPPET;
+
+      let roomWindow = null;
+
+      document.getElementById("openRoom").addEventListener("click", () => {
+        const url = document.getElementById("roomUrl").value.trim();
+        if (!/^https?:\/\//.test(url)) {
+          notify("http:// または https:// で始まる URL を入れること");
+          return;
+        }
+        roomWindow = window.open(url, "vc-mesh-room");
+        if (roomWindow === null) {
+          notify("ポップアップがブロックされた。許可してからもう一度押すこと。");
+        } else {
+          notify("");
+        }
+      });
+
+      document.getElementById("copySnippet").addEventListener("click", () => {
+        copyText(SNIPPET, "収集スニペット");
+      });
+
+      document.getElementById("importPaste").addEventListener("click", () => {
+        const n = importText(document.getElementById("pasteBox").value);
+        if (n > 0) notify(n + " 行を取り込んだ");
+        renderAll();
+      });
+
+      document.getElementById("startBtn").addEventListener("click", () => {
+        const last = store.rows.length === 0 ? 0 : store.rows[store.rows.length - 1].t_sec;
+        window_.start = last;
+        window_.end = null;
+        notify("計測開始（" + last + "s 以降を集計する）");
+        renderAll();
+      });
+
+      document.getElementById("stopBtn").addEventListener("click", () => {
+        if (window_.start === null) {
+          notify("先に［計測開始］を押すこと");
+          return;
+        }
+        window_.end = store.rows.length === 0
+          ? window_.start
+          : store.rows[store.rows.length - 1].t_sec;
+        notify("計測停止（" + window_.start + "s 〜 " + window_.end + "s）");
+        renderAll();
+      });
+
+      document.getElementById("clearBtn").addEventListener("click", () => {
+        store.rows = [];
+        store.meta = null;
+        window_.start = null;
+        window_.end = null;
+        notify("全消去した");
+        renderAll();
+      });
+
+      document.getElementById("copyCsv").addEventListener("click", () => {
+        copyText(toCsvText(windowRows()), "CSV（計測区間ぶん）");
+      });
+
+      document.getElementById("copyJson").addEventListener("click", () => {
+        copyText(
+          JSON.stringify({ source: "vc-mesh", meta: store.meta, rows: windowRows() }),
+          "JSON（計測区間ぶん）",
+        );
+      });
+
+      document.getElementById("uplink").addEventListener("change", renderAll);
+
+      /**
+       * 収集スニペットからのサンプルを受ける。
+       * 送り元は別オリジン（file:// と http://）になるため origin は固定できない。
+       * 代わりに ingestRows() で「既知のキーだけを既知の型に丸めて」取り込み、
+       * 表示は textContent のみで行う（innerHTML を使わない）。
+       */
+      window.addEventListener("message", (event) => {
+        const d = event.data;
+        if (d === null || typeof d !== "object") return;
+        if (d.source !== "vc-mesh" || d.type !== "samples") return;
+        if (d.meta !== null && typeof d.meta === "object") store.meta = d.meta;
+        const n = ingestRows(d.rows);
+        if (n > 0) {
+          store.live = true;
+          store.lastAt = Date.now();
+          renderAll();
+        }
+      });
+
+      // ライブ受信が 10 秒途切れたら「未接続」に戻す
+      setInterval(() => {
+        if (store.live && Date.now() - store.lastAt > 10000) {
+          store.live = false;
+          renderStatus();
+        }
+      }, 3000);
+
+      renderAll();
+    </script>
+  </body>
+</html>
