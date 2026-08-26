@@ -1302,7 +1302,28 @@ function bind() {
       };
     } else {
       pendingRoomMeta = null;
+      // 合言葉は招待制の卓にだけ付く（§3.1）。空欄なら積まない
+      const passphrase = $("new-passphrase").value.trim();
+      if (passphrase.length > 0) msg.passphrase = passphrase;
     }
+    send(msg);
+  });
+
+  // 誰に見せるかに合わせて合言葉欄を出し入れする。公開の卓に出したままだと、
+  // 付けられるように見えてサーバーに弾かれるだけになる
+  const syncPassphraseField = () => {
+    $("new-passphrase-field").classList.toggle("hidden", $("visibility").value !== "private");
+  };
+  $("visibility").addEventListener("change", syncPassphraseField);
+  syncPassphraseField();
+
+  $("join-passphrase").addEventListener("click", () => {
+    state.rejoinAfterRestart = false;
+    pendingRoomMeta = null;
+    // コードは積まない。合言葉だけで卓を引く（§3.1）
+    const msg = { t: "join", passphrase: $("passphrase").value };
+    const nickname = $("nickname").value.trim();
+    if (nickname.length > 0) msg.nickname = nickname;
     send(msg);
   });
   $("join").addEventListener("click", () => {

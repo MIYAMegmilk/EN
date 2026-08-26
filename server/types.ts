@@ -19,6 +19,10 @@ export const VC_CAPACITY = 6;
 export const NICKNAME_MAX = 20;
 /** 公開ルーム名の最大文字数（§3.1） */
 export const ROOM_NAME_MAX = 20;
+
+/** 合言葉の長さ（§3.1）。口頭で伝える前提なので短すぎず長すぎない範囲にする */
+export const PASSPHRASE_MIN = 4;
+export const PASSPHRASE_MAX = 20;
 /** 卓の説明文の最大文字数 */
 export const ROOM_DESCRIPTION_MAX = 100;
 /** 卓に付けられるプリセットタグの上限数 */
@@ -264,6 +268,13 @@ export type Room = {
   visibility: RoomVisibility;
   /** ルーム名（公開ルームのみ必須、20文字以内） */
   roomName?: string;
+  /**
+   * 合言葉（合言葉ルームのみ・4〜20文字、§3.1）。
+   * **クライアントへは絶対に送らない**（§4.3 で明記された制約）。
+   * 知っている人だけが入れる、という性質そのものが合言葉の価値なので、
+   * スナップショットにも公開一覧にも載せてはならない。
+   */
+  passphrase?: string;
   /** 卓の説明文（100文字以内・任意） */
   description?: string;
   /** プリセットタグ（最大5個・任意） */
@@ -786,10 +797,18 @@ export type C2S =
     nickname: string;
     visibility: RoomVisibility;
     roomName?: string;
+    /**
+     * 合言葉（招待制ルームのみ・4〜20文字、§3.1）。
+     * 全ルーム横断で一意。すでに使われていれば DUPLICATE で作成に失敗する
+     */
+    passphrase?: string;
   }
   | {
     t: "join";
-    roomCode: string;
+    /** 6桁の参加コード。passphrase を渡す場合は省略できる */
+    roomCode?: string;
+    /** 合言葉（§3.1）。roomCode の代わりに使える。両方あれば roomCode を優先する */
+    passphrase?: string;
     /**
      * あだ名。省略するとサーバーがしゅんぴの二つ名を付ける（§3.0 / §3.10）。
      * 空文字は「入力し忘れ」と区別できないので従来どおりエラーにする

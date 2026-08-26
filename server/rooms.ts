@@ -33,6 +33,8 @@ import {
   err,
   type ErrorCode,
   ok,
+  PASSPHRASE_MAX,
+  PASSPHRASE_MIN,
   type Phase,
   type PhaseDurations,
   type PhaseView,
@@ -278,6 +280,40 @@ export function validateChatText(input: unknown): Result<string> {
  * 公開ルームのルーム名を検証して正規化する（1..20文字・制御文字禁止、§3.1）。
  * 一覧は未ログインでも見えるので、ここを通った文字列だけが外に出る。
  */
+/**
+ * 合言葉を検証して正規化する（4〜20文字・制御文字禁止、§3.1）。
+ *
+ * 口頭やチャットで伝えられる前提なので、前後の空白は落とす。
+ * 中の空白は残す（「さくら 三番」のような合言葉を許すため）。
+ */
+export function validatePassphrase(input: unknown): Result<string> {
+  if (typeof input !== "string") {
+    return err("INVALID_INPUT", "合言葉を入力してください");
+  }
+  const trimmed = input.trim();
+  const length = charLength(trimmed);
+  if (length < PASSPHRASE_MIN) {
+    return err("INVALID_INPUT", `合言葉は${PASSPHRASE_MIN}文字以上で入力してください`);
+  }
+  if (length > PASSPHRASE_MAX) {
+    return err("INVALID_INPUT", `合言葉は${PASSPHRASE_MAX}文字以内で入力してください`);
+  }
+  if (hasControlChar(trimmed)) {
+    return err("INVALID_INPUT", "合言葉に使用できない文字が含まれています");
+  }
+  return ok(trimmed);
+}
+
+/**
+ * 合言葉の突き合わせに使う鍵。
+ *
+ * 大文字小文字の違いで別の卓になると、口頭で伝えたときに入れない事故が起きる。
+ * 一意判定も入室の照合も、この鍵で行う。
+ */
+export function passphraseKey(passphrase: string): string {
+  return passphrase.toLowerCase();
+}
+
 export function validateRoomName(input: unknown): Result<string> {
   if (typeof input !== "string") {
     return err("INVALID_INPUT", "ルーム名を入力してください");
@@ -349,6 +385,12 @@ export type SetRoomMetaResult =
 export class RoomManager {
   private readonly rooms = new Map<string, RoomEntry>();
   private readonly links = new Map<string, LinkState>();
+  /**
+   * 合言葉 → 6桁コードの索引（§3.1）。
+   * 全ルーム横断で一意にするためと、入室時に卓を引くために持つ。
+   * 鍵は passphraseKey（小文字化）で、卓を消すときに必ず解放する
+   */
+  private readonly passphrases = new Map<string, string>();
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => TimerHandle;
   private readonly clearTimer: (handle: TimerHandle) => void;
@@ -571,6 +613,25 @@ export class RoomManager {
       }
       roomName = validated.value;
     }
+    // 合言葉は招待制ルームのみ（§3.1）。公開ルームは一覧から入れるので意味がない
+    let passphrase: string | undefined;
+    if (msg.passphrase !== undefined) {
+      if (msg.visibility !== "private") {
+        sendError(link, "INVALID_INPUT", "合言葉は招待制の卓にのみ付けられます");
+        return;
+      }
+      const validated = validatePassphrase(msg.passphrase);
+      if (!validated.ok) {
+        sendError(link, validated.code, validated.message);
+        return;
+      }
+      if (this.passphrases.has(passphraseKey(validated.value))) {
+        // 一意でないと、入力した合言葉がどの卓を指すのか決まらない（§3.1）
+        sendError(link, "DUPLICATE", "その合言葉はすでに使われています");
+        return;
+      }
+      passphrase = validated.value;
+    }
     const nickname = validateNickname(msg.nickname);
     if (!nickname.ok) {
       sendError(link, nickname.code, nickname.message);
@@ -605,6 +666,7 @@ export class RoomManager {
       createdAt: now,
       lastActiveAt: now,
       ...(roomName === undefined ? {} : { roomName }),
+      ...(passphrase === undefined ? {} : { passphrase }),
     };
     const entry: RoomEntry = {
       room,
@@ -620,10 +682,29 @@ export class RoomManager {
       botPollTimer: null,
     };
     this.rooms.set(code, entry);
+    if (passphrase !== undefined) this.passphrases.set(passphraseKey(passphrase), code);
     this.armBotTimer(entry);
     this.links.set(link.id, { link, roomCode: code, playerId: host.id });
     // TODO(チーム分担): §3.1 最終アクティビティから24時間で自動削除する掃除処理
     this.sendSnapshot(entry, host);
+  }
+
+  /**
+   * join の宛先を決める（§3.1）。
+   *
+   * 6桁コードと合言葉のどちらでも入れる。両方あればコードを優先する
+   * （URL や QR から来た人は、合言葉を知らなくても入れるべきなので）。
+   * どちらでも引けなければ null を返し、呼び出し側が ROOM_NOT_FOUND にする。
+   * 合言葉が違うのか卓が無いのかは区別せずに返す。区別できると、合言葉を
+   * 総当たりで試したときに「当たり」が分かってしまう
+   */
+  private resolveRoomCode(msg: Extract<C2S, { t: "join" }>): string | null {
+    const code = normalizeRoomCode(msg.roomCode);
+    if (code !== null) return code;
+    if (typeof msg.passphrase !== "string") return null;
+    const validated = validatePassphrase(msg.passphrase);
+    if (!validated.ok) return null;
+    return this.passphrases.get(passphraseKey(validated.value)) ?? null;
   }
 
   /** 招待制ルームへの参加。session 指定時は再接続として扱う（§3.2） */
@@ -632,7 +713,7 @@ export class RoomManager {
       sendError(link, "INVALID_INPUT", "すでにルームに参加しています");
       return;
     }
-    const code = normalizeRoomCode(msg.roomCode);
+    const code = this.resolveRoomCode(msg);
     if (code === null || !this.rooms.has(code)) {
       sendError(link, "ROOM_NOT_FOUND", "ルームが見つかりません");
       return;
@@ -1452,6 +1533,9 @@ export class RoomManager {
     entry.links.clear();
     entry.chatTimes.clear();
     entry.voiceTimes.clear();
+    // 合言葉を解放する。残したままだと、消えた卓の合言葉が永久に使えなくなる
+    const passphrase = entry.room.passphrase;
+    if (passphrase !== undefined) this.passphrases.delete(passphraseKey(passphrase));
     this.rooms.delete(entry.room.code);
   }
 

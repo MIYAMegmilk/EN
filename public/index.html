@@ -1716,6 +1716,21 @@
             </div>
           </div>
 
+          <div class="field">
+            <label for="passphrase">合言葉（4〜20文字）</label>
+            <!-- コードを知らなくても、合言葉だけで入れる（§3.1） -->
+            <div class="entry-join">
+              <input
+                class="input"
+                id="passphrase"
+                maxlength="20"
+                autocomplete="off"
+                placeholder="さくら三番"
+              />
+              <button id="join-passphrase" class="btn" type="button">入店</button>
+            </div>
+          </div>
+
           <details class="make">
             <summary>卓を立てる（要ログイン）</summary>
             <div class="make-body">
@@ -1749,6 +1764,17 @@
                   <option value="public">お座敷一覧に出す（誰でも入店できる）</option>
                   <option value="private">一覧に出さない（コードを知っている人だけ）</option>
                 </select>
+              </div>
+              <!-- 合言葉は招待制の卓にだけ付く。app.js が誰に見せるかに合わせて出し入れする -->
+              <div class="field hidden" id="new-passphrase-field">
+                <label for="new-passphrase">合言葉（4〜20文字・任意）</label>
+                <input
+                  class="input"
+                  id="new-passphrase"
+                  maxlength="20"
+                  autocomplete="off"
+                  placeholder="付けるとコードなしで入れます"
+                />
               </div>
               <button id="create" class="btn btn-gold btn-block" type="button">卓を立てる</button>
             </div>

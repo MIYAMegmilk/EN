@@ -14,6 +14,7 @@ import {
   RoomManager,
   validateChatText,
   validateNickname,
+  validatePassphrase,
   validateRoomDescription,
   validateRoomName,
   VOICE_RATE_MAX,
@@ -1120,6 +1121,190 @@ Deno.test("voice: 退室すると voiceTimes が掃除される（メモリリ�
 
   manager.handle(guest.link, { t: "leave" });
   assert(!internalEntry.voiceTimes.has(guestId));
+  manager.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// 合言葉（§3.1）
+// ---------------------------------------------------------------------------
+
+Deno.test("合言葉検証: 前後の空白を除去し、4〜20文字を受理する", () => {
+  const res = validatePassphrase("  さくら三番  ");
+  assert(res.ok);
+  assertEquals(res.value, "さくら三番");
+  assert(validatePassphrase("あいこと").ok);
+  assert(validatePassphrase("あ".repeat(20)).ok);
+  // 中の空白は残す（「さくら 三番」のような合言葉を許す）
+  const spaced = validatePassphrase("さくら 三番");
+  assert(spaced.ok);
+  assertEquals(spaced.value, "さくら 三番");
+});
+
+Deno.test("合言葉検証: 3文字以下・21文字以上・制御文字を拒否する", () => {
+  assertFalse(validatePassphrase("あい").ok);
+  assertFalse(validatePassphrase("あ".repeat(21)).ok);
+  assertFalse(validatePassphrase("あい\nこと").ok);
+  assertFalse(validatePassphrase(123).ok);
+  assertFalse(validatePassphrase("   ").ok);
+});
+
+Deno.test("合言葉: 合言葉だけで入室できる（コードを知らなくてよい）", () => {
+  const { manager } = setup();
+  const link = new MockLink();
+  manager.handle(link, {
+    t: "createRoom",
+    nickname: "ホスト",
+    visibility: "private",
+    passphrase: "さくら三番",
+  });
+  assertExists(last(link, "roomState"));
+
+  const guest = new MockLink();
+  manager.handle(guest, { t: "join", passphrase: "さくら三番", nickname: "ゲスト" });
+  const state = last(guest, "roomState");
+  assertExists(state);
+  assertEquals(state.snapshot.players.length, 2);
+  manager.dispose();
+});
+
+Deno.test("合言葉: 大文字小文字の違いは同じ卓として扱う", () => {
+  const { manager } = setup();
+  const link = new MockLink();
+  manager.handle(link, {
+    t: "createRoom",
+    nickname: "ホスト",
+    visibility: "private",
+    passphrase: "Sakura",
+  });
+
+  const guest = new MockLink();
+  manager.handle(guest, { t: "join", passphrase: "sAKURA", nickname: "ゲスト" });
+  assertExists(last(guest, "roomState"));
+  manager.dispose();
+});
+
+Deno.test("合言葉: 全ルーム横断で一意（重複は DUPLICATE で作成できない）", () => {
+  const { manager } = setup();
+  const first = new MockLink();
+  manager.handle(first, {
+    t: "createRoom",
+    nickname: "ホスト",
+    visibility: "private",
+    passphrase: "さくら三番",
+  });
+  assertExists(last(first, "roomState"));
+
+  const second = new MockLink();
+  manager.handle(second, {
+    t: "createRoom",
+    nickname: "べつのホスト",
+    visibility: "private",
+    passphrase: "さくら三番",
+  });
+  assertEquals(last(second, "error")?.code, "DUPLICATE");
+  assertEquals(last(second, "roomState"), undefined, "卓は作られていない");
+  manager.dispose();
+});
+
+Deno.test("合言葉: 卓が消えると解放され、同じ合言葉で作り直せる", () => {
+  const { manager } = setup();
+  const first = new MockLink();
+  manager.handle(first, {
+    t: "createRoom",
+    nickname: "ホスト",
+    visibility: "private",
+    passphrase: "さくら三番",
+  });
+  // ホストが抜けると誰も居なくなり、卓は消える
+  manager.handle(first, { t: "leave" });
+
+  const second = new MockLink();
+  manager.handle(second, {
+    t: "createRoom",
+    nickname: "べつのホスト",
+    visibility: "private",
+    passphrase: "さくら三番",
+  });
+  assertExists(last(second, "roomState"));
+  manager.dispose();
+});
+
+Deno.test("合言葉: 公開ルームには付けられない", () => {
+  const { manager } = setup();
+  const link = new MockLink();
+  manager.handle(link, {
+    t: "createRoom",
+    nickname: "ホスト",
+    visibility: "public",
+    roomName: "公開の卓",
+    passphrase: "さくら三番",
+  });
+  assertEquals(last(link, "error")?.code, "INVALID_INPUT");
+  manager.dispose();
+});
+
+Deno.test("合言葉: 違う合言葉では入れず、卓の有無も明かさない", () => {
+  const { manager } = setup();
+  const link = new MockLink();
+  manager.handle(link, {
+    t: "createRoom",
+    nickname: "ホスト",
+    visibility: "private",
+    passphrase: "さくら三番",
+  });
+
+  const guest = new MockLink();
+  manager.handle(guest, { t: "join", passphrase: "ちがう合言葉", nickname: "ゲスト" });
+  // 総当たりで「当たり」が分からないよう、短すぎる入力と同じ ROOM_NOT_FOUND にする
+  assertEquals(last(guest, "error")?.code, "ROOM_NOT_FOUND");
+
+  const tooShort = new MockLink();
+  manager.handle(tooShort, { t: "join", passphrase: "あい", nickname: "ゲスト" });
+  assertEquals(last(tooShort, "error")?.code, "ROOM_NOT_FOUND");
+  manager.dispose();
+});
+
+Deno.test("合言葉: スナップショットに合言葉を含めない（§4.3）", () => {
+  const { manager } = setup();
+  const link = new MockLink();
+  manager.handle(link, {
+    t: "createRoom",
+    nickname: "ホスト",
+    visibility: "private",
+    passphrase: "さくら三番",
+  });
+  const state = last(link, "roomState");
+  assertExists(state);
+  const dumped = JSON.stringify(state.snapshot);
+  assertFalse(dumped.includes("さくら三番"), "合言葉が本人の手元にも漏れていない");
+  assertFalse(dumped.includes("passphrase"));
+  manager.dispose();
+});
+
+Deno.test("合言葉: コードと合言葉の両方があればコードを優先する", () => {
+  const { manager } = setup();
+  const host = new MockLink();
+  manager.handle(host, {
+    t: "createRoom",
+    nickname: "ホスト",
+    visibility: "private",
+    passphrase: "さくら三番",
+  });
+  assertExists(last(host, "roomState"));
+
+  const other = createRoom(manager, "べつのホスト");
+
+  // 合言葉は1つ目の卓を指すが、コードは2つ目を指す。コードが勝つ
+  const guest = new MockLink();
+  manager.handle(guest, {
+    t: "join",
+    roomCode: other.snapshot.code,
+    passphrase: "さくら三番",
+    nickname: "ゲスト",
+  });
+  const state = last(guest, "roomState");
+  assertExists(state);
+  assertEquals(state.snapshot.code, other.snapshot.code);
   manager.dispose();
 });
 
