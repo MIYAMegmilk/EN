@@ -266,6 +266,13 @@ export type Room = {
   code: string;
   /** 公開 / 招待制。作成後は変更不可 */
   visibility: RoomVisibility;
+  /**
+   * 公開ルームの入室方式（§3.1）。作成後は変更不可。
+   * open  … 一覧から選んで承認なしで即入室
+   * knock … ノック → ホスト承認 → entryToken で入室（§3.1.1）
+   * 招待制ルームでは使わない（常に open 相当）
+   */
+  entryMode: RoomEntryMode;
   /** ルーム名（公開ルームのみ必須、20文字以内） */
   roomName?: string;
   /**
@@ -312,6 +319,12 @@ export type Room = {
 
 /** ルームの公開設定 */
 export type RoomVisibility = "public" | "private";
+
+/** 公開ルームの入室方式（§3.1）。既定は open */
+export type RoomEntryMode = "open" | "knock";
+
+/** 同一セッションから同一ルームへノックできる間隔（ミリ秒、§3.8） */
+export const KNOCK_RATE_WINDOW_MS = 10_000;
 
 // ---------------------------------------------------------------------------
 // §3.5 ゲーム定義
@@ -797,6 +810,8 @@ export type C2S =
     nickname: string;
     visibility: RoomVisibility;
     roomName?: string;
+    /** 公開ルームの入室方式（§3.1）。省略すると open */
+    entryMode?: RoomEntryMode;
     /**
      * 合言葉（招待制ルームのみ・4〜20文字、§3.1）。
      * 全ルーム横断で一意。すでに使われていれば DUPLICATE で作成に失敗する
@@ -817,7 +832,11 @@ export type C2S =
     session?: string;
     entryToken?: string;
   }
-  | { t: "knock"; roomCode: string; nickname: string }
+  /**
+   * 公開・承認制ルームへの入室申請（§3.1.1）。ゲスト可。
+   * session は前に同じ卓へ関わったときのトークン。あればブロック判定に使う
+   */
+  | { t: "knock"; roomCode: string; nickname: string; session?: string }
   | { t: "approveKnock"; knockId: string }
   | { t: "rejectKnock"; knockId: string }
   | { t: "kick"; playerId: string }
