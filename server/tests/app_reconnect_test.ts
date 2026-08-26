@@ -864,3 +864,38 @@ Deno.test("app.js: 保留中の卓作成と保留中の入室が両方あれば�
   assertEquals(sent.length, 1);
   assertEquals(sent[0].t, "createRoom");
 });
+
+// ---------------------------------------------------------------------------
+// VC 枠の繰り上がり（§3.6）
+// ---------------------------------------------------------------------------
+
+/** PlayerPublic を1件組み立てる */
+function playerPublic(id: string, vcEligible: boolean) {
+  return { id, nickname: id, connected: true, isHost: false, score: 0, vcEligible };
+}
+
+Deno.test("app.js: VC 枠が空いて自分が繰り上がったら、そのときに VC へ参加する", async () => {
+  const h = await load();
+  enterRoom(h);
+  // 入店時の自動参加。枠外だった人はここで VC.join が枠に弾かれている
+  assertEquals(h.calls.filter((c) => c === "VC.join").length, 1);
+
+  // サーバーは「繰り上がった本人ぶんだけ」を playerJoined で配る
+  h.socket().receive({ t: "playerJoined", player: playerPublic("p1", true) });
+
+  assertEquals(h.calls.filter((c) => c === "VC.join").length, 2);
+});
+
+Deno.test("app.js: 自分以外の playerJoined や枠外のままの知らせでは VC へ参加しない", async () => {
+  const h = await load();
+  enterRoom(h);
+  assertEquals(h.calls.filter((c) => c === "VC.join").length, 1);
+
+  // 他人の入室・他人の繰り上がりは自分の参加のきっかけにならない
+  h.socket().receive({ t: "playerJoined", player: playerPublic("p2", true) });
+  h.socket().receive({ t: "playerJoined", player: playerPublic("p2", false) });
+  // 自分あてでも枠外のままなら参加しない
+  h.socket().receive({ t: "playerJoined", player: playerPublic("p1", false) });
+
+  assertEquals(h.calls.filter((c) => c === "VC.join").length, 1);
+});

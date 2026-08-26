@@ -931,6 +931,9 @@ export class RoomManager {
     // 承認された人には、ノック時に割り当てたトークンをそのまま持たせる。
     // こうしておくと、キックされたあとに再ノックしてもブロックが効く
     if (approvedSession !== undefined) player.sessionToken = approvedSession;
+    // 新しい ID は Map の末尾に足されるだけなので、既存の参加者の参加順インデックス
+    // （＝ VC 枠の割り当て）は動かない。人が増える向きでは繰り上がりの配信は要らない
+    // （繰り上がりが起きるのは在籍から人が消える removePlayer だけ）
     room.players.set(player.id, player);
     room.lastActiveAt = now;
     entry.links.set(player.id, link);
@@ -1140,6 +1143,51 @@ export class RoomManager {
   private isVcEligible(entry: RoomEntry, playerId: string): boolean {
     const index = [...entry.room.players.keys()].indexOf(playerId);
     return index >= 0 && index < VC_CAPACITY;
+  }
+
+  /** いま VC 枠に入っている参加者IDの集合（参加順の先頭 VC_CAPACITY 人） */
+  private vcEligibleIds(entry: RoomEntry): Set<string> {
+    const ids = new Set<string>();
+    for (const id of entry.room.players.keys()) {
+      if (ids.size >= VC_CAPACITY) break;
+      ids.add(id);
+    }
+    return ids;
+  }
+
+  /**
+   * VC 枠の割り当てが変わった参加者についてだけ、新しい `PlayerPublic` を配り直す（§3.6）。
+   *
+   * VC 枠は `room.players` の参加順インデックスで決まるため、枠内の誰かが在籍から外れると
+   * 7人目以降が繰り上がる。ところが退室時に配るのは「抜けた本人」の `playerLeft` /
+   * `playerKicked` だけで、繰り上がった本人の `vcEligible` を伝える便が1通も無かった。
+   * クライアントは `state.players` の `vcEligible` しか見ないので、繰り上がった人は
+   * 「枠が埋まっています」のまま VC に入れず、既に VC にいる側も相手を対象と見なさない。
+   *
+   * 全員へ `roomState` を配り直せば直るが、クライアントは `roomState` を受けるたびに
+   * ピアを張り直す（`public/room/vc.js` の `restartPeers()`）ため、誰かが抜けるたびに
+   * 卓全員の通話が切れる。そこで「割り当てが変わった本人ぶんだけ」を `playerJoined`
+   * （＝ 1人分の upsert。受け手は `upsertPlayer` するだけで新規入室の演出はしない）で配る。
+   *
+   * 変化が無いときは 1 通も出さない。無駄な配信はピア張り直しの引き金になる。
+   */
+  private broadcastVcEligibilityChanges(entry: RoomEntry, before: Set<string>): void {
+    const after = this.vcEligibleIds(entry);
+    for (const playerId of after) {
+      if (before.has(playerId)) continue;
+      const player = entry.room.players.get(playerId);
+      if (player === undefined) continue;
+      this.broadcast(entry, { t: "playerJoined", player: this.toPublic(entry, player) });
+    }
+    // 枠から外れる向きは現状の並び（Map の挿入順・削除は前詰め）では起きないが、
+    // 起きたときに黙って取り残されないよう対称に配る。在籍から外れた本人は対象外
+    // （その人の退席は playerLeft / playerKicked が伝える）
+    for (const playerId of before) {
+      if (after.has(playerId)) continue;
+      const player = entry.room.players.get(playerId);
+      if (player === undefined) continue;
+      this.broadcast(entry, { t: "playerJoined", player: this.toPublic(entry, player) });
+    }
   }
 
   /** ホストかどうかを検証する。非ホストには NOT_HOST を返す */
@@ -2229,6 +2277,9 @@ export class RoomManager {
     const player = room.players.get(playerId);
     if (player === undefined) return;
     const now = this.now();
+    // 抜ける前の VC 枠を控えておく。抜けたあとの枠と突き合わせて、
+    // 繰り上がった人にだけ更新を配る（broadcastVcEligibilityChanges）
+    const vcBefore = this.vcEligibleIds(entry);
     this.cancelGraceTimer(entry, playerId);
     // レート制限の記録も参加者と一緒に破棄する
     entry.chatTimes.delete(playerId);
@@ -2261,6 +2312,8 @@ export class RoomManager {
         this.broadcast(entry, { t: "hostChanged", playerId: successor });
       }
     }
+    // ホストの委譲まで済ませてから配る。先に配ると PlayerPublic.isHost が古いままになる
+    this.broadcastVcEligibilityChanges(entry, vcBefore);
     if (room.players.size === 0) this.deleteRoom(entry);
   }
 

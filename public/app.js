@@ -1569,6 +1569,19 @@ async function fetchIceServers() {
 }
 
 /**
+ * VC 枠（先着6人）が空いて、自分が繰り上がった知らせかどうか。
+ *
+ * サーバーは「枠の割り当てが変わった本人ぶんだけ」を playerJoined（1人分の upsert）で
+ * 配る（§3.6）。自分あての playerJoined はこの経路でしか来ない（入室・再接続の
+ * playerJoined は本人を除いて配られる）ので、自分の ID + vcEligible で判定できる。
+ */
+function isSelfVcPromotion(msg) {
+  if (msg.t !== "playerJoined") return false;
+  if (state.snapshot === null) return false;
+  return msg.player.id === state.snapshot.youId && msg.player.vcEligible === true;
+}
+
+/**
  * 卓に着いたら VC にも自動で参加する。
  *
  * 「VCに参加」「VC退出」のボタンは置いていない。入店＝着席＝声の輪に入る、
@@ -1577,9 +1590,12 @@ async function fetchIceServers() {
  * VC.join() はマイク拒否・枠外（先着6人）・非対応ブラウザをすべて自分で
  * 通知して false を返すので、失敗しても卓そのものは続く（音声なしで居られる）。
  * roomState は再接続でも飛んでくるが、参加中なら join() が早期 return する。
+ *
+ * 枠外（7人目以降）で着席した人は入店時の join() が枠で弾かれている。あとから枠が
+ * 空いて繰り上がったら、そのときに改めて声の輪へ入れる（着席＝声の輪、を保つため）。
  */
 function autoJoinVc(msg) {
-  if (msg.t !== "roomState") return;
+  if (msg.t !== "roomState" && !isSelfVcPromotion(msg)) return;
   if (VC.getState().active) return;
   // 先に一度描き直す。renderAll() は VC.handleServerMessage より前に走るので、
   // ここで描き直さないと「VC枠外」（selfId 未設定のときの既定）が残ってしまう
