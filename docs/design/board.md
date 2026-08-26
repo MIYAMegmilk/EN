@@ -161,7 +161,9 @@ GitHub API から定期取得したものを保持する。**API のレート制
 
 PR 索引は**サーバーが GitHub を叩いて結果だけを返す。** クライアントに GitHub トークンを持たせない。
 
-`tools/pr-review-bot/lib/github.ts` にトークン取得・レート制限処理・API クライアントが既にあるので流用する。
+**注意**: `tools/pr-review-bot/lib/github.ts` は**運用層（`c:\intern	ools`）にあり、この repo からは import できない**（別リポジトリで、運用層は push されない）。したがって GitHub クライアントは `tools/board/` 内に新規に書く。あちらは**参考実装として読むだけ**にする。
+
+必要な機能は限定的（オープン PR の一覧と、各 PR の変更ファイル一覧の取得）なので、フル機能のクライアントは要らない。
 
 ### 7-6. 画面（HTML）も認証必須
 
