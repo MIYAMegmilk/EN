@@ -349,6 +349,22 @@ function checkText(
 }
 
 /** `paths` を検証して正規化する */
+/**
+ * マシン固有の絶対パスか（ドライブレター `C:` / UNC `\\`）。
+ *
+ * `paths` の契約は「リポジトリルートからの相対パス」（types.ts）だが、フックが
+ * Claude Code のツール入力（絶対パス）を相対化せずそのまま送ると、表明どうしが
+ * **絶対に重ならなくなり、しかも 200 が返るので誰も気づかない**。黙って空振りする
+ * より、ここで拒否して「相対化していない」ことを呼び出し側に気づかせる。
+ * POSIX の先頭 `/`（例: `/public/app.js`）はリポジトリルート相対の書き方として
+ * 通す（normalizePath が先頭の `/` を落とす）。マシンの絶対パスと区別できないため、
+ * 機械的に見分けられる Windows 形式だけを弾く。
+ */
+function isMachineAbsolutePath(raw: string): boolean {
+  const t = raw.trimStart();
+  return /^[A-Za-z]:[\\/]/.test(t) || t.startsWith("\\\\") || t.startsWith("//");
+}
+
 function checkPaths(value: unknown): Checked<string[] | undefined> {
   if (value === undefined || value === null) return { ok: true, value: undefined };
   if (!Array.isArray(value)) return { ok: false, message: "paths は配列で指定してください" };
@@ -359,11 +375,24 @@ function checkPaths(value: unknown): Checked<string[] | undefined> {
     if (typeof item !== "string") {
       return { ok: false, message: "paths の要素は文字列で指定してください" };
     }
-    if (item.length > PATH_MAX) {
+    if ([...item].length > PATH_MAX) {
       return { ok: false, message: `paths の要素は${PATH_MAX}文字以内で指定してください` };
     }
     if (hasControlChar(item)) {
       return { ok: false, message: "paths に制御文字は使えません" };
+    }
+    if (isMachineAbsolutePath(item)) {
+      return {
+        ok: false,
+        message:
+          "paths は絶対パスではなく、リポジトリルートからの相対パスで指定してください（例: public/app.js）",
+      };
+    }
+    if (containsSecretLike(item)) {
+      return {
+        ok: false,
+        message: "paths にトークンらしき文字列が含まれています（秘密情報は書かないでください）",
+      };
     }
   }
   return { ok: true, value: normalizePaths(value as string[]) };
@@ -527,10 +556,14 @@ export class PrIndexCache {
    */
   async refreshIfDue(): Promise<void> {
     if (this.#client === null) return;
-    const meta = await this.#kv.get<PrIndexMeta>(KV_PR_INDEX_META_KEY);
-    const attemptedAt = meta.value?.attemptedAt ?? null;
-    if (attemptedAt !== null && this.#now() - attemptedAt < this.#refreshMs) return;
-    await this.refresh();
+    try {
+      const meta = await this.#kv.get<PrIndexMeta>(KV_PR_INDEX_META_KEY);
+      const attemptedAt = meta.value?.attemptedAt ?? null;
+      if (attemptedAt !== null && this.#now() - attemptedAt < this.#refreshMs) return;
+      await this.refresh();
+    } catch {
+      // PR 索引は補助情報。KV の異常でリクエストを 500 に落とさない
+    }
   }
 
   /**
@@ -561,6 +594,7 @@ export class PrIndexCache {
     }
     const fetchedAt = this.#now();
     const alive = new Set<number>();
+    let complete = true;
     try {
       for (const pr of fetched) {
         alive.add(pr.prNumber);
@@ -578,6 +612,8 @@ export class PrIndexCache {
         } catch {
           // KV の値の上限（64KiB）を超えるほど巨大な PR は書けない。その1件を飛ばして
           // 残りを更新する（`alive` には入れてあるので、既にある古い索引は消さない）。
+          // 全部は書けなかったので、fetchedAt は前回成功時のまま残す（下記 complete）
+          complete = false;
           continue;
         }
       }
@@ -590,10 +626,19 @@ export class PrIndexCache {
       await this.#markAttempt(startedAt);
       return;
     }
-    await this.#kv.set(
-      KV_PR_INDEX_META_KEY,
-      { fetchedAt, attemptedAt: startedAt } satisfies PrIndexMeta,
-    );
+    if (!complete) {
+      // 一部の PR を書けていないのに「今取れた」と示すと欠落が隠れる。試行だけ記録する
+      await this.#markAttempt(startedAt);
+      return;
+    }
+    try {
+      await this.#kv.set(
+        KV_PR_INDEX_META_KEY,
+        { fetchedAt, attemptedAt: startedAt } satisfies PrIndexMeta,
+      );
+    } catch {
+      // メタが書けなくても索引本体は更新済み。次のリクエストでまた試す
+    }
   }
 
   /** 取得を試みた事実だけを記録する（`fetchedAt` は前回成功したときのまま残す） */
@@ -985,8 +1030,16 @@ export class BoardServer {
       return jsonError(400, `paths は${CHECK_PATHS_MAX}件以内で指定してください`);
     }
     for (const item of raw) {
-      if (item.length > PATH_MAX) {
+      if ([...item].length > PATH_MAX) {
         return jsonError(400, `paths の要素は${PATH_MAX}文字以内で指定してください`);
+      }
+      if (isMachineAbsolutePath(item)) {
+        // 絶対パスは表明側と絶対に重ならず、200 が返るぶん壊れていることに気づけない。
+        // 黙って空の結果を返すより、相対化されていないことをここで知らせる
+        return jsonError(
+          400,
+          "paths は絶対パスではなく、リポジトリルートからの相対パスで指定してください（例: public/app.js）",
+        );
       }
     }
     const paths = normalizePaths(raw);
@@ -1151,6 +1204,11 @@ export async function main(): Promise<void> {
     htmlPath: htmlPath !== undefined && htmlPath !== "" ? htmlPath : undefined,
     accessLog: true,
   });
+  // PR 索引はタイマーで定期取得する（§9）。リクエスト側の refreshIfDue は、
+  // タイマーが不調でも索引が止まらないための保険として残る。
+  // refresh() は失敗しても例外を投げない（古いキャッシュで続行、§9）
+  void board.prIndexCache.refresh();
+  setInterval(() => void board.prIndexCache.refresh(), PR_INDEX_REFRESH_MS);
   Deno.serve({ port, hostname, onListen: () => {} }, (req, info) => {
     return board.handle(req, clientIp(req, info.remoteAddr.hostname));
   });

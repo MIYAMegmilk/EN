@@ -21,6 +21,7 @@ import { BoardGitHubClient, type FetchLike } from "./github.ts";
 import {
   anyPathOverlaps,
   BoardServer,
+  clientIp,
   normalizePath,
   normalizePaths,
   pathsOverlap,
@@ -555,6 +556,20 @@ Deno.test("表明: 空文字を送ると任意項目を消せる", async () => {
   });
 });
 
+Deno.test("表明: PATCH で member / sessionId を送っても書き換えられない（§7-1）", async () => {
+  await withBoard(async (ctx) => {
+    const claim = await createClaim(ctx, { sessionId: "s", title: "t" });
+    const res = await ctx.call("PATCH", `/api/claims/${claim.id}`, {
+      body: { member: "hiroshi", sessionId: "hijacked", title: "書き換え" },
+    });
+    assertEquals(res.status, 200);
+    const updated = ((await res.json()) as ClaimResponse).claim;
+    assertEquals(updated.member, ctx.memberId, "member は不変");
+    assertEquals(updated.sessionId, "s", "sessionId は不変");
+    assertEquals(updated.title, "書き換え");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // TTL の境界（§5）
 // ---------------------------------------------------------------------------
@@ -781,6 +796,42 @@ Deno.test("check: paths は複数回・カンマ区切りのどちらでも受�
   });
 });
 
+Deno.test("check: マシンの絶対パスは黙って空振りさせず400で知らせる", async () => {
+  await withBoard(async (ctx) => {
+    // フックが Claude Code のツール入力（絶対パス）を相対化せず送ってきた場合。
+    // 表明と絶対に重ならないのに 200 が返ると、壊れていることに誰も気づけない
+    const drive = await ctx.call(
+      "GET",
+      "/api/claims/check?paths=" + encodeURIComponent("C:\\intern\\PROJECT\\public\\app.js"),
+    );
+    assertEquals(drive.status, 400);
+    assertStringIncludes((await drive.json()).error, "相対パス");
+
+    const unc = await ctx.call(
+      "GET",
+      "/api/claims/check?paths=" + encodeURIComponent("\\\\server\\share\\a.ts"),
+    );
+    assertEquals(unc.status, 400);
+    await unc.body?.cancel();
+
+    // 先頭の / はリポジトリルート相対の書き方として通す
+    const rooted = await ctx.call("GET", "/api/claims/check?paths=/public/app.js");
+    assertEquals(rooted.status, 200);
+    const body = (await rooted.json()) as ClaimCheckResponse;
+    assertEquals(body.paths, ["public/app.js"]);
+  });
+});
+
+Deno.test("表明: paths にマシンの絶対パスを書くと400", async () => {
+  await withBoard(async (ctx) => {
+    const res = await ctx.call("POST", "/api/claims", {
+      body: { sessionId: "s", title: "t", paths: ["C:\\intern\\PROJECT\\a.ts"] },
+    });
+    assertEquals(res.status, 400);
+    assertStringIncludes((await res.json()).error, "相対パス");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // 秘密検出（§7-7）
 // ---------------------------------------------------------------------------
@@ -839,6 +890,19 @@ Deno.test("秘密検出: 接頭辞そのものへの言及は通す（誤検出�
       title: "ghp_ で始まる文字列を弾く処理を書く",
     });
     assertStringIncludes(claim.title, "ghp_");
+  });
+});
+
+Deno.test("秘密検出: paths にもトークンらしき文字列を書けない", async () => {
+  await withBoard(async (ctx) => {
+    const res = await ctx.call("POST", "/api/claims", {
+      body: { sessionId: "s", title: "t", paths: ["notes/ghp_0123456789abcdefghij.md"] },
+    });
+    assertEquals(res.status, 400);
+    assertStringIncludes((await res.json()).error, "秘密情報");
+    // 保存もされていない
+    const list = (await (await ctx.call("GET", "/api/claims")).json()) as ClaimListResponse;
+    assertEquals(list.claims, []);
   });
 });
 
@@ -989,7 +1053,7 @@ Deno.test("PR索引: GitHub から取得して返し、更新間隔の内は叩�
     assertEquals(body.prs[1].author, "chiikawa");
     assertEquals(body.fetchedAt, T0);
     const firstCallCount = calls.length;
-    assert(firstCallCount >= 3, "PR 一覧 + files の2件");
+    assert(firstCallCount >= 3, "PR 一覧 1 回 + PR ごとの files で 3 回以上");
 
     // 更新間隔の内なので GitHub は叩かない
     ctx.clock.now = T0 + 60_000;
@@ -1116,6 +1180,72 @@ Deno.test("メッセージ: 認証は通るが501を返す（PR コメント投�
     assertEquals(res.status, 501);
     assertStringIncludes((await res.json()).error, "まだ実装されていません");
   });
+});
+
+// ---------------------------------------------------------------------------
+// clientIp とアクセスログ（§7-4 / §7-8）
+// ---------------------------------------------------------------------------
+
+Deno.test("clientIp: x-forwarded-for は接続元が localhost のときだけ信頼する", () => {
+  const withXff = (value: string | null): Request => {
+    const headers = new Headers();
+    if (value !== null) headers.set("x-forwarded-for", value);
+    return new Request("http://board.test.local/api/claims", { headers });
+  };
+  // 直接アクセス: ヘッダーは偽装できるので無視し、TCP 接続元を使う
+  assertEquals(clientIp(withXff("1.2.3.4"), "203.0.113.50"), "203.0.113.50");
+  // Caddy 経由（localhost）: 先頭の値を使う
+  assertEquals(clientIp(withXff("1.2.3.4"), "127.0.0.1"), "1.2.3.4");
+  assertEquals(clientIp(withXff("1.2.3.4, 10.0.0.1"), "::1"), "1.2.3.4");
+  assertEquals(clientIp(withXff(" 1.2.3.4 , 10.0.0.1"), "127.0.0.1"), "1.2.3.4");
+  // ヘッダー無し・空: TCP 接続元にフォールバック
+  assertEquals(clientIp(withXff(null), "127.0.0.1"), "127.0.0.1");
+  assertEquals(clientIp(withXff(""), "127.0.0.1"), "127.0.0.1");
+  assertEquals(clientIp(withXff(",1.2.3.4"), "127.0.0.1"), "127.0.0.1");
+});
+
+Deno.test("アクセスログ: メンバー・時刻・メソッド・パスだけで、トークンを含まない（§7-4 / §11）", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const auth = new BoardAuth(kv);
+  const registered = await auth.registerMember("chiikawa", "ちいかわ");
+  assert(registered.ok);
+  const board = new BoardServer({ kv, auth, github: null, now: () => T0, accessLog: true });
+  const logged: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => {
+    logged.push(args.map(String).join(" "));
+  };
+  try {
+    const res = await board.handle(
+      new Request("http://board.test.local/api/claims?secretquery=1", {
+        headers: { authorization: `Bearer ${registered.token}` },
+      }),
+      IP,
+    );
+    assertEquals(res.status, 200);
+    await res.body?.cancel();
+    // 認証失敗はログに出さない（値を記録しない、§7-4）
+    const denied = await board.handle(
+      new Request("http://board.test.local/api/claims", {
+        headers: { authorization: "Bearer enboard_WRONGVALUE" },
+      }),
+      "198.51.100.77",
+    );
+    assertEquals(denied.status, 401);
+    await denied.body?.cancel();
+  } finally {
+    console.log = original;
+    board.dispose();
+    auth.dispose();
+    kv.close();
+  }
+  assertEquals(logged.length, 1, "成功した1回だけログが出る");
+  assertStringIncludes(logged[0], "chiikawa");
+  assertStringIncludes(logged[0], "GET /api/claims");
+  const tokenHash = await hashToken(registered.token);
+  assertFalse(logged[0].includes(registered.token), "トークンを出さない");
+  assertFalse(logged[0].includes(tokenHash), "ハッシュも出さない");
+  assertFalse(logged[0].includes("secretquery"), "クエリ文字列も出さない");
 });
 
 // ---------------------------------------------------------------------------
