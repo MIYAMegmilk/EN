@@ -64,6 +64,22 @@ function checkedRoomTagIds() {
     .map((el) => el.value);
 }
 
+/**
+ * createRoom を送る。#create ボタンでの手動作成と、entrance.html からの
+ * 自動作成（RoomHandoff、connect() の ws.onopen 参照）の両方から呼ぶ。
+ */
+function doCreateRoom({ nickname, visibility, roomName, description, tags }) {
+  state.rejoinAfterRestart = false;
+  const msg = { t: "createRoom", nickname, visibility };
+  if (visibility === "public") {
+    msg.roomName = roomName ?? "";
+    pendingRoomMeta = { description: description ?? "", tags: Array.isArray(tags) ? tags : [] };
+  } else {
+    pendingRoomMeta = null;
+  }
+  send(msg);
+}
+
 /** 卓作成の直後に説明文・タグを反映する。失敗しても卓自体は使えるので握りつぶしてエラー表示のみ行う */
 async function applyPendingRoomMeta(code, meta) {
   try {
@@ -303,6 +319,11 @@ function connect() {
       if (nickname.length > 0) msg.nickname = nickname;
       state.rejoinAfterRestart = afterRestart;
       send(msg);
+    } else {
+      // create-room.html から渡された「これから建てる卓」があれば自動で作成する。
+      // 再接続すべきセッションがある場合（上の if 分岐）はそちらを優先する
+      const pending = RoomHandoff.consumePendingCreateRoom();
+      if (pending !== null) doCreateRoom(pending);
     }
   };
   ws.onclose = (event) => {
@@ -1295,20 +1316,15 @@ function bind() {
     location.href = "/login.html";
   });
   $("create").addEventListener("click", () => {
-    state.rejoinAfterRestart = false;
     // 公開ルームはルーム名必須（§3.1）。一覧（rooms.js）に載るのはこちらだけ
     const visibility = $("visibility").value === "public" ? "public" : "private";
-    const msg = { t: "createRoom", nickname: $("nickname").value, visibility };
-    if (visibility === "public") {
-      msg.roomName = $("room-name").value;
-      pendingRoomMeta = {
-        description: $("room-description").value,
-        tags: checkedRoomTagIds(),
-      };
-    } else {
-      pendingRoomMeta = null;
-    }
-    send(msg);
+    doCreateRoom({
+      nickname: $("nickname").value,
+      visibility,
+      roomName: $("room-name").value,
+      description: $("room-description").value,
+      tags: checkedRoomTagIds(),
+    });
   });
   $("join").addEventListener("click", () => {
     pendingRoomMeta = null;

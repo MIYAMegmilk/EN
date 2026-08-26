@@ -119,8 +119,24 @@ const DEFAULT_GUEST_PROFILE: GuestProfileStub = {
   getGuestProfile: () => ({ nickname: "", tags: [] }),
 };
 
+type PendingCreateRoom = {
+  nickname: string;
+  visibility: "public" | "private";
+  roomName?: string;
+  description?: string;
+  tags: string[];
+};
+type RoomHandoffStub = { consumePendingCreateRoom: () => PendingCreateRoom | null };
+
+const DEFAULT_ROOM_HANDOFF: RoomHandoffStub = {
+  consumePendingCreateRoom: () => null,
+};
+
 /** app.js を偽の環境で読み込む */
-async function load(guestProfile: GuestProfileStub = DEFAULT_GUEST_PROFILE): Promise<Harness> {
+async function load(
+  guestProfile: GuestProfileStub = DEFAULT_GUEST_PROFILE,
+  roomHandoff: RoomHandoffStub = DEFAULT_ROOM_HANDOFF,
+): Promise<Harness> {
   FakeSocket.instances = [];
   const { elements, document } = createFakeDocument();
   const storage = new Map<string, string>();
@@ -144,6 +160,7 @@ async function load(guestProfile: GuestProfileStub = DEFAULT_GUEST_PROFILE): Pro
     "WebSocket",
     "sessionStorage",
     "GuestProfile",
+    "RoomHandoff",
     "location",
     "setTimeout",
     "clearTimeout",
@@ -166,6 +183,7 @@ async function load(guestProfile: GuestProfileStub = DEFAULT_GUEST_PROFILE): Pro
       removeItem: (key: string) => storage.delete(key),
     },
     guestProfile,
+    roomHandoff,
     { protocol: "http:", host: "127.0.0.1:8000", href: "" },
     (fn: () => void, ms: number) => {
       const id = timerSeq++;
@@ -493,4 +511,40 @@ Deno.test("app.js: 未ログインならゲストの一時あだ名を入室欄�
 Deno.test("app.js: ゲストの一時あだ名が空なら入室欄も空のまま", async () => {
   const h = await load();
   assertEquals(h.elements.get("nickname")?.value, "");
+});
+
+Deno.test("app.js: 保留中の卓作成があれば接続確立時に自動で createRoom を送る", async () => {
+  const pending: PendingCreateRoom = {
+    nickname: "ホスト太郎",
+    visibility: "public",
+    roomName: "金曜の会",
+    description: "今夜は焼酎の会です",
+    tags: ["drink"],
+  };
+  const h = await load(DEFAULT_GUEST_PROFILE, { consumePendingCreateRoom: () => pending });
+  h.socket().open();
+  const sent = h.socket().parsedSent();
+  assertEquals(sent.length, 1);
+  assertEquals(sent[0].t, "createRoom");
+  assertEquals(sent[0].nickname, "ホスト太郎");
+  assertEquals(sent[0].visibility, "public");
+  assertEquals(sent[0].roomName, "金曜の会");
+});
+
+Deno.test("app.js: 保留中の卓作成が無ければ接続確立時に何も送らない", async () => {
+  const h = await load(DEFAULT_GUEST_PROFILE, { consumePendingCreateRoom: () => null });
+  h.socket().open();
+  assertEquals(h.socket().parsedSent().length, 0);
+});
+
+Deno.test("app.js: 再接続すべきセッションがある場合は卓の自動作成より join を優先する", async () => {
+  const h = await load(DEFAULT_GUEST_PROFILE, {
+    consumePendingCreateRoom: () => ({ nickname: "x", visibility: "private", tags: [] }),
+  });
+  h.storage.set("en-session", JSON.stringify({ code: "654321", session: "sess-xyz" }));
+  h.socket().open();
+  const sent = h.socket().parsedSent();
+  assertEquals(sent.length, 1);
+  assertEquals(sent[0].t, "join");
+  assertEquals(sent[0].roomCode, "654321");
 });
