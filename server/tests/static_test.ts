@@ -149,3 +149,39 @@ Deno.test("index.html: プロフィールリンクが profile.html を指して�
     kv.close();
   }
 });
+
+Deno.test("create-room.html: 卓作成フォームの各要素が存在する", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/create-room.html`);
+    assertEquals(res.status, 200);
+    const html = await res.text();
+    assert(html.includes('id="create-room-nickname"'), "あだ名入力欄が必要です");
+    assert(html.includes('id="create-room-name"'), "卓名入力欄が必要です");
+    assert(html.includes('id="create-room-description"'), "説明文入力欄が必要です");
+    assert(html.includes('id="create-room-tags"'), "タグ一覧を描画するコンテナが必要です");
+    assert(html.includes('id="create-room-visibility"'), "公開設定の選択欄が必要です");
+    assert(html.includes('id="create-room-submit"'), "建てるボタンが必要です");
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("create-room.html: room-handoff.js が create-room.js より前に読み込まれる", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/create-room.html`);
+    const html = await res.text();
+    const handoffIndex = html.indexOf("room-handoff.js");
+    const scriptIndex = html.indexOf("create-room.js");
+    assert(handoffIndex >= 0, "room-handoff.js の読み込みが必要です");
+    assert(scriptIndex >= 0, "create-room.js の読み込みが必要です");
+    assert(handoffIndex < scriptIndex, "room-handoff.js は create-room.js より前に読み込む必要があります");
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
