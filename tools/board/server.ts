@@ -142,7 +142,7 @@ const HTML_SECURITY_HEADERS: ReadonlyArray<[string, string]> = [
       "default-src 'none'",
       "connect-src 'self'",
       "style-src 'unsafe-inline'",
-      "script-src 'sha256-OVTcZldVFAY84De7bZ+QjtYS5OhcO0FIoLeTdt9zRc8='",
+      "script-src 'sha256-G5bK6EgVQu9/YPcy6TlKfemSESkUsTYVzHdoUkKx210='",
       "base-uri 'none'",
       "form-action 'none'",
       "frame-ancestors 'none'",

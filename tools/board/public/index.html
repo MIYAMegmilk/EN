@@ -12,12 +12,15 @@
 
       CSP: 外部からは何も読み込まない（default-src 'none'）。インラインの script は
       ハッシュで1本だけ許可する。**中身を1文字でも書き換えたらハッシュも更新すること。**
-      tools/board/ui_test.ts が照合していて、ずれると失敗し、正しい値を表示する。
+      ハッシュは2箇所にある。下の <meta> と、tools/board/server.ts の
+      HTML_SECURITY_HEADERS（ヘッダー側の CSP）。**両方を直さないと画面が動かない。**
+      tools/board/ui_test.ts と server_test.ts が照合していて、
+      ずれると失敗し、正しい値を表示する。
       style は EN 本体と同じ流儀で 'unsafe-inline' を許す（assets/en.css の方針に揃える）。
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; connect-src 'self'; style-src 'unsafe-inline'; script-src 'sha256-OVTcZldVFAY84De7bZ+QjtYS5OhcO0FIoLeTdt9zRc8='; base-uri 'none'; form-action 'none'"
+      content="default-src 'none'; connect-src 'self'; style-src 'unsafe-inline'; script-src 'sha256-G5bK6EgVQu9/YPcy6TlKfemSESkUsTYVzHdoUkKx210='; base-uri 'none'; form-action 'none'"
     />
     <title>作業ボード</title>
     <style>
@@ -356,6 +359,10 @@
         min-width: 200px;
       }
 
+      .gate-remember {
+        margin-top: 10px;
+      }
+
       .check {
         display: inline-flex;
         align-items: center;
@@ -596,9 +603,8 @@
       <section id="gate" class="card block">
         <h1>ボードのトークン</h1>
         <p class="lead">
-          自分のトークンを入力してください。トークンはこのタブを閉じるまでだけ保持し、
-          URL にも記録にも残しません（共用 PC
-          に残らないようにするためです）。
+          自分のトークンを入力してください。トークンは URL
+          にも記録にも残しません。
         </p>
         <form id="gate-form" class="row">
           <label for="gate-token" class="sr-only">ボードのトークン</label>
@@ -611,6 +617,15 @@
           />
           <button id="gate-submit" class="btn btn-gold" type="submit">接続</button>
         </form>
+        <label class="check gate-remember">
+          <input id="gate-remember" type="checkbox" checked />
+          この端末に記憶する
+        </label>
+        <p class="hint">
+          入れておくと、次にこの端末で開いたときは入力が要りません。
+          外すと、いまのタブを閉じた時点で忘れます（共用 PC
+          ではこちら）。
+        </p>
         <p id="gate-error" class="alert" role="alert"></p>
       </section>
 
@@ -720,8 +735,73 @@
       "use strict";
 
       (function () {
-        /** トークンの置き場。タブを閉じたら消える記憶にだけ置く（§7-6） */
+        /** トークンの置き場。キーは localStorage / sessionStorage で共通 */
         const STORAGE_KEY = "board-token";
+
+        /*
+         * トークンの覚え方（設計書 §7-6 の方針変更）。
+         *
+         * もとは sessionStorage だけに置いていた（共用 PC に残さないため）が、
+         * このボードが持つのは「誰が何を作っているか」だけで、
+         * タブを閉じるたびに 51 文字を貼り直させるほどの中身ではない。
+         * そこで既定は localStorage（この端末に残る）にし、
+         * 残したくない人が「この端末に記憶する」を外せば
+         * 従来どおりそのタブだけの記憶（sessionStorage）に戻せるようにした。
+         *
+         * どちらに入れたかは覚えていられないので、読み出しは必ず両方を見る。
+         * 消すときも必ず両方から消す（片方に古いトークンが残ると、
+         * 「トークンを変更」しても次に開いたとき元に戻ってしまう）。
+         */
+
+        /** 記憶そのもの。ブラウザの設定によっては触れないので、その場合は null */
+        function storeOf(remember) {
+          try {
+            return remember === true ? localStorage : sessionStorage;
+          } catch {
+            return null;
+          }
+        }
+
+        /** 覚えたトークンを、両方の記憶から消す */
+        function forgetToken() {
+          for (const remember of [true, false]) {
+            const store = storeOf(remember);
+            if (store === null) continue;
+            try {
+              store.removeItem(STORAGE_KEY);
+            } catch {
+              /* 消せなくても、画面の側では持たない */
+            }
+          }
+        }
+
+        /** トークンを片方の記憶に入れる。もう片方には残さない */
+        function saveToken(token, remember) {
+          forgetToken();
+          const store = storeOf(remember);
+          if (store === null) return;
+          try {
+            store.setItem(STORAGE_KEY, token);
+          } catch {
+            /* 覚えられなくても、このタブでは使える */
+          }
+        }
+
+        /** 前に覚えたトークン。どちらに入れたかも返す（無ければ null） */
+        function loadToken() {
+          for (const remember of [true, false]) {
+            const store = storeOf(remember);
+            if (store === null) continue;
+            let saved = null;
+            try {
+              saved = store.getItem(STORAGE_KEY);
+            } catch {
+              saved = null;
+            }
+            if (typeof saved === "string" && saved.length > 0) return { token: saved, remember };
+          }
+          return null;
+        }
 
         /**
          * 自動更新の間隔。PR 索引はサーバー側が5分ごとに取り直す（§9）ので、
@@ -746,6 +826,7 @@
           gate: $("gate"),
           gateForm: $("gate-form"),
           gateToken: $("gate-token"),
+          gateRemember: $("gate-remember"),
           gateSubmit: $("gate-submit"),
           gateError: $("gate-error"),
 
@@ -1351,7 +1432,7 @@
           state.prs = [];
           state.prsFetchedAt = null;
           state.lastUpdatedAt = null;
-          sessionStorage.removeItem(STORAGE_KEY);
+          forgetToken();
           els.gateToken.value = "";
           clear(els.claimsList);
           clear(els.tasksList);
@@ -1361,22 +1442,25 @@
 
         /** トークンで繋いでみる。通ればボードを出し、自動更新を始める */
         async function connect(token) {
+          // 記憶の先は、押した時点のチェックの入りきりで決める
+          const remember = els.gateRemember.checked === true;
           state.token = token;
           els.gateSubmit.disabled = true;
           try {
             const res = await api("/api/claims");
             if (isUnauthorized(res)) {
               state.token = null;
-              sessionStorage.removeItem(STORAGE_KEY);
+              forgetToken();
               showGate("トークンが違います。");
               return;
             }
             if (!res.ok) {
+              // 繋がらなかっただけなので、覚えているぶんはそのままにする
               state.token = null;
               showGate("サーバーに繋がりません。時間をおいて試してください。");
               return;
             }
-            sessionStorage.setItem(STORAGE_KEY, token);
+            saveToken(token, remember);
             showBoard();
             await refreshAll();
             startTimer();
@@ -1455,12 +1539,15 @@
         function boot() {
           updateAutoRefreshUi();
           renderFetchedAt();
-          const saved = sessionStorage.getItem(STORAGE_KEY);
-          if (typeof saved === "string" && saved.length > 0) {
-            connect(saved);
-          } else {
+          const saved = loadToken();
+          if (saved === null) {
             showGate("");
+            return;
           }
+          // 前に選んだ置き場をチェックに映してから繋ぐ（connect がこれを見る）
+          els.gateRemember.checked = saved.remember;
+          // 返り値は画面では使わない。ui_test.ts が繋ぎ終わりを待つために返す
+          return connect(saved.token);
         }
 
         // tools/board/ui_test.ts はこの1行を差し替えて中身を取り出す（触るときは向こうも直す）

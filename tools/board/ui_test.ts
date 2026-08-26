@@ -116,13 +116,28 @@ Deno.test("index.html: 外部ファイルに分かれていない（1ファイ�
 
 // ── ④ トークンの扱い（§7-4 / §7-6） ───────────────────
 
-Deno.test("index.html: トークンはタブを閉じたら消える記憶にだけ置く", () => {
-  assertStringIncludes(scriptSource, "sessionStorage.setItem");
-  // 共用 PC に残る保存方式は使わない（設計書 §7-6）
-  assertFalse(
-    htmlSource.includes("localStorage"),
-    "タブを閉じても残る保存方式を使っている（§7-6 違反）",
+Deno.test("index.html: 記憶する先は「この端末に記憶する」で選べる", () => {
+  /*
+   * 方針変更（もとは sessionStorage だけ）。
+   * 毎回トークンを貼り直す手間が、このボードの中身（誰が何を作っているか）に
+   * 見合わないため、既定は localStorage にした。共用 PC 向けの逃げ道として
+   * sessionStorage も残してあることを、両方の名前で確かめる。
+   */
+  assertStringIncludes(scriptSource, "localStorage");
+  assertStringIncludes(scriptSource, "sessionStorage");
+  // チェックは入力欄の下にあり、既定で入っている
+  const gateRemember = /<input\s+id="gate-remember"\s+type="checkbox"\s+checked\s*\/>/;
+  assert(
+    gateRemember.test(markupSource.replace(/\s+/g, " ").replace(/ \/>/g, " />")),
+    "「この端末に記憶する」のチェックが無いか、既定で入っていない",
   );
+  assertStringIncludes(markupSource, "この端末に記憶する");
+  assert(
+    markupSource.indexOf('id="gate-token"') < markupSource.indexOf('id="gate-remember"'),
+    "チェックが入力欄より上にある",
+  );
+  // 置き場を読むのも消すのも、必ず両方を回る
+  assertStringIncludes(scriptSource, "for (const remember of [true, false])");
 });
 
 Deno.test("index.html: トークンを画面にも URL にも記録にも出さない", () => {
@@ -330,6 +345,8 @@ type Ui = {
   pathsOverlap: (a: unknown, b: unknown) => boolean;
   connect: (token: string) => Promise<void>;
   refreshAll: () => Promise<void>;
+  dropToken: (message: string) => void;
+  boot: () => Promise<void> | void;
   POLL_MS: number;
 };
 
@@ -346,6 +363,8 @@ const INTERNALS = `
           pathsOverlap,
           connect,
           refreshAll,
+          dropToken,
+          boot,
           POLL_MS,
         };
 `;
@@ -358,7 +377,12 @@ type Harness = {
   doc: { hidden: boolean; dispatch: (type: string, event: unknown) => void };
   timers: Set<number>;
   calls: FetchCall[];
-  storage: Map<string, string>;
+  /** この端末に残る記憶（localStorage） */
+  local: Map<string, string>;
+  /** このタブだけの記憶（sessionStorage） */
+  session: Map<string, string>;
+  /** 要素に付いたハンドラを呼ぶ（fake_dom の addEventListener は受け流すので差し替えてある） */
+  fire: (el: FakeElement, type: string, event?: unknown) => void;
 };
 
 /** 応答の作り方。パスごとに { status, body } を返す */
@@ -368,7 +392,7 @@ type Responder = (path: string) => { status: number; body: unknown } | "throw";
  * インラインの JavaScript を、偽の DOM・記憶・通信の上で動かす。
  * 起動（boot）は走らせず、内部を受け取ってからテストが好きに呼ぶ。
  */
-function loadUi(respond: Responder): Harness {
+function loadUi(respond: Responder, brokenStorage = false): Harness {
   assert(scriptSource.includes(BOOT_CALL), "boot() の呼び出しが見つからない（差し替えられない）");
   assert(scriptSource.includes(IIFE_OPEN), "即時関数の書き出しが変わっている");
   const body = scriptSource
@@ -376,18 +400,61 @@ function loadUi(respond: Responder): Harness {
     .replace(BOOT_CALL, INTERNALS) + "\nreturn __ui;\n";
 
   const base = createFakeDocument();
-  const doc = { ...base.document, hidden: false };
 
-  const storage = new Map<string, string>();
-  const fakeStorage = {
-    getItem: (key: string) => storage.get(key) ?? null,
-    setItem: (key: string, value: string) => {
-      storage.set(key, value);
-    },
-    removeItem: (key: string) => {
-      storage.delete(key);
-    },
+  /*
+   * fake_dom.ts の FakeElement.addEventListener は受け流すだけなので、
+   * 「トークンを変更」を押す・チェックを切り替えるといった操作を試せない。
+   * fake_dom.ts は他の担当のファイルなので触らず、ここで受け口だけ差し替える。
+   */
+  const handlers = new Map<FakeElement, Map<string, ((event: unknown) => void)[]>>();
+  function withListeners(el: FakeElement): FakeElement {
+    if (!handlers.has(el)) {
+      const bucket = new Map<string, ((event: unknown) => void)[]>();
+      handlers.set(el, bucket);
+      (el as unknown as {
+        addEventListener: (type: string, handler: (event: unknown) => void) => void;
+      }).addEventListener = (type, handler) => {
+        const list = bucket.get(type) ?? [];
+        list.push(handler);
+        bucket.set(type, list);
+      };
+    }
+    return el;
+  }
+  const fire = (el: FakeElement, type: string, event: unknown = { preventDefault: () => {} }) => {
+    for (const handler of handlers.get(el)?.get(type) ?? []) handler(event);
   };
+
+  const doc = {
+    ...base.document,
+    hidden: false,
+    getElementById: (id: string) => withListeners(base.document.getElementById(id)),
+  };
+
+  /**
+   * localStorage / sessionStorage の最小限の偽物。中身はテストから覗ける。
+   * brokenStorage なら、本物が記憶を禁じられているとき（プライベート窓・
+   * サイトデータの遮断）と同じく、呼ぶたびに例外を投げる。
+   */
+  function makeStorage(box: Map<string, string>) {
+    if (brokenStorage) {
+      const deny = () => {
+        throw new Error("storage is not available");
+      };
+      return { getItem: deny, setItem: deny, removeItem: deny };
+    }
+    return {
+      getItem: (key: string) => box.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        box.set(key, value);
+      },
+      removeItem: (key: string) => {
+        box.delete(key);
+      },
+    };
+  }
+  const local = new Map<string, string>();
+  const session = new Map<string, string>();
 
   const calls: FetchCall[] = [];
   const fakeFetch = (path: string, init: FetchCall["init"]) => {
@@ -414,14 +481,24 @@ function loadUi(respond: Responder): Harness {
 
   const factory = new Function(
     "document",
+    "localStorage",
     "sessionStorage",
     "fetch",
     "setInterval",
     "clearInterval",
     body,
   );
-  const ui = factory(doc, fakeStorage, fakeFetch, fakeSetInterval, fakeClearInterval) as Ui;
-  return { ui, doc, timers, calls, storage };
+  const ui = factory(
+    doc,
+    makeStorage(local),
+    makeStorage(session),
+    fakeFetch,
+    fakeSetInterval,
+    fakeClearInterval,
+  ) as Ui;
+  // 起動と同じく、チェックは既定で入っている（HTML の checked に合わせる）
+  ui.els.gateRemember.checked = true;
+  return { ui, doc, timers, calls, local, session, fire };
 }
 
 /** 木をたどって、出てきた要素の tagName をすべて集める */
@@ -596,7 +673,7 @@ Deno.test("画面: トークンはヘッダにだけ載り、URL には出ない
     assertFalse(call.path.includes("secret-token-value"), "URL にトークンが載っている");
     assertEquals(call.init.headers.authorization, "Bearer secret-token-value");
   }
-  assertEquals(h.storage.get("board-token"), "secret-token-value");
+  assertEquals(h.local.get("board-token"), "secret-token-value");
   assert(h.ui.els.board.className.includes("hidden") === false, "ボードが出ていない");
   assert(h.ui.els.gate.className.includes("hidden"), "入力欄が残っている");
 });
@@ -605,7 +682,8 @@ Deno.test("画面: トークンが通らなければ捨てて、入力欄に戻�
   const h = loadUi(() => ({ status: 401, body: { error: "unauthorized" } }));
   await h.ui.connect("wrong-token");
   assertEquals(h.ui.state.token, null);
-  assertEquals(h.storage.has("board-token"), false, "通らなかったトークンを覚えている");
+  assertEquals(h.local.has("board-token"), false, "通らなかったトークンを覚えている");
+  assertEquals(h.session.has("board-token"), false, "通らなかったトークンを覚えている");
   assert(h.ui.els.gate.className.includes("hidden") === false, "入力欄に戻っていない");
   assertEquals(h.ui.els.gateError.textContent, "トークンが違います。");
 });
@@ -615,7 +693,8 @@ Deno.test("画面: 通信に失敗しても画面が壊れない", async () => {
   await h.ui.connect("token");
   // 例外が飛ばずにここまで来ること自体がテスト。トークンは覚えない
   assertEquals(h.ui.state.token, null);
-  assertEquals(h.storage.has("board-token"), false);
+  assertEquals(h.local.has("board-token"), false);
+  assertEquals(h.session.has("board-token"), false);
   assertStringIncludes(h.ui.els.gateError.textContent, "サーバーに繋がりません");
 });
 
@@ -637,6 +716,128 @@ Deno.test("画面: 一部の取得だけ失敗しても、取れたぶんは出�
   assertEquals(h.ui.els.claimsList.children.length, 1, "表明が出ていない");
   assertEquals(h.ui.els.tasksList.children.length, 1, "タスクが出ていない");
   assertStringIncludes(h.ui.els.prsError.textContent, "サーバーに繋がりません");
+});
+
+// ── トークンの覚え方（「この端末に記憶する」） ─────────────────
+
+/** 保存済みのトークンから読み直す。前のタブを閉じて開き直したのと同じこと */
+function reopen(h: Harness, respond: Responder): Harness {
+  const next = loadUi(respond);
+  for (const [key, value] of h.local) next.local.set(key, value);
+  for (const [key, value] of h.session) next.session.set(key, value);
+  return next;
+}
+
+Deno.test("画面: 既定では、この端末に残る記憶に覚える", async () => {
+  const h = loadUi(okResponder);
+  assertEquals(h.ui.els.gateRemember.checked, true, "既定でチェックが入っていない");
+  await h.ui.connect("remembered-token");
+  assertEquals(h.local.get("board-token"), "remembered-token");
+  assertEquals(h.session.has("board-token"), false, "タブだけの記憶にも二重に入れている");
+});
+
+Deno.test("画面: チェックを外すと、そのタブだけの記憶に覚える", async () => {
+  const h = loadUi(okResponder);
+  h.ui.els.gateRemember.checked = false;
+  await h.ui.connect("tab-only-token");
+  assertEquals(h.session.get("board-token"), "tab-only-token");
+  assertEquals(h.local.has("board-token"), false, "この端末に残してしまっている");
+});
+
+Deno.test("画面: 一度覚えたら、次に開いたときは入力が要らない", async () => {
+  const first = loadUi(okResponder);
+  await first.ui.connect("kept-token");
+  assertEquals(first.local.get("board-token"), "kept-token");
+
+  // 開き直す: 入力欄には触れず、覚えていたトークンで繋がること
+  const second = reopen(first, okResponder);
+  await second.ui.boot();
+  assertEquals(second.ui.state.token, "kept-token");
+  assertEquals(second.ui.els.gateRemember.checked, true, "前に選んだ置き場を映していない");
+  assert(second.ui.els.board.className.includes("hidden") === false, "ボードが出ていない");
+  for (const call of second.calls) {
+    assertEquals(call.init.headers.authorization, "Bearer kept-token");
+  }
+});
+
+Deno.test("画面: タブだけの記憶に入れたぶんも、読み出しでは拾う", async () => {
+  const first = loadUi(okResponder);
+  first.ui.els.gateRemember.checked = false;
+  await first.ui.connect("tab-only-token");
+  assertEquals(first.session.get("board-token"), "tab-only-token");
+
+  const second = reopen(first, okResponder);
+  await second.ui.boot();
+  assertEquals(second.ui.state.token, "tab-only-token");
+  // 前に外していたチェックは、外れたまま出る
+  assertEquals(second.ui.els.gateRemember.checked, false, "前に選んだ置き場を映していない");
+});
+
+Deno.test("画面: 覚え方を変えても、古いほうに残らない", async () => {
+  const h = loadUi(okResponder);
+  await h.ui.connect("token-a");
+  assertEquals(h.local.get("board-token"), "token-a");
+
+  // 同じタブで「トークンを変更」してから、今度はチェックを外して入れ直す
+  h.fire(h.ui.els.tokenChange, "click");
+  h.ui.els.gateRemember.checked = false;
+  await h.ui.connect("token-b");
+  assertEquals(h.session.get("board-token"), "token-b");
+  assertEquals(h.local.has("board-token"), false, "この端末に古いトークンが残っている");
+});
+
+Deno.test("画面: 「トークンを変更」で、両方の記憶から消える", async () => {
+  const h = loadUi(okResponder);
+  await h.ui.connect("token-a");
+  // 片方にしか入らない作りだが、取りこぼしが無いことを見るため両方に置いておく
+  h.local.set("board-token", "token-a");
+  h.session.set("board-token", "token-a");
+
+  h.fire(h.ui.els.tokenChange, "click");
+  assertEquals(h.ui.state.token, null);
+  assertEquals(h.local.has("board-token"), false, "この端末の記憶に残っている");
+  assertEquals(h.session.has("board-token"), false, "タブの記憶に残っている");
+  assertEquals(h.ui.els.gateToken.value, "", "入力欄に残っている");
+  assert(h.ui.els.gate.className.includes("hidden") === false, "入力欄に戻っていない");
+
+  // 開き直しても戻ってこない
+  const second = reopen(h, okResponder);
+  await second.ui.boot();
+  assertEquals(second.ui.state.token, null);
+});
+
+Deno.test("画面: 401 を受けたら、両方の記憶から消える", async () => {
+  // 繋いだあとに通らなくなる（トークンが作り直された等）
+  let unauthorized = false;
+  const h = loadUi((path) => (unauthorized ? { status: 401, body: null } : okResponder(path)));
+  await h.ui.connect("token-a");
+  assertEquals(h.local.get("board-token"), "token-a");
+  h.session.set("board-token", "token-a");
+
+  unauthorized = true;
+  await h.ui.refreshAll();
+  assertEquals(h.ui.state.token, null);
+  assertEquals(h.local.has("board-token"), false, "この端末の記憶に残っている");
+  assertEquals(h.session.has("board-token"), false, "タブの記憶に残っている");
+  assertStringIncludes(h.ui.els.gateError.textContent, "もう一度入力してください");
+});
+
+Deno.test("画面: 403 でも、両方の記憶から消える", () => {
+  const h = loadUi(okResponder);
+  h.local.set("board-token", "token-a");
+  h.session.set("board-token", "token-a");
+  // dropToken は 401 / 403 の両方から呼ばれる（isUnauthorized が同じ扱い）
+  assertStringIncludes(scriptSource, "res.status === 401 || res.status === 403");
+  h.ui.dropToken("");
+  assertEquals(h.local.has("board-token"), false);
+  assertEquals(h.session.has("board-token"), false);
+});
+
+Deno.test("画面: 記憶に触れない環境でも、画面は動く", async () => {
+  const h = loadUi(okResponder, true);
+  await h.ui.connect("token-a");
+  assertEquals(h.ui.state.token, "token-a", "覚えられないだけで、このタブでは使えるはず");
+  assert(h.ui.els.board.className.includes("hidden") === false, "ボードが出ていない");
 });
 
 // ── 自動更新 ───────────────────────────────────────
