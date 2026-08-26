@@ -15,6 +15,13 @@ import { createCorridorView } from "/assets/3d/corridor-view.js";
 const POLL_MS = 10_000;
 const TIMEOUT_MS = 5_000;
 
+/**
+ * 歩いていると判定する1フレームあたりの移動量。
+ * corridor-view の速度上限は 3.2/秒なので、60fps なら全速で 0.053 前後になる。
+ * 0.002（≒0.12/秒）を境にすると、減速しきる直前まで足音が続いて自然に止まる。
+ */
+const WALK_EPSILON = 0.002;
+
 const $ = (id) => document.getElementById(id);
 const els = {
   stage: $("stage"),
@@ -125,7 +132,31 @@ async function refresh() {
   }
 }
 
+/**
+ * 歩いている間だけ足音を鳴らす。
+ *
+ * corridor-view は「歩き出した／止まった」を外へ知らせないので、公開されている
+ * position を毎フレーム見て自分で判定する。3D 側に手を入れずに済ませるための形。
+ */
+function followFootsteps(view) {
+  let last = view.position;
+  const tick = () => {
+    const now = view.position;
+    const moved = Math.hypot(now.x - last.x, now.z - last.z);
+    last = now;
+    Sound.setWalking(moved > WALK_EPSILON);
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
 async function main() {
+  // 廊下にいる間ずっと店のざわめきを流す。3D が使えない環境でも、この画面に
+  // 立ち寄ったことは同じなので WebGL の判定より先に鳴らし始める
+  Sound.bindButtons();
+  Sound.mountControls();
+  Sound.loop("gaya", { volume: Sound.GAYA_CORRIDOR });
+
   if (globalThis.WebGLRenderingContext === undefined) {
     showError("この環境では 3D 表示を使えません。卓の一覧からお選びください。");
     return;
@@ -141,6 +172,8 @@ async function main() {
     showError(`廊下を読み込めませんでした：${err instanceof Error ? err.message : String(err)}`);
     return;
   }
+
+  followFootsteps(view);
 
   // 見え方を確かめるための窓口。サンプル表示のときだけ生やす。
   if (useDemoData()) globalThis.__corridorView = view;
