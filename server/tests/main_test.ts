@@ -2,7 +2,7 @@
  * server/main.ts のテスト。
  * /api/ice が TURN 認証情報の有無で正しく応答を変えることを確認する（§3.6 / §3.8）。
  * §6: 本番はリバースプロキシ経由のため、TCP接続元だけでは実クライアントIPが分からない。
- * clientIp は X-Forwarded-For を優先して実クライアントIPを判定する。
+ * clientIp は X-Forwarded-For を**右端から**数えて実クライアントIPを判定する（監査 H-2）。
  * /api/rooms は稼働中の公開ルームだけを返す（§2 / §4.0）。
  * asC2S は types.ts の C2S 型と同じ t を受理しなければならない（§4.1、末尾の照合テスト）。
  */
@@ -12,8 +12,11 @@ import {
   asC2S,
   C2S_TYPES,
   clientIp,
+  DEFAULT_TRUSTED_PROXY_HOPS,
   MessageRateLimiter,
+  parseTrustedProxyHops,
   startServer,
+  trustedProxyHops,
   useKuromojiSenryu,
 } from "../main.ts";
 import type { ClientLink } from "../rooms.ts";
@@ -119,44 +122,177 @@ Deno.test("/api/ice: GET 以外は 405", async () => {
   assertEquals(res.headers.get("allow"), "GET");
 });
 
-Deno.test("clientIp: X-Forwarded-For があれば先頭のIPを使う（リバースプロキシ配下）", () => {
-  const req = new Request("http://example.com/", {
-    headers: { "x-forwarded-for": "203.0.113.5, 10.0.0.1" },
-  });
-  assertEquals(clientIp(req, "127.0.0.1"), "203.0.113.5");
+// ---------------------------------------------------------------------------
+// clientIp（§3.8 レート制限のキー / 監査 H-2 の回帰）
+//
+// X-Forwarded-For は「左ほど古い」ヘッダーで、左端は送信者が名乗った値＝偽装し放題。
+// 本番は Caddy が既定でクライアントの値を**追記**するため、届くヘッダーは
+// 「攻撃者の値, 本物のIP」になる。左端を採ると偽装でレート制限を回避できるので、
+// clientIp は右端から hops 段目（既定1＝右端）を採る。
+// ---------------------------------------------------------------------------
+
+/** x-forwarded-for だけを載せたリクエスト。value が null ならヘッダーを付けない */
+function reqWithXff(value: string | null): Request {
+  return new Request(
+    "http://example.com/",
+    value === null ? undefined : { headers: { "x-forwarded-for": value } },
+  );
+}
+
+Deno.test("clientIp: X-Forwarded-For は右端の1件を使う（プロキシが追記した本物のIP）", () => {
+  // Caddy が追記した形。左端はクライアントが名乗った値なので信じない
+  assertEquals(clientIp(reqWithXff("10.0.0.1, 203.0.113.5"), "127.0.0.1"), "203.0.113.5");
+});
+
+Deno.test("clientIp: 左端を偽装してもキーは変わらない（監査H-2の回帰）", () => {
+  // 攻撃者が毎回別のIPを名乗っても、プロキシが追記した右端は変わらない
+  const keys = new Set<string>();
+  for (let i = 0; i < 15; i++) {
+    keys.add(clientIp(reqWithXff(`1.2.3.${i}, 198.51.100.7`), "127.0.0.1"));
+  }
+  assertEquals([...keys], ["198.51.100.7"]);
+});
+
+Deno.test("clientIp: 単一要素の X-Forwarded-For はその値を使う", () => {
+  assertEquals(clientIp(reqWithXff("203.0.113.5"), "127.0.0.1"), "203.0.113.5");
 });
 
 Deno.test("clientIp: X-Forwarded-For が無ければ TCP 接続元を使う", () => {
-  const req = new Request("http://example.com/");
-  assertEquals(clientIp(req, "127.0.0.1"), "127.0.0.1");
+  assertEquals(clientIp(reqWithXff(null), "127.0.0.1"), "127.0.0.1");
 });
 
 Deno.test("clientIp: 空文字の X-Forwarded-For は TCP 接続元にフォールバックする", () => {
-  const req = new Request("http://example.com/", {
-    headers: { "x-forwarded-for": "" },
-  });
-  assertEquals(clientIp(req, "127.0.0.1"), "127.0.0.1");
+  assertEquals(clientIp(reqWithXff(""), "127.0.0.1"), "127.0.0.1");
 });
 
-Deno.test("clientIp: 先頭要素の前後の空白を取り除く", () => {
-  const req = new Request("http://example.com/", {
-    headers: { "x-forwarded-for": "  203.0.113.5  , 10.0.0.1" },
-  });
-  assertEquals(clientIp(req, "127.0.0.1"), "203.0.113.5");
+Deno.test("clientIp: 採る要素の前後の空白を取り除く", () => {
+  assertEquals(clientIp(reqWithXff("10.0.0.1 ,  203.0.113.5  "), "127.0.0.1"), "203.0.113.5");
+});
+
+Deno.test("clientIp: 末尾が空の要素（カンマ止め）は TCP 接続元にフォールバックする", () => {
+  assertEquals(clientIp(reqWithXff("203.0.113.5,"), "127.0.0.1"), "127.0.0.1");
+  assertEquals(clientIp(reqWithXff("203.0.113.5, "), "127.0.0.1"), "127.0.0.1");
 });
 
 Deno.test("clientIp: ::1 からの接続も信頼済みプロキシとして扱う", () => {
-  const req = new Request("http://example.com/", {
-    headers: { "x-forwarded-for": "203.0.113.5" },
-  });
-  assertEquals(clientIp(req, "::1"), "203.0.113.5");
+  assertEquals(clientIp(reqWithXff("10.0.0.1, 203.0.113.5"), "::1"), "203.0.113.5");
 });
 
-Deno.test("clientIp: プロキシ（localhost）以外からの直接接続は X-Forwarded-For を偽装されても無視する", () => {
-  const req = new Request("http://example.com/", {
-    headers: { "x-forwarded-for": "203.0.113.5" },
-  });
-  assertEquals(clientIp(req, "198.51.100.9"), "198.51.100.9");
+Deno.test("clientIp: プロキシ（localhost）以外からの直接接続は X-Forwarded-For を一切見ない", () => {
+  assertEquals(clientIp(reqWithXff("203.0.113.5"), "198.51.100.9"), "198.51.100.9");
+  assertEquals(clientIp(reqWithXff("10.0.0.1, 203.0.113.5"), "198.51.100.9"), "198.51.100.9");
+  // 段数を増やしても、信頼できない接続元では読まない
+  assertEquals(clientIp(reqWithXff("10.0.0.1, 203.0.113.5"), "203.0.113.9", 2), "203.0.113.9");
+});
+
+// --- 段数（EN_TRUSTED_PROXY_HOPS） ---
+
+Deno.test("clientIp: hops=2 なら右から2件目を使う（CDN → Caddy の構成）", () => {
+  // 攻撃者の値, 本物のIP（CDNが追記）, CDNのIP（Caddyが追記）
+  const xff = "10.0.0.1, 203.0.113.5, 198.51.100.7";
+  assertEquals(clientIp(reqWithXff(xff), "127.0.0.1", 2), "203.0.113.5");
+  assertEquals(clientIp(reqWithXff(xff), "127.0.0.1", 3), "10.0.0.1");
+  assertEquals(clientIp(reqWithXff(xff), "127.0.0.1"), "198.51.100.7");
+});
+
+Deno.test("clientIp: 段数に対して要素が足りなければ TCP 接続元にフォールバックする", () => {
+  assertEquals(clientIp(reqWithXff("203.0.113.5"), "127.0.0.1", 2), "127.0.0.1");
+  assertEquals(clientIp(reqWithXff("10.0.0.1, 203.0.113.5"), "127.0.0.1", 3), "127.0.0.1");
+});
+
+Deno.test("clientIp: hops=0 なら X-Forwarded-For を見ない（プロキシを挟まない構成）", () => {
+  assertEquals(clientIp(reqWithXff("10.0.0.1, 203.0.113.5"), "127.0.0.1", 0), "127.0.0.1");
+});
+
+Deno.test("clientIp: hops が整数でない・負なら TCP 接続元にフォールバックする", () => {
+  const req = reqWithXff("10.0.0.1, 203.0.113.5");
+  assertEquals(clientIp(req, "127.0.0.1", -1), "127.0.0.1");
+  assertEquals(clientIp(req, "127.0.0.1", 1.5), "127.0.0.1");
+  assertEquals(clientIp(req, "127.0.0.1", Number.NaN), "127.0.0.1");
+});
+
+// --- 採った要素の IP 検証 ---
+
+Deno.test("clientIp: 採った要素がIPの形でなければ TCP 接続元にフォールバックする", () => {
+  for (
+    const bad of [
+      "unknown", // RFC 7239 の unknown
+      "_hidden", // RFC 7239 の難読化識別子
+      "203.0.113", // 桁不足
+      "203.0.113.5.6", // 桁過剰
+      "999.1.1.1", // 範囲外
+      "01.2.3.4", // 先頭ゼロ（同じアドレスが別キーになるのを防ぐ）
+      "203.0.113.5:notaport",
+      "example.com",
+      "2001:db8::1::2", // "::" が2回
+      "fe80::1%eth0", // ゾーンID付き
+      "[2001:db8::1", // 閉じ括弧なし
+      "[2001:db8::1]x",
+      "12345:db8::1", // 5桁のグループ
+    ]
+  ) {
+    assertEquals(
+      clientIp(reqWithXff(`10.0.0.1, ${bad}`), "127.0.0.1"),
+      "127.0.0.1",
+      `${bad} は IP として受理しないこと`,
+    );
+  }
+});
+
+Deno.test("clientIp: ポート付きの表記はポートを落として採る", () => {
+  assertEquals(clientIp(reqWithXff("10.0.0.1, 203.0.113.5:54321"), "127.0.0.1"), "203.0.113.5");
+  assertEquals(clientIp(reqWithXff("10.0.0.1, [2001:db8::1]:443"), "127.0.0.1"), "2001:db8::1");
+  assertEquals(clientIp(reqWithXff("10.0.0.1, [2001:db8::1]"), "127.0.0.1"), "2001:db8::1");
+});
+
+Deno.test("clientIp: IPv6 は正規形（小文字・0畳み込み）に揃えてからキーにする", () => {
+  const cases: [string, string][] = [
+    ["2001:0DB8:0000:0000:0000:0000:0000:0001", "2001:db8::1"],
+    ["2001:db8:0:0:0:0:0:1", "2001:db8::1"],
+    ["2001:db8::1", "2001:db8::1"],
+    ["::1", "::1"],
+    ["::", "::"],
+    ["::ffff:203.0.113.5", "::ffff:203.0.113.5"],
+    ["2001:db8:0:1:1:1:1:1", "2001:db8:0:1:1:1:1:1"],
+  ];
+  for (const [raw, want] of cases) {
+    assertEquals(clientIp(reqWithXff(`10.0.0.1, ${raw}`), "127.0.0.1"), want, raw);
+  }
+});
+
+// --- EN_TRUSTED_PROXY_HOPS の読み取り ---
+
+Deno.test("parseTrustedProxyHops: 0〜16 の整数だけを受理する", () => {
+  assertEquals(parseTrustedProxyHops("0"), 0);
+  assertEquals(parseTrustedProxyHops("1"), 1);
+  assertEquals(parseTrustedProxyHops(" 2 "), 2);
+  assertEquals(parseTrustedProxyHops("16"), 16);
+  for (const bad of ["", "  ", "17", "99", "-1", "1.5", "abc", "1x", "０", null, undefined]) {
+    assertEquals(parseTrustedProxyHops(bad), null, `${bad} は不正な段数`);
+  }
+});
+
+Deno.test("trustedProxyHops: 環境変数から段数を読み、未設定・不正なら既定値1に倒す", () => {
+  const key = "EN_TRUSTED_PROXY_HOPS";
+  const original = Deno.env.get(key);
+  try {
+    Deno.env.delete(key);
+    assertEquals(trustedProxyHops(), DEFAULT_TRUSTED_PROXY_HOPS);
+    assertEquals(DEFAULT_TRUSTED_PROXY_HOPS, 1);
+    Deno.env.set(key, "2");
+    assertEquals(trustedProxyHops(), 2);
+    Deno.env.set(key, "0");
+    assertEquals(trustedProxyHops(), 0);
+    Deno.env.set(key, "");
+    assertEquals(trustedProxyHops(), 1);
+    Deno.env.set(key, "たくさん");
+    assertEquals(trustedProxyHops(), 1);
+    Deno.env.set(key, "-3");
+    assertEquals(trustedProxyHops(), 1);
+  } finally {
+    if (original === undefined) Deno.env.delete(key);
+    else Deno.env.set(key, original);
+  }
 });
 
 // ---------------------------------------------------------------------------

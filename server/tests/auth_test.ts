@@ -233,6 +233,94 @@ Deno.test("login は1分に5回を超えると429（§3.8）", async () => {
   }
 });
 
+Deno.test(
+  "login: X-Forwarded-For の左端を毎回変えてもレート制限を回避できない（監査H-2の回帰）",
+  async () => {
+    // 本番は Caddy がクライアントの X-Forwarded-For を置き換えず**追記**するため、
+    // サーバーに届くヘッダーは「攻撃者が名乗った値, プロキシが見た本物のIP」になる。
+    // ここではその形（右端固定・左端は毎回変化）を再現し、5回で頭打ちになることを確かめる。
+    const kv = await Deno.openKv(":memory:");
+    const server = startServer(0, "127.0.0.1", kv);
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      const userId = randomUserId();
+      const realIp = "198.51.100.7";
+      await fetch(`${base}/api/auth/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-forwarded-for": `9.9.9.9, ${realIp}` },
+        body: JSON.stringify({ userId, password: "correcthorse" }),
+      });
+
+      // 監査の実測と同じく15回試す。偽装が効くなら15回とも429にならない
+      let limited = 0;
+      for (let i = 0; i < 15; i++) {
+        const res = await fetch(`${base}/api/auth/login`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            // 攻撃者が名乗る値は毎回変える。右端はプロキシが追記した本物のIP
+            "x-forwarded-for": `1.2.3.${i}, ${realIp}`,
+          },
+          body: JSON.stringify({ userId, password: "wrongpassword" }),
+        });
+        assertEquals(res.status, i < 5 ? 401 : 429, `${i + 1}回目`);
+        if (res.status === 429) limited++;
+        await res.body?.cancel();
+      }
+      assertEquals(limited, 10, "6回目以降はすべて429であること");
+
+      // 正しいパスワードでも枠が尽きていれば429（総当たりが続けられないこと）
+      const after = await fetch(`${base}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": `4.4.4.4, ${realIp}`,
+        },
+        body: JSON.stringify({ userId, password: "correcthorse" }),
+      });
+      assertEquals(after.status, 429);
+      await after.body?.cancel();
+    } finally {
+      await server.shutdown();
+      kv.close();
+    }
+  },
+);
+
+Deno.test(
+  "login: プロキシが追記した右端のIPごとに枠が分かれる（正規利用者は巻き添えにならない）",
+  async () => {
+    const kv = await Deno.openKv(":memory:");
+    const server = startServer(0, "127.0.0.1", kv);
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      const attempt = (xff: string) =>
+        fetch(`${base}/api/auth/login`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-forwarded-for": xff },
+          body: JSON.stringify({ userId: "nosuchuser", password: "wrongpassword" }),
+        });
+
+      for (let i = 0; i < 5; i++) {
+        const res = await attempt(`1.2.3.${i}, 198.51.100.11`);
+        assertEquals(res.status, 401);
+        await res.body?.cancel();
+      }
+      const limited = await attempt("1.2.3.99, 198.51.100.11");
+      assertEquals(limited.status, 429, "同じ右端IPは枠を使い切っていること");
+      await limited.body?.cancel();
+
+      // 右端が別のIPなら枠は独立している
+      const other = await attempt("1.2.3.0, 198.51.100.12");
+      assertEquals(other.status, 401, "別のクライアントIPは巻き添えにならないこと");
+      await other.body?.cancel();
+    } finally {
+      await server.shutdown();
+      kv.close();
+    }
+  },
+);
+
 Deno.test("register は1時間に3回を超えると429（§3.8）", async () => {
   const kv = await Deno.openKv(":memory:");
   const server = startServer(0, "127.0.0.1", kv);
