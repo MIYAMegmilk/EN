@@ -373,8 +373,18 @@
        * 高さなので、バーが出ている間はその分はみ出す）。
        * 下限 240px は横向きの iPhone（高さ390px）でも歩ける最小、
        * 上限 560px は PC で場が間延びしないための頭打ち。
+       *
+       * flex: none は en.css の .corridor-stage { flex: 1 } を打ち消すためのもの。
+       * 親の #entry.home は縦並びのフレックス枠（flex: 1; min-height: 0;
+       * overflow-y: auto）なので、この要素はフレックスアイテムとして並ぶ。
+       * flex: 1 のままだと主軸（縦）の大きさは flex-basis: 0% を起点に親の余りから
+       * 決まり、上の height が参照されない。結果、余白いっぱいに伸びるか、余りが
+       * 無ければ min-height: 0 まで潰れて、240px〜560px の頭打ちが意味を失う。
+       * flex: none（= 0 0 auto）に戻せば height が主軸サイズとして効き、
+       * 上に書いた下限・上限の意図がそのまま保たれる。
        */
       #corridor-stage {
+        flex: none;
         height: clamp(240px, 60dvh, 560px);
         border: 1px solid var(--line);
         border-radius: var(--r-lg);
