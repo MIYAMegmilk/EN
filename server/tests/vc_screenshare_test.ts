@@ -572,6 +572,40 @@ Deno.test("R4: leave() / teardown() で画面トラックも止まる（T12）",
   }
 });
 
+Deno.test("再接続でピアを張り直しても、画面共有が載ったままになる", async () => {
+  const h = load();
+  await joinWith(h, ["a"]);
+  await h.vc.startScreenShare("text");
+  const screenTrack = h.screens[0].getVideoTracks()[0];
+
+  // 再接続。restartPeers() が全ピアを畳んで ready を打ち直す
+  h.vc.handleServerMessage({
+    t: "roomState",
+    snapshot: {
+      youId: "me",
+      players: [
+        { id: "me", nickname: "わたし", vcEligible: true, connected: true },
+        { id: "a", nickname: "a さん", vcEligible: true, connected: true },
+      ],
+    },
+  });
+  h.vc.handleServerMessage({
+    t: "rtcSignal",
+    from: "a",
+    payload: { kind: "ready", session: "s-a2" },
+  });
+
+  const pc = FakePeerConnection.instances[FakePeerConnection.instances.length - 1];
+  const sender = pc.videoSender();
+  assertExists(sender, "張り直したピアに映像 sender が無い");
+  assertEquals(sender.track, screenTrack, "張り直したピアに画面が載っていない");
+  const payload = lastVideoPayload(h, "a");
+  assertExists(payload);
+  assertEquals(payload.source, "screen");
+  // 共有そのものは切れていない
+  assertFalse(screenTrack.stopped);
+});
+
 // ---------------------------------------------------------------------------
 // 異常系（設計書 §11 の E1〜E7）
 // ---------------------------------------------------------------------------
