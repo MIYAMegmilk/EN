@@ -7,6 +7,7 @@
  */
 
 import { chickenModule } from "./chicken.ts";
+import { hayaoshiModule } from "./hayaoshi.ts";
 import type { GameModule } from "./module.ts";
 import { promptModule } from "./prompt.ts";
 
@@ -18,6 +19,7 @@ import { promptModule } from "./prompt.ts";
 export const GAME_MODULES: readonly GameModule[] = [
   promptModule,
   chickenModule,
+  hayaoshiModule,
 ];
 
 /**
