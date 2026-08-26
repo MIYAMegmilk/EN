@@ -179,7 +179,27 @@ Deno.test("create-room.html: room-handoff.js が create-room.js より前に読�
     const scriptIndex = html.indexOf("create-room.js");
     assert(handoffIndex >= 0, "room-handoff.js の読み込みが必要です");
     assert(scriptIndex >= 0, "create-room.js の読み込みが必要です");
-    assert(handoffIndex < scriptIndex, "room-handoff.js は create-room.js より前に読み込む必要があります");
+    assert(
+      handoffIndex < scriptIndex,
+      "room-handoff.js は create-room.js より前に読み込む必要があります",
+    );
+  } finally {
+    await server.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("index.html: room-handoff.js が app.js より前に読み込まれる", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const server = startServer(0, "127.0.0.1", kv);
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/index.html`);
+    const html = await res.text();
+    const handoffIndex = html.indexOf('<script src="./room-handoff.js">');
+    const scriptIndex = html.indexOf('<script src="./app.js">');
+    assert(handoffIndex >= 0, "room-handoff.js の読み込みが必要です");
+    assert(scriptIndex >= 0, "app.js の読み込みが必要です");
+    assert(handoffIndex < scriptIndex, "room-handoff.js は app.js より前に読み込む必要があります");
   } finally {
     await server.shutdown();
     kv.close();

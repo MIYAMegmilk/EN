@@ -101,7 +101,9 @@ Deno.test("room-handoff.js: 壊れたJSONが入っていても null を返す", 
 
 Deno.test("room-handoff.js: nickname が文字列でなければ null を返す", () => {
   const RoomHandoff = load(
-    fakeSessionStorage({ "en:pendingCreateRoom": JSON.stringify({ visibility: "public", tags: [] }) }),
+    fakeSessionStorage({
+      "en:pendingCreateRoom": JSON.stringify({ visibility: "public", tags: [] }),
+    }),
   );
   assertEquals(RoomHandoff.consumePendingCreateRoom(), null);
 });

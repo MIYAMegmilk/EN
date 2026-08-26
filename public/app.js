@@ -309,6 +309,13 @@ function connect() {
     const afterRestart = state.restartRecovery;
     state.restartRecovery = false;
     const saved = store.load();
+    // create-room.html から渡された「これから建てる卓」があれば読み出す。
+    // 再接続すべきセッションがある場合（下の if 分岐）はそちらを優先するが、
+    // 読み出し自体は必ず行い sessionStorage から消しておく。そうしないと、
+    // 今回は再接続が勝って使わなかった pending が sessionStorage に残ったまま
+    // になり、この後の「退室 → 新規 onopen」など別の再接続のない機会に
+    // 意図せず自動作成が発火してしまう
+    const pending = RoomHandoff.consumePendingCreateRoom();
     if (saved !== null) {
       // 再接続を試す（60秒以内なら復帰できる）。session が生きていればサーバーは
       // あだ名を見ない（doJoin が reconnect で早期 return する）ので、あだ名を省略して
@@ -319,11 +326,8 @@ function connect() {
       if (nickname.length > 0) msg.nickname = nickname;
       state.rejoinAfterRestart = afterRestart;
       send(msg);
-    } else {
-      // create-room.html から渡された「これから建てる卓」があれば自動で作成する。
-      // 再接続すべきセッションがある場合（上の if 分岐）はそちらを優先する
-      const pending = RoomHandoff.consumePendingCreateRoom();
-      if (pending !== null) doCreateRoom(pending);
+    } else if (pending !== null) {
+      doCreateRoom(pending);
     }
   };
   ws.onclose = (event) => {
