@@ -9,6 +9,7 @@
 import { chickenModule } from "./chicken.ts";
 import type { GameModule } from "./module.ts";
 import { promptModule } from "./prompt.ts";
+import { wordWolfModule } from "./wordwolf.ts";
 
 /**
  * 収録しているゲームモジュール。
@@ -18,6 +19,7 @@ import { promptModule } from "./prompt.ts";
 export const GAME_MODULES: readonly GameModule[] = [
   promptModule,
   chickenModule,
+  wordWolfModule,
 ];
 
 /**
