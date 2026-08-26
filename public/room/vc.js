@@ -2084,6 +2084,12 @@
       return false;
     }
     state.screen.starting = false;
+    // 選択ダイアログを出しているあいだに卓を離れていたら、掴んだものを捨てる。
+    // ここで取りこぼすとブラウザの「共有中」バーだけが残る
+    if (!state.active) {
+      stopStream(stream);
+      return false;
+    }
     // 音声トラックは常に0本として扱う（§6.5）。万一返ってきたら捨てる
     dropAudioTracks(stream);
     const track = stream.getVideoTracks()[0];
