@@ -1,2 +1,6 @@
 # 秘密情報（TURN認証情報等）。リポジトリには .env.example のみ置く（仕様書 §3.8）
 .env
+
+# サブエージェント用の一時 git worktree。ここを残すとリポジトリの完全なコピーが
+# 中に出来るため、deno test / lint / fmt が二重に走査してしまう
+.claude/

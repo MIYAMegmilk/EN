@@ -1,0 +1,1471 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      作業ボードの画面（docs/design/board.md §2「画面 — 人間が読む用の1枚」）。
+
+      §3 のとおり board は EN 本体から独立させるため、この画面は
+      public/assets/en.css も読まない。CSS も JavaScript もこの1ファイルに収める
+      （見た目と書きぶりは public/debug.html / public/debug.js に揃えてある）。
+
+      CSP: 外部からは何も読み込まない（default-src 'none'）。インラインの script は
+      ハッシュで1本だけ許可する。**中身を1文字でも書き換えたらハッシュも更新すること。**
+      tools/board/ui_test.ts が照合していて、ずれると失敗し、正しい値を表示する。
+      style は EN 本体と同じ流儀で 'unsafe-inline' を許す（assets/en.css の方針に揃える）。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; connect-src 'self'; style-src 'unsafe-inline'; script-src 'sha256-OVTcZldVFAY84De7bZ+QjtYS5OhcO0FIoLeTdt9zRc8='; base-uri 'none'; form-action 'none'"
+    />
+    <title>作業ボード</title>
+    <style>
+      /* ── 配色トークン（public/assets/en.css の値に揃える） ────────── */
+      :root {
+        --ink: #100b07;
+        --panel: #241a11;
+        --panel-2: #2b2016;
+        --panel-3: #33261a;
+        --line: #3d2c1c;
+        --line-soft: #2e2117;
+
+        --text: #ece0cf;
+        --cream: #f6ecdc;
+        --muted: #a48d70;
+        --dim: #7b6750;
+
+        --gold: #e6a63f;
+        --gold-2: #f3c368;
+        --gold-3: #c8862a;
+        --gold-ink: #2a1a06;
+
+        --red: #b02a24;
+        --red-2: #8c1f1a;
+        --green: #7fa85c;
+
+        --r-sm: 4px;
+        --r-md: 8px;
+        --r-lg: 14px;
+        --r-pill: 999px;
+
+        --serif: "Hiragino Mincho ProN", "Yu Mincho", "YuMincho", "Noto Serif JP", serif;
+        --sans: "Hiragino Kaku Gothic ProN", "Yu Gothic", "Noto Sans JP", system-ui, sans-serif;
+
+        --shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        background: var(--ink);
+        color: var(--text);
+        font-family: var(--sans);
+        font-size: 14px;
+        line-height: 1.7;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      button,
+      input,
+      textarea {
+        font: inherit;
+        color: inherit;
+      }
+
+      /* ── 共通部品（en.css から必要なぶんだけ写す） ──────────────── */
+      .appbar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 18px;
+        background: #16100a;
+        border-bottom: 1px solid var(--line-soft);
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        flex-wrap: wrap;
+      }
+
+      .brand {
+        font-family: var(--serif);
+        font-size: 17px;
+        color: var(--cream);
+        letter-spacing: 0.06em;
+        white-space: nowrap;
+      }
+
+      .spacer {
+        flex: 1;
+      }
+
+      .dim {
+        color: var(--dim);
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+
+      .card {
+        background: linear-gradient(180deg, var(--panel-2), var(--panel));
+        border: 1px solid var(--line);
+        border-radius: var(--r-lg);
+        box-shadow: var(--shadow);
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 8px 14px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        background: var(--panel-3);
+        color: var(--text);
+        cursor: pointer;
+        transition: border-color 0.15s, background 0.15s, transform 0.06s;
+      }
+
+      .btn:hover {
+        border-color: var(--gold-3);
+        background: #3b2c1d;
+      }
+
+      .btn:active {
+        transform: translateY(1px);
+      }
+
+      .btn:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
+
+      .btn-gold {
+        border-color: transparent;
+        background: linear-gradient(180deg, var(--gold-2), var(--gold-3));
+        color: var(--gold-ink);
+        font-weight: 700;
+      }
+
+      .btn-gold:hover {
+        background: linear-gradient(180deg, #f7d182, #d4922f);
+        border-color: transparent;
+      }
+
+      .btn-sm {
+        padding: 4px 10px;
+        font-size: 12px;
+      }
+
+      .input {
+        width: 100%;
+        padding: 10px 12px;
+        background: #150e08;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        color: var(--cream);
+        outline: none;
+      }
+
+      .input::placeholder {
+        color: #5f4f3c;
+      }
+
+      .input:focus {
+        border-color: var(--gold-3);
+        box-shadow: 0 0 0 3px rgba(230, 166, 63, 0.13);
+      }
+
+      .tag {
+        display: inline-block;
+        padding: 2px 8px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-sm);
+        background: rgba(255, 255, 255, 0.02);
+        color: var(--muted);
+        font-size: 11.5px;
+        overflow-wrap: anywhere;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 2px 10px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-pill);
+        font-size: 11.5px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+
+      .face {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        background: linear-gradient(160deg, #4a3722, #2c2016);
+        border: 1px solid var(--line);
+        font-family: var(--serif);
+        font-size: 12px;
+        color: var(--cream);
+        flex: none;
+      }
+
+      .toggle {
+        position: relative;
+        width: 38px;
+        height: 21px;
+        border-radius: var(--r-pill);
+        background: #4a3c2b;
+        border: none;
+        cursor: pointer;
+        flex: none;
+        padding: 0;
+      }
+
+      .toggle::after {
+        content: "";
+        position: absolute;
+        top: 3px;
+        left: 3px;
+        width: 15px;
+        height: 15px;
+        border-radius: 50%;
+        background: #d8c9b4;
+        transition: transform 0.16s;
+      }
+
+      .toggle[aria-pressed="true"] {
+        background: linear-gradient(180deg, var(--gold-2), var(--gold-3));
+      }
+
+      .toggle[aria-pressed="true"]::after {
+        transform: translateX(17px);
+        background: #fff8ea;
+      }
+
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+        border: 0;
+      }
+
+      .hidden {
+        display: none !important;
+      }
+
+      [hidden] {
+        display: none !important;
+      }
+
+      .alert:empty {
+        display: none;
+      }
+
+      .alert {
+        margin: 10px 0 0;
+        padding: 9px 14px;
+        border: 1px solid #6d2420;
+        border-radius: var(--r-md);
+        background: rgba(176, 42, 36, 0.13);
+        color: #f0bbb6;
+        font-size: 13px;
+      }
+
+      /* ── 画面の骨組み ──────────────────────────────── */
+      main {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 18px 16px 60px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      #board {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      .block {
+        padding: 16px 18px 18px;
+      }
+
+      .block h1,
+      .block h2 {
+        font-family: var(--serif);
+        font-weight: 400;
+        margin: 0;
+        color: var(--cream);
+        font-size: 18px;
+      }
+
+      .block-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px 10px;
+        margin-bottom: 10px;
+      }
+
+      .lead {
+        margin: 0 0 12px;
+        font-size: 12.5px;
+        color: var(--muted);
+      }
+
+      .hint {
+        margin: 8px 0 0;
+        font-size: 11.5px;
+        color: var(--dim);
+      }
+
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+      }
+
+      #gate-form {
+        max-width: 460px;
+      }
+
+      #gate-form .input {
+        flex: 1;
+        min-width: 200px;
+      }
+
+      .check {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        color: var(--muted);
+        cursor: pointer;
+      }
+
+      .list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .empty {
+        margin: 0;
+        padding: 22px 0;
+        text-align: center;
+        font-size: 12.5px;
+        color: var(--dim);
+      }
+
+      .item {
+        border: 1px solid var(--line-soft);
+        border-left: 4px solid var(--line);
+        border-radius: var(--r-md);
+        background: rgba(255, 255, 255, 0.015);
+        padding: 10px 12px;
+        font-size: 12.5px;
+      }
+
+      .item-head {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px 10px;
+      }
+
+      .item-title {
+        font-size: 14px;
+        color: var(--cream);
+        overflow-wrap: anywhere;
+      }
+
+      .item-note {
+        flex-basis: 100%;
+        color: var(--muted);
+        overflow-wrap: anywhere;
+        white-space: pre-wrap;
+      }
+
+      .item-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 16px;
+        margin-top: 6px;
+        color: var(--dim);
+        font-size: 11.5px;
+      }
+
+      .item-meta b {
+        color: var(--muted);
+        font-weight: 400;
+        margin-left: 4px;
+        overflow-wrap: anywhere;
+      }
+
+      .paths {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-top: 6px;
+      }
+
+      /* ── 表明 ─────────────────────────────────── */
+      .claim-working {
+        border-left-color: var(--green);
+      }
+
+      .claim-paused {
+        border-left-color: var(--gold-3);
+      }
+
+      .claim-done {
+        border-left-color: var(--line);
+        opacity: 0.6;
+      }
+
+      /* §5: TTL を過ぎた表明は「古い」と一目で分かるようにする */
+      .claim-stale {
+        border-left-style: dashed;
+        border-left-color: var(--red);
+        background: rgba(176, 42, 36, 0.07);
+      }
+
+      .badge-stale {
+        color: #f0bbb6;
+        border-color: var(--red);
+        background: rgba(176, 42, 36, 0.12);
+      }
+
+      .badge-working {
+        color: var(--green);
+        border-color: var(--green);
+      }
+
+      .badge-paused {
+        color: var(--gold-2);
+        border-color: var(--gold-3);
+      }
+
+      .badge-warn {
+        color: var(--gold-2);
+        border-color: var(--gold-3);
+      }
+
+      /* ── タスク ───────────────────────────────── */
+      #task-form {
+        margin-bottom: 12px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      #task-title {
+        flex: 2;
+        min-width: 200px;
+      }
+
+      #task-body {
+        flex: 3;
+        min-width: 200px;
+      }
+
+      .task-done .item-title {
+        text-decoration: line-through;
+        color: var(--dim);
+      }
+
+      .item-actions {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+
+      /* ── PR 索引 ──────────────────────────────── */
+      .pr-number {
+        font-variant-numeric: tabular-nums;
+        color: var(--gold-2);
+        font-family: var(--serif);
+        letter-spacing: 0.06em;
+      }
+
+      .pr-files {
+        margin-top: 6px;
+      }
+
+      .pr-files summary {
+        cursor: pointer;
+        color: var(--dim);
+        font-size: 11.5px;
+        list-style: none;
+      }
+
+      .pr-files summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .pr-files summary::before {
+        content: "▶ ";
+      }
+
+      .pr-files[open] summary::before {
+        content: "▼ ";
+      }
+
+      .pr-files ul {
+        list-style: none;
+        margin: 6px 0 0;
+        padding: 0 0 0 2px;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        color: var(--muted);
+        font-size: 11.5px;
+        max-height: 240px;
+        overflow-y: auto;
+      }
+
+      .pr-files li {
+        overflow-wrap: anywhere;
+      }
+
+      .fetched-at {
+        font-size: 12px;
+        color: var(--muted);
+        padding: 2px 8px;
+        border-radius: var(--r-pill);
+      }
+
+      /* ── 画面が狭いとき ───────────────────────────── */
+      @media (max-width: 560px) {
+        main {
+          padding: 12px 10px 48px;
+        }
+
+        .block {
+          padding: 13px 13px 15px;
+        }
+
+        .block h1,
+        .block h2 {
+          font-size: 16px;
+        }
+
+        .item-meta {
+          gap: 2px 12px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="appbar">
+      <span class="brand">作業ボード</span>
+      <span class="spacer"></span>
+      <span id="conn-status" class="dim">未接続</span>
+      <button id="token-change" type="button" class="btn btn-sm hidden">
+        トークンを変更
+      </button>
+    </header>
+
+    <main>
+      <!-- §7-6: 画面も認証必須。未認証ならこの入力欄だけを出す -->
+      <section id="gate" class="card block">
+        <h1>ボードのトークン</h1>
+        <p class="lead">
+          自分のトークンを入力してください。トークンはこのタブを閉じるまでだけ保持し、
+          URL にも記録にも残しません（共用 PC
+          に残らないようにするためです）。
+        </p>
+        <form id="gate-form" class="row">
+          <label for="gate-token" class="sr-only">ボードのトークン</label>
+          <input
+            id="gate-token"
+            class="input"
+            type="password"
+            autocomplete="off"
+            placeholder="ボードのトークン"
+          />
+          <button id="gate-submit" class="btn btn-gold" type="submit">接続</button>
+        </form>
+        <p id="gate-error" class="alert" role="alert"></p>
+      </section>
+
+      <section id="board" class="hidden">
+        <!-- ① いま誰が何をやっているか（表明の一覧） -->
+        <section class="card block">
+          <div class="block-head">
+            <h2>いまの作業</h2>
+            <span class="spacer"></span>
+            <label class="check">
+              <input id="claims-show-done" type="checkbox" />
+              終わったぶんも見る
+            </label>
+            <button id="refresh-now" class="btn btn-sm" type="button">今すぐ更新</button>
+            <button id="auto-refresh" class="toggle" type="button" aria-pressed="true">
+              <span class="sr-only">自動更新の切り替え</span>
+            </button>
+            <span id="auto-refresh-label" class="dim"></span>
+          </div>
+          <p class="lead">
+            表明は Claude Code の CLI（tools/board/board.ts）から書き込みます。
+            ここは読むための場所です。
+          </p>
+          <p id="claims-error" class="alert" role="alert"></p>
+          <p id="claims-empty" class="empty hidden">表明はまだありません</p>
+          <ul id="claims-list" class="list"></ul>
+        </section>
+
+        <!-- ② タスク（追加・完了） -->
+        <section class="card block">
+          <div class="block-head">
+            <h2>タスク</h2>
+          </div>
+          <p class="lead">
+            Issue にするほどでもない粒度のメモです。正式な課題は GitHub
+            Issues を使ってください。
+          </p>
+          <form id="task-form">
+            <label for="task-title" class="sr-only">やること</label>
+            <input
+              id="task-title"
+              class="input"
+              type="text"
+              autocomplete="off"
+              maxlength="200"
+              placeholder="やること（例: 卓の一覧に空席数を出す）"
+            />
+            <label for="task-body" class="sr-only">詳細</label>
+            <input
+              id="task-body"
+              class="input"
+              type="text"
+              autocomplete="off"
+              maxlength="1000"
+              placeholder="詳細（任意）"
+            />
+            <button id="task-submit" class="btn btn-gold" type="submit">追加</button>
+          </form>
+          <p class="hint">
+            トークン・鍵・パスワードなどの秘密情報は書かないでください（サーバー側でも弾きます）。
+          </p>
+          <p id="tasks-error" class="alert" role="alert"></p>
+          <p id="tasks-empty" class="empty hidden">タスクはまだありません</p>
+          <ul id="tasks-list" class="list"></ul>
+        </section>
+
+        <!-- ③ オープン PR の索引 -->
+        <section class="card block">
+          <div class="block-head">
+            <h2>オープン中の PR</h2>
+            <span class="spacer"></span>
+            <span id="prs-fetched-at" class="fetched-at">読み込んでいます…</span>
+          </div>
+          <p class="lead">
+            マージで壊さないための索引です。いま表明されている場所と重なる
+            PR には印を付けます。
+          </p>
+          <p id="prs-error" class="alert" role="alert"></p>
+          <p id="prs-empty" class="empty hidden">オープン中の PR はありません</p>
+          <ul id="prs-list" class="list"></ul>
+        </section>
+      </section>
+    </main>
+
+    <script>
+      /*
+       * 作業ボードの画面のロジック（docs/design/board.md §2 / §5 / §6 / §7-6 / §9）。
+       *
+       * 表示の規約（CLAUDE.md「セキュリティ基準（Web）」）:
+       *   サーバーから来る文字列（表明の title / note / あだ名 / PR のタイトル / ファイル名）は
+       *   すべて利用者由来なので一切信用せず、必ず textContent で「文字」として置く。
+       *   HTML 文字列を組み立てて DOM へ流し込む経路は、このファイルに1つも無い。
+       *   ハンドラも on* 属性ではなく addEventListener だけで付ける（CSP に合わせるため）。
+       *
+       * サーバーとの契約は tools/board/types.ts（正本）と設計書 §6:
+       *   GET   /api/claims        → { claims: ClaimView[], serverTime }
+       *   GET   /api/tasks         → { tasks: Task[] }
+       *   POST  /api/tasks         → { task }
+       *   PATCH /api/tasks/:id     → { task }
+       *   GET   /api/prs           → { prs: PrIndex[], fetchedAt: number | null }
+       *   いずれも Authorization: Bearer <token>。
+       *
+       * API のパスは絶対で書いている（§6 のとおり画面が `/` で配られる前提）。
+       * Caddy をサブパスに割り当てるなら（§12 の未決事項）ここを見直すこと。
+       */
+
+      "use strict";
+
+      (function () {
+        /** トークンの置き場。タブを閉じたら消える記憶にだけ置く（§7-6） */
+        const STORAGE_KEY = "board-token";
+
+        /**
+         * 自動更新の間隔。PR 索引はサーバー側が5分ごとに取り直す（§9）ので、
+         * 画面はそれより細かく、しかし人の目で追える程度に 30 秒とした。
+         */
+        const POLL_MS = 30_000;
+
+        /** 表明が「古い」と見なされるまでの時間。types.ts の CLAIM_TTL_MS と同じ値（§5） */
+        const CLAIM_TTL_MS = 8 * 60 * 60 * 1000;
+
+        /** PR 索引がこれ以上古かったら注意を出す。§9 の取得間隔（5分）の倍 */
+        const PR_INDEX_STALE_MS = 10 * 60 * 1000;
+
+        function $(id) {
+          return document.getElementById(id);
+        }
+
+        const els = {
+          connStatus: $("conn-status"),
+          tokenChange: $("token-change"),
+
+          gate: $("gate"),
+          gateForm: $("gate-form"),
+          gateToken: $("gate-token"),
+          gateSubmit: $("gate-submit"),
+          gateError: $("gate-error"),
+
+          board: $("board"),
+
+          claimsShowDone: $("claims-show-done"),
+          refreshNow: $("refresh-now"),
+          autoRefreshBtn: $("auto-refresh"),
+          autoRefreshLabel: $("auto-refresh-label"),
+          claimsError: $("claims-error"),
+          claimsEmpty: $("claims-empty"),
+          claimsList: $("claims-list"),
+
+          taskForm: $("task-form"),
+          taskTitle: $("task-title"),
+          taskBody: $("task-body"),
+          taskSubmit: $("task-submit"),
+          tasksError: $("tasks-error"),
+          tasksEmpty: $("tasks-empty"),
+          tasksList: $("tasks-list"),
+
+          prsFetchedAt: $("prs-fetched-at"),
+          prsError: $("prs-error"),
+          prsEmpty: $("prs-empty"),
+          prsList: $("prs-list"),
+        };
+
+        /** 画面の状態 */
+        const state = {
+          token: null,
+          autoRefresh: true,
+          timerId: null,
+          showDoneClaims: false,
+          claims: [],
+          serverTime: 0,
+          tasks: [],
+          prs: [],
+          prsFetchedAt: null,
+          lastUpdatedAt: null,
+        };
+
+        // ── DOM 組み立て（textContent だけを使う） ─────────────────
+
+        function el(tag, text, className) {
+          const node = document.createElement(tag);
+          if (text !== undefined && text !== null) node.textContent = String(text);
+          if (className) node.className = className;
+          return node;
+        }
+
+        function clear(node) {
+          while (node.firstChild) node.removeChild(node.firstChild);
+        }
+
+        /** 「見出し: 値」の1項目。値も必ず文字として置く */
+        function metaItem(label, value) {
+          const item = el("span", label, "meta-item");
+          item.appendChild(el("b", value));
+          return item;
+        }
+
+        // ── 書式 ─────────────────────────────────────
+
+        function pad2(n) {
+          return String(n).padStart(2, "0");
+        }
+
+        function isTime(at) {
+          return typeof at === "number" && Number.isFinite(at) && at > 0;
+        }
+
+        /** epoch ms を「M/D HH:MM」に整形する */
+        function formatDateTime(at) {
+          if (!isTime(at)) return "-";
+          const d = new Date(at);
+          return `${d.getMonth() + 1}/${d.getDate()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+        }
+
+        /** epoch ms を HH:MM:SS に整形する */
+        function formatClock(at) {
+          if (!isTime(at)) return "--:--:--";
+          const d = new Date(at);
+          return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+        }
+
+        /** 経過を「◯分前」のように整形する。now を渡せばその時刻を基準にする */
+        function formatElapsed(at, now) {
+          if (!isTime(at)) return "";
+          const base = isTime(now) ? now : Date.now();
+          const sec = Math.max(0, Math.floor((base - at) / 1000));
+          if (sec < 60) return `${sec}秒前`;
+          const min = Math.floor(sec / 60);
+          if (min < 60) return `${min}分前`;
+          const hour = Math.floor(min / 60);
+          if (hour < 24) return `${hour}時間前`;
+          return `${Math.floor(hour / 24)}日前`;
+        }
+
+        const CLAIM_STATUS_LABEL = {
+          working: "作業中",
+          paused: "中断",
+          done: "完了",
+        };
+
+        const TASK_STATUS_LABEL = {
+          open: "未着手",
+          doing: "着手中",
+          done: "完了",
+        };
+
+        /** あだ名の頭文字。絵文字でも欠けないよう符号点で1つ取る。空でも1文字は出す */
+        function initial(name) {
+          const text = typeof name === "string" ? name.trim() : "";
+          return text.length > 0 ? Array.from(text)[0] : "？";
+        }
+
+        // ── 判定 ─────────────────────────────────────
+
+        /**
+         * §5 の「古い表明」。サーバーが付けてきた stale を優先しつつ、
+         * 付いていない応答でも heartbeatAt から自分で判断できるようにしておく。
+         */
+        function isStale(claim, now) {
+          if (claim === null || typeof claim !== "object") return false;
+          if (claim.status !== "working") return false;
+          if (claim.stale === true) return true;
+          if (!isTime(claim.heartbeatAt)) return false;
+          const base = isTime(now) ? now : Date.now();
+          return base - claim.heartbeatAt > CLAIM_TTL_MS;
+        }
+
+        /** 表明の並び順。作業中 → 中断 → 完了、同じ状態なら新しい順 */
+        const CLAIM_ORDER = { working: 0, paused: 1, done: 2 };
+
+        function claimRank(claim) {
+          const rank = CLAIM_ORDER[claim.status];
+          return typeof rank === "number" ? rank : 3;
+        }
+
+        /**
+         * パスが重なるか。完全一致とディレクトリ配下（どちら向きでも）を重なりとみなす。
+         * フックの `/api/claims/check` と同じ考え方だが、こちらは画面上の印にしか使わない。
+         */
+        function pathsOverlap(a, b) {
+          if (typeof a !== "string" || typeof b !== "string") return false;
+          const left = a.replace(/^\.\//, "").replace(/\/+$/, "");
+          const right = b.replace(/^\.\//, "").replace(/\/+$/, "");
+          if (left.length === 0 || right.length === 0) return false;
+          if (left === right) return true;
+          return left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
+        }
+
+        /** この PR が触るファイルと重なっている表明の、あだ名の一覧（重複なし） */
+        function claimsTouchingPr(pr, claims) {
+          const files = Array.isArray(pr.files) ? pr.files : [];
+          const names = [];
+          for (const claim of claims) {
+            if (claim === null || typeof claim !== "object") continue;
+            if (claim.status === "done") continue;
+            const paths = Array.isArray(claim.paths) ? claim.paths : [];
+            const hit = paths.some((p) => files.some((f) => pathsOverlap(p, f)));
+            if (!hit) continue;
+            const name = typeof claim.memberName === "string" && claim.memberName.length > 0
+              ? claim.memberName
+              : "(不明)";
+            if (!names.includes(name)) names.push(name);
+          }
+          return names;
+        }
+
+        // ── API 呼び出し ─────────────────────────────────
+        /*
+         * トークンは Authorization ヘッダにだけ載せる。
+         * URL にも、画面にも、記録にも出さない（§7-4 / §7-6）。
+         */
+
+        async function api(path, options) {
+          const token = state.token;
+          if (typeof token !== "string" || token.length === 0) {
+            return { ok: false, status: 0, body: null, networkError: false };
+          }
+          const headers = { authorization: `Bearer ${token}` };
+          const init = {
+            method: (options && options.method) || "GET",
+            credentials: "same-origin",
+            headers,
+          };
+          if (options && options.body !== undefined) {
+            headers["content-type"] = "application/json";
+            init.body = JSON.stringify(options.body);
+          }
+          let res;
+          try {
+            res = await fetch(path, init);
+          } catch {
+            return { ok: false, status: 0, body: null, networkError: true };
+          }
+          let body = null;
+          try {
+            body = await res.json();
+          } catch {
+            body = null;
+          }
+          return { ok: res.ok, status: res.status, body, networkError: false };
+        }
+
+        /** 認証が通らなくなった応答か（401 / 403） */
+        function isUnauthorized(res) {
+          return res.status === 401 || res.status === 403;
+        }
+
+        /** サーバーが返したエラー文言。無ければ既定の文言を使う */
+        function errorMessage(res, fallback) {
+          if (res.networkError) {
+            return "サーバーに繋がりません。表示は最後に取れた内容のままです。";
+          }
+          const body = res.body;
+          if (body !== null && typeof body === "object" && typeof body.error === "string") {
+            return body.error;
+          }
+          return fallback;
+        }
+
+        // ── 描画: 表明 ───────────────────────────────
+
+        function renderClaim(claim, now) {
+          const stale = isStale(claim, now);
+          const status = typeof claim.status === "string" ? claim.status : "working";
+          const li = el("li", undefined, `item claim-${status}`);
+          if (stale) li.classList.add("claim-stale");
+
+          const head = el("div", undefined, "item-head");
+          head.appendChild(el("span", initial(claim.memberName), "face"));
+          head.appendChild(
+            el("span", typeof claim.memberName === "string" ? claim.memberName : "(不明)", "muted"),
+          );
+          head.appendChild(
+            el("span", typeof claim.title === "string" ? claim.title : "(無題)", "item-title"),
+          );
+          head.appendChild(el("span", undefined, "spacer"));
+          head.appendChild(
+            el("span", CLAIM_STATUS_LABEL[status] || status, `badge badge-${status}`),
+          );
+          if (stale) {
+            head.appendChild(el("span", "古い表明", "badge badge-stale"));
+          }
+          li.appendChild(head);
+
+          if (typeof claim.note === "string" && claim.note.length > 0) {
+            li.appendChild(el("div", claim.note, "item-note"));
+          }
+
+          const meta = el("div", undefined, "item-meta");
+          meta.appendChild(
+            metaItem(
+              "開始:",
+              `${formatDateTime(claim.startedAt)}（${formatElapsed(claim.startedAt, now)}）`,
+            ),
+          );
+          meta.appendChild(metaItem("最終更新:", formatElapsed(claim.heartbeatAt, now) || "-"));
+          if (typeof claim.branch === "string" && claim.branch.length > 0) {
+            meta.appendChild(metaItem("ブランチ:", claim.branch));
+          }
+          if (typeof claim.prNumber === "number" && Number.isFinite(claim.prNumber)) {
+            meta.appendChild(metaItem("PR:", `#${claim.prNumber}`));
+          }
+          li.appendChild(meta);
+
+          const paths = Array.isArray(claim.paths) ? claim.paths : [];
+          if (paths.length > 0) {
+            const box = el("div", undefined, "paths");
+            for (const path of paths) {
+              box.appendChild(el("span", String(path), "tag"));
+            }
+            li.appendChild(box);
+          }
+
+          if (stale) {
+            li.appendChild(
+              el("p", "8時間以上たっています。終わったのに残っているだけかもしれません。", "hint"),
+            );
+          }
+          return li;
+        }
+
+        function renderClaims() {
+          const now = isTime(state.serverTime) ? state.serverTime : Date.now();
+          const claims = state.claims
+            .filter((c) => c !== null && typeof c === "object")
+            .filter((c) => state.showDoneClaims || c.status !== "done")
+            .sort((a, b) => {
+              const byStatus = claimRank(a) - claimRank(b);
+              if (byStatus !== 0) return byStatus;
+              return (b.startedAt || 0) - (a.startedAt || 0);
+            });
+
+          clear(els.claimsList);
+          els.claimsEmpty.classList.toggle("hidden", claims.length > 0);
+          for (const claim of claims) {
+            els.claimsList.appendChild(renderClaim(claim, now));
+          }
+        }
+
+        // ── 描画: タスク ──────────────────────────────
+
+        /** タスクの状態を変える。押している間は二度押しを止める */
+        async function changeTaskStatus(task, status, button) {
+          button.disabled = true;
+          els.tasksError.textContent = "";
+          try {
+            const res = await api(`/api/tasks/${encodeURIComponent(task.id)}`, {
+              method: "PATCH",
+              body: { status },
+            });
+            if (isUnauthorized(res)) {
+              dropToken("トークンが通らなくなりました。もう一度入力してください。");
+              return;
+            }
+            if (!res.ok) {
+              els.tasksError.textContent = errorMessage(res, "タスクを更新できませんでした。");
+              return;
+            }
+            await refreshTasks();
+          } finally {
+            button.disabled = false;
+          }
+        }
+
+        function renderTask(task) {
+          const status = typeof task.status === "string" ? task.status : "open";
+          const li = el("li", undefined, `item task-${status}`);
+
+          const head = el("div", undefined, "item-head");
+          head.appendChild(el("span", TASK_STATUS_LABEL[status] || status, "badge"));
+          head.appendChild(
+            el("span", typeof task.title === "string" ? task.title : "(無題)", "item-title"),
+          );
+          head.appendChild(el("span", undefined, "spacer"));
+
+          const actions = el("div", undefined, "item-actions");
+          if (status === "open") {
+            const start = el("button", "着手", "btn btn-sm");
+            start.type = "button";
+            start.addEventListener("click", () => changeTaskStatus(task, "doing", start));
+            actions.appendChild(start);
+          }
+          if (status === "done") {
+            const back = el("button", "戻す", "btn btn-sm");
+            back.type = "button";
+            back.addEventListener("click", () => changeTaskStatus(task, "open", back));
+            actions.appendChild(back);
+          } else {
+            const done = el("button", "完了", "btn btn-sm btn-gold");
+            done.type = "button";
+            done.addEventListener("click", () => changeTaskStatus(task, "done", done));
+            actions.appendChild(done);
+          }
+          head.appendChild(actions);
+          li.appendChild(head);
+
+          if (typeof task.body === "string" && task.body.length > 0) {
+            li.appendChild(el("div", task.body, "item-note"));
+          }
+
+          const meta = el("div", undefined, "item-meta");
+          meta.appendChild(metaItem("追加:", formatDateTime(task.createdAt)));
+          if (typeof task.assignee === "string" && task.assignee.length > 0) {
+            meta.appendChild(metaItem("担当:", task.assignee));
+          }
+          li.appendChild(meta);
+          return li;
+        }
+
+        /** タスクの並び順。着手中 → 未着手 → 完了、同じ状態なら新しい順 */
+        const TASK_ORDER = { doing: 0, open: 1, done: 2 };
+
+        function taskRank(task) {
+          const rank = TASK_ORDER[task.status];
+          return typeof rank === "number" ? rank : 3;
+        }
+
+        function renderTasks() {
+          const tasks = state.tasks
+            .filter((t) => t !== null && typeof t === "object")
+            .sort((a, b) => {
+              const byStatus = taskRank(a) - taskRank(b);
+              if (byStatus !== 0) return byStatus;
+              return (b.createdAt || 0) - (a.createdAt || 0);
+            });
+
+          clear(els.tasksList);
+          els.tasksEmpty.classList.toggle("hidden", tasks.length > 0);
+          for (const task of tasks) {
+            els.tasksList.appendChild(renderTask(task));
+          }
+        }
+
+        // ── 描画: PR 索引 ─────────────────────────────
+
+        function renderPr(pr, claims) {
+          const li = el("li", undefined, "item");
+
+          const head = el("div", undefined, "item-head");
+          const number = typeof pr.prNumber === "number" && Number.isFinite(pr.prNumber)
+            ? `#${pr.prNumber}`
+            : "#?";
+          head.appendChild(el("span", number, "pr-number"));
+          head.appendChild(
+            el("span", typeof pr.title === "string" ? pr.title : "(無題)", "item-title"),
+          );
+          head.appendChild(el("span", undefined, "spacer"));
+
+          const touching = claimsTouchingPr(pr, claims);
+          if (touching.length > 0) {
+            head.appendChild(
+              el("span", `表明と重なる: ${touching.join(" / ")}`, "badge badge-warn"),
+            );
+          }
+          li.appendChild(head);
+
+          const files = Array.isArray(pr.files) ? pr.files : [];
+          const meta = el("div", undefined, "item-meta");
+          meta.appendChild(metaItem("作成者:", typeof pr.author === "string" ? pr.author : "-"));
+          meta.appendChild(
+            metaItem("ブランチ:", typeof pr.headRef === "string" ? pr.headRef : "-"),
+          );
+          meta.appendChild(metaItem("変更ファイル:", `${files.length}件`));
+          li.appendChild(meta);
+
+          if (files.length > 0) {
+            const details = document.createElement("details");
+            details.className = "pr-files";
+            details.appendChild(el("summary", "変更ファイルを見る"));
+            const list = document.createElement("ul");
+            for (const file of files) {
+              list.appendChild(el("li", String(file)));
+            }
+            details.appendChild(list);
+            li.appendChild(details);
+          }
+          return li;
+        }
+
+        function renderPrs() {
+          const prs = state.prs.filter((p) => p !== null && typeof p === "object");
+          clear(els.prsList);
+          els.prsEmpty.classList.toggle("hidden", prs.length > 0);
+          for (const pr of prs) {
+            els.prsList.appendChild(renderPr(pr, state.claims));
+          }
+          renderFetchedAt();
+        }
+
+        /** §9: 取得に失敗すると古いキャッシュが返るので、「いつ時点か」を必ず出す */
+        function renderFetchedAt() {
+          const at = state.prsFetchedAt;
+          els.prsFetchedAt.classList.remove("badge-stale");
+          if (!isTime(at)) {
+            els.prsFetchedAt.textContent = "まだ一度も取得できていません";
+            els.prsFetchedAt.classList.add("badge-stale");
+            return;
+          }
+          const now = Date.now();
+          els.prsFetchedAt.textContent = `${formatDateTime(at)} 時点（${formatElapsed(at, now)}）`;
+          if (now - at > PR_INDEX_STALE_MS) {
+            els.prsFetchedAt.classList.add("badge-stale");
+          }
+        }
+
+        function renderConnStatus() {
+          if (state.token === null) {
+            els.connStatus.textContent = "未接続";
+            return;
+          }
+          els.connStatus.textContent = isTime(state.lastUpdatedAt)
+            ? `最終更新 ${formatClock(state.lastUpdatedAt)}`
+            : "接続中";
+        }
+
+        // ── 取得 ─────────────────────────────────────
+
+        async function refreshClaims() {
+          const res = await api("/api/claims");
+          if (isUnauthorized(res)) return { unauthorized: true };
+          if (!res.ok || res.body === null || typeof res.body !== "object") {
+            els.claimsError.textContent = errorMessage(res, "表明を取得できませんでした。");
+            return { error: true };
+          }
+          state.claims = Array.isArray(res.body.claims) ? res.body.claims : [];
+          state.serverTime = isTime(res.body.serverTime) ? res.body.serverTime : Date.now();
+          els.claimsError.textContent = "";
+          renderClaims();
+          return { ok: true };
+        }
+
+        async function refreshTasks() {
+          const res = await api("/api/tasks");
+          if (isUnauthorized(res)) return { unauthorized: true };
+          if (!res.ok || res.body === null || typeof res.body !== "object") {
+            els.tasksError.textContent = errorMessage(res, "タスクを取得できませんでした。");
+            return { error: true };
+          }
+          state.tasks = Array.isArray(res.body.tasks) ? res.body.tasks : [];
+          els.tasksError.textContent = "";
+          renderTasks();
+          return { ok: true };
+        }
+
+        async function refreshPrs() {
+          const res = await api("/api/prs");
+          if (isUnauthorized(res)) return { unauthorized: true };
+          if (!res.ok || res.body === null || typeof res.body !== "object") {
+            els.prsError.textContent = errorMessage(res, "PR 索引を取得できませんでした。");
+            return { error: true };
+          }
+          state.prs = Array.isArray(res.body.prs) ? res.body.prs : [];
+          state.prsFetchedAt = isTime(res.body.fetchedAt) ? res.body.fetchedAt : null;
+          els.prsError.textContent = "";
+          renderPrs();
+          return { ok: true };
+        }
+
+        /**
+         * 3つまとめて取り直す。1つ失敗しても残りは出す（通信が切れても画面は壊さない）。
+         * 認証が通らなくなったときだけ、入力欄に戻す。
+         */
+        async function refreshAll() {
+          if (state.token === null) return;
+          const results = await Promise.all([refreshClaims(), refreshTasks(), refreshPrs()]);
+          if (results.some((r) => r.unauthorized === true)) {
+            dropToken("トークンが通らなくなりました。もう一度入力してください。");
+            return;
+          }
+          if (results.every((r) => r.ok === true)) {
+            state.lastUpdatedAt = Date.now();
+          }
+          // 表明との重なりの印は PR 側にも出るので、両方が揃ってから描き直す
+          renderPrs();
+          renderConnStatus();
+        }
+
+        // ── 自動更新（タブが見えている間だけ動かす） ──────────────
+
+        function stopTimer() {
+          if (state.timerId !== null) {
+            clearInterval(state.timerId);
+            state.timerId = null;
+          }
+        }
+
+        function startTimer() {
+          stopTimer();
+          if (!state.autoRefresh) return;
+          if (state.token === null) return;
+          if (document.hidden === true) return;
+          state.timerId = setInterval(refreshAll, POLL_MS);
+        }
+
+        function updateAutoRefreshUi() {
+          els.autoRefreshBtn.setAttribute("aria-pressed", String(state.autoRefresh));
+          els.autoRefreshLabel.textContent = state.autoRefresh
+            ? `自動更新: オン（${Math.round(POLL_MS / 1000)}秒ごと・このタブを見ている間だけ）`
+            : "自動更新: オフ";
+        }
+
+        /**
+         * タブが隠れている間はポーリングを止める（見ていない画面のために通信しない）。
+         * 戻ってきたら、間隔を待たずに1回取り直す。
+         */
+        function onVisibilityChange() {
+          if (document.hidden === true) {
+            stopTimer();
+            return;
+          }
+          startTimer();
+          if (state.token !== null) refreshAll();
+        }
+
+        // ── 認証（入力欄 ↔ ボード） ──────────────────────
+
+        function showGate(message) {
+          stopTimer();
+          els.gate.classList.remove("hidden");
+          els.board.classList.add("hidden");
+          els.tokenChange.classList.add("hidden");
+          els.gateError.textContent = message || "";
+          renderConnStatus();
+        }
+
+        function showBoard() {
+          els.gate.classList.add("hidden");
+          els.board.classList.remove("hidden");
+          els.tokenChange.classList.remove("hidden");
+          els.gateError.textContent = "";
+          renderConnStatus();
+        }
+
+        /** トークンを捨てて入力欄に戻す。持っていた中身も消す */
+        function dropToken(message) {
+          state.token = null;
+          state.claims = [];
+          state.tasks = [];
+          state.prs = [];
+          state.prsFetchedAt = null;
+          state.lastUpdatedAt = null;
+          sessionStorage.removeItem(STORAGE_KEY);
+          els.gateToken.value = "";
+          clear(els.claimsList);
+          clear(els.tasksList);
+          clear(els.prsList);
+          showGate(message);
+        }
+
+        /** トークンで繋いでみる。通ればボードを出し、自動更新を始める */
+        async function connect(token) {
+          state.token = token;
+          els.gateSubmit.disabled = true;
+          try {
+            const res = await api("/api/claims");
+            if (isUnauthorized(res)) {
+              state.token = null;
+              sessionStorage.removeItem(STORAGE_KEY);
+              showGate("トークンが違います。");
+              return;
+            }
+            if (!res.ok) {
+              state.token = null;
+              showGate("サーバーに繋がりません。時間をおいて試してください。");
+              return;
+            }
+            sessionStorage.setItem(STORAGE_KEY, token);
+            showBoard();
+            await refreshAll();
+            startTimer();
+          } finally {
+            els.gateSubmit.disabled = false;
+          }
+        }
+
+        // ── 操作の配線（on* 属性は使わない） ────────────────
+
+        els.gateForm.addEventListener("submit", (event) => {
+          event.preventDefault();
+          const token = els.gateToken.value.trim();
+          if (token.length === 0) {
+            els.gateError.textContent = "トークンを入力してください。";
+            return;
+          }
+          connect(token);
+        });
+
+        els.tokenChange.addEventListener("click", () => {
+          dropToken("");
+          els.gateToken.focus();
+        });
+
+        els.refreshNow.addEventListener("click", () => {
+          refreshAll();
+        });
+
+        els.autoRefreshBtn.addEventListener("click", () => {
+          state.autoRefresh = !state.autoRefresh;
+          updateAutoRefreshUi();
+          startTimer();
+        });
+
+        els.claimsShowDone.addEventListener("change", () => {
+          state.showDoneClaims = els.claimsShowDone.checked === true;
+          renderClaims();
+        });
+
+        els.taskForm.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          if (state.token === null) return;
+          const title = els.taskTitle.value.trim();
+          if (title.length === 0) {
+            els.tasksError.textContent = "やることを書いてください。";
+            return;
+          }
+          els.tasksError.textContent = "";
+          els.taskSubmit.disabled = true;
+          try {
+            const res = await api("/api/tasks", {
+              method: "POST",
+              body: { title, body: els.taskBody.value.trim() },
+            });
+            if (isUnauthorized(res)) {
+              dropToken("トークンが通らなくなりました。もう一度入力してください。");
+              return;
+            }
+            if (!res.ok) {
+              els.tasksError.textContent = errorMessage(res, "タスクを追加できませんでした。");
+              return;
+            }
+            els.taskTitle.value = "";
+            els.taskBody.value = "";
+            await refreshTasks();
+          } finally {
+            els.taskSubmit.disabled = false;
+          }
+        });
+
+        document.addEventListener("visibilitychange", onVisibilityChange);
+
+        // ── 起動 ─────────────────────────────────────
+
+        function boot() {
+          updateAutoRefreshUi();
+          renderFetchedAt();
+          const saved = sessionStorage.getItem(STORAGE_KEY);
+          if (typeof saved === "string" && saved.length > 0) {
+            connect(saved);
+          } else {
+            showGate("");
+          }
+        }
+
+        // tools/board/ui_test.ts はこの1行を差し替えて中身を取り出す（触るときは向こうも直す）
+        boot();
+      })();
+    </script>
+  </body>
+</html>

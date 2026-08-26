@@ -56,6 +56,9 @@
         padding-top: 20%;
         border-radius: 0 0 3px 3px;
         box-shadow: 0 12px 22px rgba(0, 0, 0, 0.4);
+        /* 布は棒にぶら下がっているので、振れる軸は上端。ここを既定の中心の
+           ままにすると、割れるときに布が空中で回って見える */
+        transform-origin: top center;
       }
 
       /* 棒に通す輪 */
@@ -201,31 +204,43 @@
         }
       }
 
-      @keyframes noren-split-left {
-        to {
-          transform: translate(-60px, -40px) rotate(-4deg);
+      /* WebGL が無いときの代役。3D 版（noren-scene.js）と同じ筋書きにしてある:
+         布が左右へ割れて手前を過ぎていき、その奥へ歩いて入っていく。
+         以前は3枚が斜め上へ飛んで消えるだけで、くぐった感じが無かった。 */
+      @keyframes noren-part-left {
+        30% {
+          transform: rotate(-5deg) scale(1.06);
+        }
+
+        100% {
+          transform: translateX(-62%) rotate(-13deg) scale(1.75);
           opacity: 0;
         }
       }
 
-      @keyframes noren-split-center {
-        to {
-          transform: translateY(-60px) scale(0.9);
+      /* 正面から割られる一枚。左右より一拍早く、まっすぐ手前へ抜ける */
+      @keyframes noren-part-center {
+        100% {
+          transform: translateY(6%) scale(2);
           opacity: 0;
         }
       }
 
-      @keyframes noren-split-right {
-        to {
-          transform: translate(60px, -40px) rotate(4deg);
+      @keyframes noren-part-right {
+        30% {
+          transform: rotate(5deg) scale(1.06);
+        }
+
+        100% {
+          transform: translateX(62%) rotate(13deg) scale(1.75);
           opacity: 0;
         }
       }
 
       @keyframes zoom-forward {
         to {
-          transform: scale(1.18);
-          opacity: 0.85;
+          transform: scale(1.28);
+          opacity: 0;
         }
       }
 
@@ -240,25 +255,29 @@
       }
 
       body.entering .noren span {
-        animation-duration: 500ms;
-        animation-timing-function: ease-in;
+        animation-duration: 700ms;
+        animation-timing-function: cubic-bezier(0.4, 0, 0.85, 0.6);
         animation-fill-mode: forwards;
       }
 
       body.entering .noren span:nth-child(1) {
-        animation-name: noren-split-left;
+        animation-name: noren-part-left;
+        animation-delay: 80ms;
       }
 
       body.entering .noren span:nth-child(2) {
-        animation-name: noren-split-center;
+        animation-name: noren-part-center;
       }
 
       body.entering .noren span:nth-child(3) {
-        animation-name: noren-split-right;
+        animation-name: noren-part-right;
+        animation-delay: 80ms;
       }
 
+      /* login.js の CSS_FALLBACK_MS と同じ長さ。ずれると、まだ動いている
+         途中で暗転が始まる（あるいは止まった絵を眺める間ができる） */
       body.entering main {
-        animation: zoom-forward 1300ms ease-in forwards;
+        animation: zoom-forward 1100ms ease-in forwards;
       }
 
       body.cover #enter-overlay {
@@ -272,19 +291,57 @@
         position: fixed;
         inset: 0;
         z-index: 40;
-        background: #050302;
+        /* 3D 側の背景（noren-scene.js の NIGHT）と同じ色にする。ここが違うと
+           溶け込んでいる 220ms のあいだに背景の色が跳ねて、継ぎ目が見える */
+        background: #140d07;
         opacity: 0;
         pointer-events: none;
+        /* ログイン画面から 3D へ溶かす。これが無いと完全なハードカットになる */
+        transition: opacity 220ms ease-out;
       }
 
       #noren-stage.visible {
         opacity: 1;
+        /* 出ているあいだは下の画面を触らせない（操作は JS 側で無効にしてあるが、
+           見えていない物を押せる状態にはしない） */
+        pointer-events: auto;
       }
 
       #noren-stage canvas {
         display: block;
         width: 100%;
         height: 100%;
+      }
+
+      /* 揺れを嫌う設定。この演出は全画面の一人称カメラ移動と拡大で、
+         このリポジトリでいちばん酔いやすい。動きは全部止めて「暖簾が
+         割れた向こう側」という絵だけを静かに出す（3D 側も noren-scene.js が
+         reducedMotion でくぐり終えた一コマだけを描く）。
+         残すのは不透明度のクロスフェードだけ。 */
+      @media (prefers-reduced-motion: reduce) {
+        body.entering .noren span {
+          animation: none;
+          transition: opacity 200ms linear;
+          opacity: 0.22;
+        }
+
+        body.entering .noren span:nth-child(1) {
+          transform: translateX(-44px);
+        }
+
+        body.entering .noren span:nth-child(3) {
+          transform: translateX(44px);
+        }
+
+        body.entering main {
+          animation: none;
+          transition: opacity 200ms linear;
+          opacity: 0.3;
+        }
+
+        #noren-stage {
+          transition: opacity 200ms linear;
+        }
       }
 
       .fineprint {

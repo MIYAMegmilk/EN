@@ -7,10 +7,41 @@ import { assert, assertEquals, assertFalse } from "@std/assert";
 import { startServer } from "../main.ts";
 import { SESSION_COOKIE_NAME } from "../auth.ts";
 import { DEBUG_TOKEN_HEADER } from "../debug.ts";
-import type { AuthSession } from "../types.ts";
+import type { AuthSession, User } from "../types.ts";
 
 function randomUserId(): string {
   return "user" + crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+}
+
+/**
+ * `kv.get()` が値を返した直後にフックを差し込む Deno.Kv のラッパー（テスト専用）。
+ *
+ * 楽観ロックの検査対象は「読み出してから書き戻すまでの間に別の書き込みが入ったら409」という
+ * 性質そのものなので、その隙間に確実に別の書き込みを割り込ませるために使う。
+ * 本番コードには一切手を入れず、`startServer` へ渡す Deno.Kv を差し替えるだけで成立させる
+ * （サーバーは受け取った Deno.Kv をそのまま使うので、テストからは境界がここしかない）。
+ *
+ * get 以外のメソッドは元の kv に束縛して素通しする（Proxy 越しに呼ぶと Deno.Kv 内部の
+ * プライベートフィールドへアクセスできず壊れるため、必ず bind してから返す）。
+ *
+ * 注意: このラッパーはキーの絞り込みをせず、すべての get でフックを呼ぶ。
+ * どのキーに反応するかはフック側で判定すること（例: `key[0] !== "user"` なら何もしない）。
+ * 絞らずに書き込みを差し込むと、セッション検証など無関係な読み出しにも割り込んでしまう。
+ */
+function kvWithGetHook(kv: Deno.Kv, hook: (key: Deno.KvKey) => Promise<void>): Deno.Kv {
+  return new Proxy(kv, {
+    get(target, prop) {
+      if (prop === "get") {
+        return async (key: Deno.KvKey, options?: { consistency?: Deno.KvConsistencyLevel }) => {
+          const entry = await target.get(key, options);
+          await hook(key);
+          return entry;
+        };
+      }
+      const value = Reflect.get(target, prop) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
 }
 
 /** Set-Cookie ヘッダーから Cookie 文字列を取り出す（次のリクエストの Cookie ヘッダーに使う） */
@@ -1033,9 +1064,25 @@ Deno.test("reset-limits: IPを指定したときもプロフィール保存の�
 // PUT /api/profile の楽観ロック（versionstamp の照合。競合したら409）
 // ---------------------------------------------------------------------------
 
-Deno.test("PUT /api/profile: 同時に保存すると片方が409になる（楽観ロック）", async () => {
+// 以前はこのケースを「2本の PUT を Promise.all で同時に投げ、片方が409になること」で
+// 確かめていたが、それは2本がサーバー内で本当に並行処理されることに賭けたテストだった。
+// 片方が先に完走してしまうと、後続は commit 済みの新しい versionstamp を読むため
+// check が通り、両方200になる（＝直後の「続けて保存する分には409にならず」と同じ状況）。
+// フルランで負荷が高いときほど直列化しやすく、散発的に落ちていた。
+// そこで「読み出しから書き戻すまでの間に別の書き込みが入る」状況を、タイミングではなく
+// Deno.Kv のラッパー（kvWithGetHook）で確実に作り出す形に直した。
+Deno.test("PUT /api/profile: 読み出しから書き戻すまでの間に別の保存が入ると409（楽観ロック）", async () => {
   const kv = await Deno.openKv(":memory:");
-  const server = startServer(0, "127.0.0.1", kv);
+  // ["user", ...] を読んだ直後に、1回だけ「横取りの保存」を差し込む。
+  // 仕込むまでは null なので、register や me など他の読み出しには影響しない
+  let steal: (() => Promise<void>) | null = null;
+  const hookedKv = kvWithGetHook(kv, async (key) => {
+    if (key[0] !== "user" || steal === null) return;
+    const run = steal;
+    steal = null;
+    await run();
+  });
+  const server = startServer(0, "127.0.0.1", hookedKv);
   try {
     const base = `http://127.0.0.1:${server.port}`;
     const userId = randomUserId();
@@ -1045,42 +1092,35 @@ Deno.test("PUT /api/profile: 同時に保存すると片方が409になる（楽
       body: JSON.stringify({ userId, password: "correcthorse" }),
     });
     const cookie = cookieFrom(registerRes);
-    const headers = { "content-type": "application/json", cookie };
 
-    // 先に2本の接続を開いておく。接続確立の待ちが入ると2つ目のリクエストが
-    // 1つ目の完了後に届いてしまい、同時保存の状況にならないため
-    const warmup = await Promise.all([
-      fetch(`${base}/api/me`, { headers: { cookie } }),
-      fetch(`${base}/api/me`, { headers: { cookie } }),
-    ]);
-    for (const res of warmup) await res.body?.cancel();
+    // 別のタブがこちらの読み出し直後に保存を済ませた状況。
+    // 素の kv を使うのでフックは再入しない
+    steal = async () => {
+      const current = await kv.get<User>(["user", userId]);
+      assert(current.value !== null, "横取り前にアカウントが存在すること");
+      await kv.set(["user", userId], {
+        ...current.value,
+        nickname: "よこどり",
+        tags: ["music"],
+      });
+    };
 
-    // 2つのタブから同時に保存した状況。素の set だと両方200になり先の変更が消える
-    const [left, right] = await Promise.all([
-      fetch(`${base}/api/profile`, {
-        method: "PUT",
-        headers,
-        body: JSON.stringify({ nickname: "ひだり", tags: ["game"] }),
-      }),
-      fetch(`${base}/api/profile`, {
-        method: "PUT",
-        headers,
-        body: JSON.stringify({ nickname: "みぎ", tags: ["music"] }),
-      }),
-    ]);
-    await left.body?.cancel();
-    await right.body?.cancel();
-    assertEquals(
-      [left.status, right.status].sort(),
-      [200, 409],
-      "片方だけが保存され、もう片方は409で弾かれること",
-    );
+    const res = await fetch(`${base}/api/profile`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ nickname: "ひだり", tags: ["game"] }),
+    });
+    // 先に「横取りが実際に差し込まれたか」を確かめる。ここが空振りしたまま
+    // ステータスの assert に進むと、「ロックが無い」のか「フックが刺さらなかった」のか
+    // 失敗メッセージから区別できなくなる
+    assertEquals(steal, null, "横取りの保存が実際に差し込まれたこと");
+    assertEquals(res.status, 409, "読んだ versionstamp が変わっているので409で弾かれること");
+    assert(typeof (await res.json()).error === "string", "error メッセージが返ること");
 
-    // 保存されたのは200を返した方の内容だけ（もう片方は書かれていない）
-    const winner = left.status === 200 ? "ひだり" : "みぎ";
-    const meBody = await (await fetch(`${base}/api/me`, { headers: { cookie } })).json();
-    assertEquals(meBody.nickname, winner);
-    assertEquals(meBody.tags, winner === "ひだり" ? ["game"] : ["music"]);
+    // 横取りした内容がそのまま残っている＝409を返した側は書き込んでいない
+    const stored = await kv.get<User>(["user", userId]);
+    assertEquals(stored.value?.nickname, "よこどり");
+    assertEquals(stored.value?.tags, ["music"]);
   } finally {
     await server.shutdown();
     kv.close();
