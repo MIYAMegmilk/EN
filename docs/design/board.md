@@ -101,7 +101,7 @@ GitHub API から定期取得したものを保持する。**API のレート制
 
 ## 6. API
 
-すべてトークン必須。`Authorization: Bearer <token>`。
+**`/api/*` はすべてトークン必須**（`Authorization: Bearer <token>`）。無認証なのは `GET /`（シェル HTML）の1本だけで、未知のパスや `POST /` も含めてそれ以外はすべて認証を通す。理由は §7-6 を参照。
 
 | メソッド | パス | 用途 |
 |---|---|---|
@@ -113,7 +113,7 @@ GitHub API から定期取得したものを保持する。**API のレート制
 | PATCH | `/api/tasks/:id` | タスク更新 |
 | POST | `/api/messages` | PR コメントとして投稿（保存しない） |
 | GET | `/api/prs` | PR 索引（キャッシュ） |
-| GET | `/` | 画面（HTML） |
+| GET | `/` | 画面のシェル HTML（**ここだけ認証不要**。情報を持たない器のみ。§7-6） |
 
 `/api/claims/check` がフックの中核。**「このファイルを触ろうとしている」に対して、重なる表明とオープン PR を返す。**
 
