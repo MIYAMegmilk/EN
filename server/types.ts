@@ -713,6 +713,14 @@ export type JudgePhaseView = {
   totalRounds: number;
   /** 採点方式 */
   scoring: ScoringMode;
+  /** 入力方式 */
+  inputType: InputType;
+  /**
+   * choice のときの選択肢。entries[].value（添字）を表示テキストに直すために載せる。
+   * prompt / input で全員に見せ済みの公開情報なので judge に載せても漏れない。
+   * 正解（answerIndex）は reveal 限定のままで、ここには含めない。
+   */
+  options?: string[];
   /** 表示方式 */
   reveal: RevealMode;
   /** 対象の回答一覧 */

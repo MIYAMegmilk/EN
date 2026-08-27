@@ -1238,14 +1238,32 @@ function renderInput(body, view) {
   body.appendChild(button);
 }
 
+/**
+ * 回答1件の表示テキスト。
+ *
+ * choice のとき RevealEntry.value は選択肢の添字（server/types.ts）なので、
+ * そのまま出すと「3」とだけ並んで誰が何を選んだのか読めない。選択肢のテキストに
+ * 引き直して出す。選択肢が無い（open 形式）・添字でない・範囲外のときは、
+ * 従来どおり文字列にしたものを返して表示を止めない。
+ */
+function entryValueText(view, value) {
+  if (view.inputType === "choice" && Array.isArray(view.options) && Number.isInteger(value)) {
+    const option = view.options[value];
+    // 範囲外の添字は undefined になるので、ここで弾いてフォールバックに落とす
+    if (typeof option === "string") return option;
+  }
+  return String(value);
+}
+
 /** 回答一覧（投票可能なら投票ボタンを付ける） */
 function renderEntries(view, canVote) {
   const list = el("ul");
   for (const entry of view.entries) {
     const item = el("li");
-    const label = entry.nickname === undefined
-      ? String(entry.value)
-      : `${entry.nickname}: ${entry.value}`;
+    const text = entryValueText(view, entry.value);
+    // el() は textContent で入れる。選択肢はゲーム作者が書いた文字列なので、
+    // HTML として解釈させない（innerHTML は使わない）
+    const label = entry.nickname === undefined ? text : `${entry.nickname}: ${text}`;
     item.appendChild(el("span", label));
     if (canVote) {
       const button = el("button", "投票");
