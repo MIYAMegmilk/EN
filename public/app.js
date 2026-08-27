@@ -1502,7 +1502,7 @@ function renderVc() {
 }
 
 /**
- * 画面共有（docs/design/vc-screenshare.md §10）のボタンと選択を更新する。
+ * 画面共有（docs/design/vc-screenshare.md §10）のボタンを更新する。
  *
  * 状態は必ず VC.getState() から導く（DOM から読み戻さない）。
  * 非対応の端末でもボタンは消さず、理由を title に出す。消してしまうと
@@ -1511,7 +1511,6 @@ function renderVc() {
  */
 function renderVcScreen(vc) {
   const button = $("vc-screen");
-  const kind = $("vc-screen-kind");
   // 同時に共有できるのは1人（§4.4）。他の人が共有中は自分から始められない
   const otherSharing = vc.sharingPeerId !== null && vc.screen !== true;
   const canStart = vc.active === true && vc.screenSupported === true && !otherSharing;
@@ -1527,8 +1526,6 @@ function renderVcScreen(vc) {
     button.title = "自分の画面を共有します（共有中はカメラを止めます）";
   }
   setVcControl(button, vc.screen === true, vc.screen === true ? "共有をやめる" : "画面共有");
-  // 種類は開始時に決まる。共有中に切り替えられるかのように見せない
-  kind.disabled = !canStart || vc.screen === true;
 }
 
 /**
@@ -1715,12 +1712,11 @@ function bindVc(iceServers) {
     vcScreenCooldownUntil = Date.now() + VC_SCREEN_COOLDOWN_MS;
     setTimeout(renderVc, VC_SCREEN_COOLDOWN_MS);
     if (VC.getState().screen === true) {
-      // 種類は毎回「文字」から始める（共有の中身は毎回違うので前回値は当たらない）
       Promise.resolve(VC.stopScreenShare()).then(renderVc, renderVc);
-      $("vc-screen-kind").value = "text";
       return;
     }
-    Promise.resolve(VC.startScreenShare($("vc-screen-kind").value)).then(renderVc, renderVc);
+    // 種類は「文字」固定（vc.js の SCREEN_DEFAULT_KIND）
+    Promise.resolve(VC.startScreenShare()).then(renderVc, renderVc);
   });
   $("vc-zoom-close").addEventListener("click", () => closeVcZoom());
   $("vc-zoom-full").addEventListener("click", toggleVcZoomFullscreen);
