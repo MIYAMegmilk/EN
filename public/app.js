@@ -918,16 +918,21 @@ function removePlayer(playerId) {
 }
 
 /**
- * 上の帯（のれんをくぐる・お会計・店内を歩く・卓を建てる）の出し入れ。
+ * 上の帯（のれんをくぐる・名札・お会計・店内を歩く・卓を建てる）の出し入れ。
  *
  * どれもお座敷一覧にいるときだけ出す。卓に着いている間は、
  * 抜ける道は「お先に失礼」の一本にしたい（帯からいきなり店を出たり、
  * 別の卓を建てたり、ゲストがログイン画面へ抜けたりできると、
  * 同席者への挨拶も VC の後始末も飛ばすことになる）。
+ *
+ * 名札（profile.html）もここで隠す。卓の趣味タグは入室時にコピーされたもの
+ * （server/rooms.ts のコメント参照）で、卓にいる間に profile.html で編集しても
+ * その場では反映されない。編集自体を卓の外でしかできないようにしておく。
  */
 function renderAccountBar() {
   const inRoom = state.snapshot !== null;
   $("login-link").classList.toggle("hidden", state.loggedIn || inRoom);
+  $("profile-link").classList.toggle("hidden", inRoom);
   $("logout").classList.toggle("hidden", !state.loggedIn || inRoom);
   $("corridor-link").classList.toggle("hidden", inRoom);
   // 卓を建てるにはログインが必要（§3.1）。ゲストのまま押すと login.html へ
