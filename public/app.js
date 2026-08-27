@@ -1729,6 +1729,7 @@ function openVcZoom(view) {
   if (played !== undefined && typeof played.catch === "function") {
     played.catch(() => {});
   }
+  syncVcZoomFullscreenLabel();
   $("vc-zoom-close").focus();
 }
 
@@ -1765,6 +1766,17 @@ function toggleVcZoomFullscreen() {
   }
   const video = $("vc-zoom-video");
   if (typeof video.webkitEnterFullscreen === "function") video.webkitEnterFullscreen();
+}
+
+/**
+ * 全画面の押し口の文言を、いまの状態に合わせる。
+ * 文言は「押すとどうなるか」を出す（品書きの他の押し口と同じ流儀）。
+ * iOS の webkitEnterFullscreen() は fullscreenchange を出さないので、
+ * その端末では「端末の全画面」のままになる（押しても害はない）。
+ */
+function syncVcZoomFullscreenLabel() {
+  const full = document.fullscreenElement === $("vc-zoom-stage");
+  $("vc-zoom-full").textContent = full ? "全画面を終える" : "端末の全画面";
 }
 
 /** VC モジュールを組み込む。iceServers が null なら VC 側の既定を使う */
@@ -1817,6 +1829,10 @@ function bindVc(iceServers) {
   });
   $("vc-zoom-close").addEventListener("click", () => closeVcZoom());
   $("vc-zoom-full").addEventListener("click", toggleVcZoomFullscreen);
+  // 映像そのものを二度押しでも全画面に入れる（動画の作法に合わせる）
+  $("vc-zoom-stage").addEventListener("dblclick", toggleVcZoomFullscreen);
+  // Escape や F11 で全画面が外れることもあるので、文言は状態から引き直す
+  document.addEventListener("fullscreenchange", syncVcZoomFullscreenLabel);
   // 覆いの余白を押したら閉じる（品書きと同じ作法）
   $("vc-zoom").addEventListener("click", (event) => {
     if (event.target === $("vc-zoom")) closeVcZoom();
@@ -1913,6 +1929,10 @@ function bind() {
   });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
+    // 端末の全画面中の Escape は「全画面を出る」ための押下。ここで覆いまで
+    // 畳むと、一度で共有画面そのものが消えてしまう（ブラウザ側が外すので
+    // 何もしないのが正しい。文言は fullscreenchange で引き直される）
+    if (document.fullscreenElement) return;
     toggleGamePlatform(false);
     // 共有画面の拡大表示も同じ作法で閉じる（vc-screenshare.md §7.2）
     closeVcZoom();
