@@ -1307,22 +1307,59 @@
         background: rgba(255, 255, 255, 0.18);
       }
 
-      /* 共有画面の拡大表示（§7.2）。覆いそのものは .platform を使い回す */
+      /*
+       * 共有画面の拡大表示（§7.2）。覆いの作法（Escape・背景クリック）は
+       * .platform を使い回すが、大きさは品書きの `min(1000px, 100%)` では
+       * 足りない。1000px の枠では 1920px 幅の画面が約 1/2 にしか戻らず、
+       * §7.1 の「読ませる」という目的に届かない。ここだけ窓いっぱいまで広げる。
+       */
+      #vc-zoom {
+        padding: 0;
+        /* 中央寄せではなく、上下左右いっぱいに伸ばす */
+        align-items: stretch;
+        justify-content: stretch;
+      }
+
+      #vc-zoom .platform-sheet {
+        width: 100%;
+        max-height: none;
+        /* 窓の縁に貼り付くので、角丸と縁取りは意味を失う */
+        border: 0;
+        border-radius: 0;
+      }
+
+      /* 見出しは映像の場所を食う。押し口が押せる高さだけ残して詰める */
+      #vc-zoom .platform-head {
+        padding: 6px 10px;
+      }
+
+      #vc-zoom .platform-head h2 {
+        font-size: 14px;
+      }
+
       .vc-zoom-stage {
         flex: 1;
         min-height: 0;
         display: flex;
         align-items: center;
         justify-content: center;
-        padding: 10px;
         background: #000;
       }
 
       .vc-zoom-video {
-        max-width: 100%;
-        max-height: 100%;
+        /* 枠を余さず使う。max-* だと 1280×720 の素の大きさで止まってしまい、
+           大きな窓でも「拡大したのにあまり変わらない」ままになる */
+        width: 100%;
+        height: 100%;
         /* 端を切らない。読ませるための拡大なので、全体が入ることが最優先 */
         object-fit: contain;
+        background: #000;
+      }
+
+      /* 端末の全画面のあいだは、覆いの縁も余白も見せない */
+      #vc-zoom-stage:fullscreen {
+        width: 100%;
+        height: 100%;
         background: #000;
       }
 
