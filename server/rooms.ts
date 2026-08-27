@@ -203,6 +203,14 @@ export type RoomManagerOptions = {
   /** 0 以上 1 未満の乱数（bot の文面選択・二つ名。テストでは固定値を渡す） */
   rng?: () => number;
   /**
+   * ゲーム開始時にモジュールへ渡す乱数の種（§2.5）を作る。
+   * 省略時は暗号論的乱数（`randomGameSeed`）。**本番では必ず省略すること。**
+   * 種から狼・お題・正解が決定的に導けるため、公開情報から作れる種を渡すと
+   * 改造クライアントに秘密を先読みされる。決定的な進行が要るテストだけが
+   * ここに固定値を返す関数を渡す。
+   */
+  gameSeed?: () => number;
+  /**
    * 川柳判定（§3.10 せり）。省略時はかなプロバイダのみで判定する。
    * kuromoji（漢字混じり対応）は読み込みが非同期なので、使う場合は
    * 起動時に作ったものを main.ts からここへ渡す。
@@ -406,6 +414,25 @@ function randomRoomCode(): string {
   }
 }
 
+/**
+ * ゲーム開始時にモジュールへ渡す乱数の種（設計書 §2.5）を暗号論的乱数で作る。
+ *
+ * **公開情報から種を作ってはならない。** かつてはルームコードと開始時刻の
+ * ハッシュ（FNV-1a）を種にしていたが、ルームコードは全参加者が知っており、
+ * 開始時刻も最初の `gameView` の `deadline` から厳密に逆算できる
+ * （wordwolf なら `deadline - 120000`）。種が割れるとモジュールの乱数列は
+ * すべて決定的なので、改造クライアントが議論開始前に狼・お題・クイズの正解を
+ * 算出できてしまう。ここで推測不能な種にすることで、その経路を塞ぐ。
+ *
+ * 進行の再現性が要るのはテストだけなので、決定的な種は
+ * `RoomManagerOptions.gameSeed` から注入する（`rng` と同じ形）。
+ */
+function randomGameSeed(): number {
+  const buf = new Uint32Array(1);
+  crypto.getRandomValues(buf);
+  return buf[0] >>> 0;
+}
+
 // ---------------------------------------------------------------------------
 // ルーム管理
 // ---------------------------------------------------------------------------
@@ -441,6 +468,8 @@ export class RoomManager {
   private readonly setTimer: (fn: () => void, ms: number) => TimerHandle;
   private readonly clearTimer: (handle: TimerHandle) => void;
   private readonly rng: () => number;
+  /** ゲーム開始時の乱数の種を作る（テストだけが固定値を注入する） */
+  private readonly gameSeed: () => number;
   private readonly senryu: (text: string) => SenryuMatch | null;
 
   constructor(options: RoomManagerOptions = {}) {
@@ -450,6 +479,7 @@ export class RoomManager {
     this.clearTimer = options.clearTimer ??
       ((handle) => clearTimeout(handle as unknown as number));
     this.rng = options.rng ?? Math.random;
+    this.gameSeed = options.gameSeed ?? randomGameSeed;
     this.senryu = options.senryu ?? createDefaultSenryuDetector();
   }
 
@@ -1177,7 +1207,9 @@ export class RoomManager {
     const result = module.init({
       players,
       now,
-      seed: gameSeed(room.code, now),
+      // 種は推測不能でなければならない（randomGameSeed のコメント参照）。
+      // ルームコードや now から作らないこと
+      seed: this.gameSeed(),
       config,
     });
     if (result.error !== undefined) {
@@ -2514,20 +2546,10 @@ function findBySession(room: Room, session: string): Player | null {
   return null;
 }
 
-/**
- * ゲーム開始時にモジュールへ渡す乱数の種（設計書 §2.5）。
- * ルームコードと開始時刻から決定的に作る。Math.random() を使わないのは、
- * 同じ入力からは同じ進行を再現できるようにするため（テストと不具合の再現のため）
- */
-export function gameSeed(roomCode: string, startedAt: number): number {
-  let h = 0x811c9dc5;
-  const source = `${roomCode}:${startedAt}`;
-  for (let i = 0; i < source.length; i++) {
-    h ^= source.charCodeAt(i);
-    h = Math.imul(h, 0x01000193) >>> 0;
-  }
-  return h >>> 0;
-}
+// かつてここに `gameSeed(roomCode, startedAt)`（FNV-1a）があったが、
+// 公開情報だけから種が再現できてしまうため削除した。
+// 種の作り方は `randomGameSeed` を、テストでの差し替えは
+// `RoomManagerOptions.gameSeed` を参照すること。
 
 /** 参加者本人の操作によるイベントか（エラーを返すべき相手がいるか） */
 function isPlayerAction(event: ModuleEvent): boolean {

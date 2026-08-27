@@ -14,12 +14,23 @@
  * 3. **`Math.random()` 禁止**: 乱数は init で受け取った seed を state に持ち、
  *    module.ts の nextSeed / randomInt / shuffle で決定的に進める（§2.5）。
  *    テストの再現性のためであり、例外は認めない。
+ * 3-a. **秘密を持つモジュールは seed を view に出さない**: seed を state に持つのは正しいが、
+ *    view へ載せてはならない。乱数の消費順序はソースに書いてあるので、seed が1つ漏れれば
+ *    狼・お題・正解・出題順はすべて決定的に計算できる（`view(state, viewerId)` で
+ *    誰に何を見せるか絞っても、seed が載っていれば意味が無い）。
+ *    `deadline` や参加者の並びなど、view に載る値から seed を逆算できる作りにもしないこと
+ *    （ルーム層は seed を暗号論的乱数で作る。`rooms.ts` の `randomGameSeed` を参照）。
+ *    **例外はクライアント専用ゲーム（`games/client.ts` 経路）だけ**で、そちらは
+ *    「サーバーが秘密を持たない・全員が同じ seed から同じ進行を各自で導く」ことが
+ *    経路の定義そのものなので、seed と startedAt を全員へ配るのが正しい。
+ *    この雛形（秘密を持ちうる専用モジュール）はその例外に当たらない。
  * 4. **`Date.now()` 禁止**: 時刻は event.now / input.now を使う。
  * 5. **payload は先頭で型検証**: clientEvent.payload は unknown。readKind / readInt /
  *    readString などで検証し、少しでも形が違えば INVALID_INPUT で棄却する（§9.1）。
  * 6. **秘密は view で絞る**: 正解・役職・他人の入力中の値は state にだけ置き、
  *    view(state, viewerId) が受信者ごとに出し分ける（§2.6）。
  *    「クライアントが表示しなければよい」は秘密の保持にならない。
+ *    **seed もこの「秘密」に含まれる**（規約3-a）。
  * 7. **schedule の後始末**: 終了時に `{ t: "schedule", at: null }` を出して予約を解除する。
  *    解除し忘れても timeout で壊れないように reduce を書く（終了後の timeout は無視する）。
  * 8. **score は1ゲーム1回**: 公式スコアへの加算はゲーム終了時にまとめて1回だけ出す。
@@ -54,7 +65,7 @@ type TemplateState = {
   deadline: number | null;
 };
 
-/** 受信者へ配る表示データ。秘密を含めないこと */
+/** 受信者へ配る表示データ。秘密を含めないこと（seed も載せない。規約3-a） */
 type TemplateView = {
   running: boolean;
   /** 自分の得点だけを載せる例。他人の得点を見せたいなら明示的に足す */
