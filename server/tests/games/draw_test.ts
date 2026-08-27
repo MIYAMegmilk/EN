@@ -245,6 +245,101 @@ Deno.test("秘密: 次のターンに入ると前のお題と描画は消える"
 });
 
 // ---------------------------------------------------------------------------
+// ヒント（お題の文字数）
+// ---------------------------------------------------------------------------
+
+/**
+ * お題を指定の語に差し替えた state を作る。抽選は seed 任せなので、
+ * 特定のお題（長音符を含む語など）を狙って検証するために使う。
+ * 正解の判定材料（answers）も本体と同じ作り方で揃える
+ */
+function withTopic(state: DrawState, word: string): DrawState {
+  const topic = DRAW_TOPICS.find((t) => t.word === word);
+  assertExists(topic, `お題一覧に無い語: ${word}`);
+  const answers = [topic.word, ...(topic.alts ?? [])]
+    .map(normalizeAnswer)
+    .filter((f) => f.length > 0);
+  return { ...state, topic: topic.word, answers };
+}
+
+Deno.test("ヒント: topicLength は長音符を落とさず、見たままの文字数になる", () => {
+  const base = start(["a", "b", "c"]);
+  // [お題, 期待する文字数]。照合用の正規化を通すと「けき」「らめん」のように縮む語が眼目
+  const cases: Array<[string, number]> = [
+    ["ケーキ", 3],
+    ["ラーメン", 4],
+    ["アイスクリーム", 7],
+    // 長音符も記号も含まない語は従来どおりの値のまま
+    ["ふじさん", 4],
+    ["おにぎり", 4],
+    ["ねこ", 2],
+  ];
+  for (const [word, expected] of cases) {
+    const state = withTopic(base, word);
+    assertEquals(viewOf(state, drawerOf(state)).topicLength, expected, `出題者の view: ${word}`);
+    for (const guesser of guessersOf(state)) {
+      assertEquals(viewOf(state, guesser).topicLength, expected, `回答者の view: ${word}`);
+    }
+  }
+});
+
+Deno.test("ヒント: 出題者に見えるお題の文字数と topicLength が全お題で一致する", () => {
+  const base = start(["a", "b", "c"]);
+  for (const entry of DRAW_TOPICS) {
+    const state = withTopic(base, entry.word);
+    const drawerView = viewOf(state, drawerOf(state));
+    assertExists(drawerView.topic, `出題者にお題が載っていない: ${entry.word}`);
+    // コードポイントで数える（サロゲートペアのお題が増えても壊れないように）
+    assertEquals(drawerView.topicLength, [...drawerView.topic].length, `お題: ${entry.word}`);
+    for (const guesser of guessersOf(state)) {
+      const guesserView = viewOf(state, guesser);
+      // 回答者にお題そのものは載らないが、ヒントの数は出題者と同じでなければならない
+      assertEquals(guesserView.topic, null);
+      assertEquals(guesserView.topicLength, drawerView.topicLength, `お題: ${entry.word}`);
+    }
+  }
+});
+
+Deno.test("ヒント: topicLength は draw / reveal / final で食い違わない", () => {
+  let state = withTopic(start(["a", "b"]), "ケーキ");
+  assertEquals(state.phase, "draw");
+  for (const id of state.order) {
+    assertEquals(viewOf(state, id).topicLength, 3, `draw 中: ${id}`);
+  }
+
+  state = step(state, { t: "skipPhase", now: T0 });
+  assertEquals(state.phase, "reveal");
+  for (const id of state.order) {
+    const view = viewOf(state, id);
+    assertEquals(view.topicLength, 3, `reveal 中: ${id}`);
+    // reveal ではお題そのものが見えるので、見えている文字数と一致すること
+    assertExists(view.topic);
+    assertEquals(view.topicLength, [...view.topic].length);
+  }
+
+  // 最終結果まで進める（お題は次ターンの語に変わるが、ずれてはいけない）
+  for (let guard = 0; guard < 20 && state.phase !== "final"; guard++) {
+    state = state.phase === "draw" ? step(state, { t: "skipPhase", now: T0 }) : timeout(state);
+  }
+  assertEquals(state.phase, "final");
+  for (const id of state.order) {
+    const view = viewOf(state, id);
+    assertExists(view.topic, `final でお題が見えない: ${id}`);
+    assertEquals(view.topicLength, [...view.topic].length, `final: ${id}`);
+  }
+});
+
+Deno.test("ヒント: 文字数の修正で正解判定は変わらない（ラーメン の表記ゆれ）", () => {
+  for (const answer of ["らめん", "ラーメン", "らーめん", "ラーメン！", " ら ー め ん "]) {
+    const state = withTopic(start(["a", "b", "c"]), "ラーメン");
+    const guesser = guessersOf(state)[0];
+    const result = chat(state, guesser, answer);
+    assertEquals(result.state.correct.length, 1, `正解として受理されなかった: ${answer}`);
+    assert(hasEffect(result.effects, "suppressChat"), `正解がチャットから消えない: ${answer}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // 描画中継（§2.7）
 // ---------------------------------------------------------------------------
 
