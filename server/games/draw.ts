@@ -192,6 +192,16 @@ export function normalizeAnswer(text: string): string {
   return folded.replace(/[ァ-ヶ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60));
 }
 
+/**
+ * 表示上の文字数を数える。サロゲートペア（絵文字など）を1文字として数えるため、
+ * UTF-16 のコード単位（String.length）ではなくコードポイントで数える。
+ * 回答者向けのヒントは**出題者に見える表記そのもの**を数えるので、
+ * normalizeAnswer()（長音符や記号を落とす照合用の処理）は通さない
+ */
+function charCount(text: string): number {
+  return [...text].length;
+}
+
 /** そのお題の正解として受理する、正規化済み文字列の一覧 */
 function acceptedForms(topic: DrawTopic): string[] {
   const forms = [topic.word, ...(topic.alts ?? [])].map(normalizeAnswer);
@@ -318,7 +328,11 @@ export type DrawView = {
    * reveal / final では全員に入る（答え合わせ）
    */
   topic: string | null;
-  /** お題の文字数（正規化後）。回答者向けのヒント。お題そのものは含まない */
+  /**
+   * お題の文字数。**出題者に見える表記（topic）そのものの文字数**で、
+   * 照合用の正規化（normalizeAnswer）は通さない。「ケーキ」は 3、「ラーメン」は 4。
+   * 回答者向けのヒントとして使う。お題そのものは含まない
+   */
   topicLength: number;
   /** 描画履歴（全員に配る。これが再描画の正本） */
   strokes: DrawStroke[];
@@ -533,7 +547,7 @@ export const drawModule: GameModule<DrawState, DrawView> = {
       // draw 中にお題が載るのは出題者の view だけ。回答者には null を入れる。
       // reveal / final は答え合わせなので全員に見せる（§2.6）
       topic: youAreDrawer || revealed ? state.topic : null,
-      topicLength: normalizeAnswer(state.topic).length,
+      topicLength: charCount(state.topic),
       strokes: state.strokes,
       rev: state.rev,
       pointCount: state.pointCount,
