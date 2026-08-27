@@ -829,6 +829,120 @@ Deno.test("rtcSignal: VC 枠外（7人目）が絡む中継は破棄する（§3
   manager.dispose();
 });
 
+/**
+ * VC 枠（先着 VC_CAPACITY 人）がちょうど埋まった卓を作る。
+ * host（参加順 0）+ ゲスト VC_CAPACITY 人 = VC_CAPACITY + 1 人。
+ * 最後のゲストだけが参加順 VC_CAPACITY（＝枠外の「7人目」）になる。
+ */
+function setupFullVcRoom(manager: RoomManager) {
+  const host = createRoom(manager);
+  const members: { link: MockLink; id: string }[] = [];
+  for (let i = 2; i <= VC_CAPACITY + 1; i++) {
+    const guest = joinRoom(manager, host.snapshot.code, `ゲスト${i}`);
+    assertExists(guest.state);
+    members.push({ link: guest.link, id: guest.state.snapshot.youId });
+  }
+  assertEquals(members.length, VC_CAPACITY);
+  const outOfVc = members[members.length - 1];
+  // 前提: 最後のゲストは枠外として配信されている
+  const players = last(outOfVc.link, "roomState")?.snapshot.players;
+  assertExists(players);
+  assertEquals(players.find((p) => p.id === outOfVc.id)?.vcEligible, false);
+  return { host, members, outOfVc };
+}
+
+/** ある参加者についての playerJoined（＝1人分の upsert）だけを取り出す */
+function joinedFor(link: MockLink, playerId: string) {
+  return all(link, "playerJoined").filter((m) => m.player.id === playerId);
+}
+
+Deno.test("VC 枠: 枠内の1人が退室すると、繰り上がった7人目に vcEligible=true が配信される（§3.6）", () => {
+  const { manager } = setup();
+  const { host, members, outOfVc } = setupFullVcRoom(manager);
+  const leaver = members[0];
+  const selfBefore = joinedFor(outOfVc.link, outOfVc.id).length;
+  const hostBefore = joinedFor(host.link, outOfVc.id).length;
+
+  manager.handle(leaver.link, { t: "leave" });
+
+  // 繰り上がった本人に届く（これが無いと「枠が埋まっています」のまま永久に入れない）
+  const self = joinedFor(outOfVc.link, outOfVc.id);
+  assertEquals(self.length, selfBefore + 1);
+  assertEquals(self[self.length - 1].player.vcEligible, true);
+  assertEquals(self[self.length - 1].player.id, outOfVc.id);
+  // 既に VC にいる側にも届く（届かないと相手を対象と見なさず ready を送らない）
+  const seen = joinedFor(host.link, outOfVc.id);
+  assertEquals(seen.length, hostBefore + 1);
+  assertEquals(seen[seen.length - 1].player.vcEligible, true);
+  // サーバー側の中継も通るようになっている
+  manager.handle(host.link, { t: "rtcSignal", to: outOfVc.id, payload: { kind: "ready" } });
+  assertEquals(last(outOfVc.link, "rtcSignal")?.from, host.snapshot.youId);
+  manager.dispose();
+});
+
+Deno.test("VC 枠: 枠内の1人がキックされても、繰り上がった7人目に配信される（§3.6）", () => {
+  const { manager } = setup();
+  const { host, members, outOfVc } = setupFullVcRoom(manager);
+  const target = members[0];
+  const selfBefore = joinedFor(outOfVc.link, outOfVc.id).length;
+
+  manager.handle(host.link, { t: "kick", playerId: target.id });
+
+  assertExists(last(outOfVc.link, "playerKicked"));
+  const self = joinedFor(outOfVc.link, outOfVc.id);
+  assertEquals(self.length, selfBefore + 1);
+  assertEquals(self[self.length - 1].player.vcEligible, true);
+  manager.handle(host.link, { t: "rtcSignal", to: outOfVc.id, payload: { kind: "ready" } });
+  assertEquals(last(outOfVc.link, "rtcSignal")?.from, host.snapshot.youId);
+  manager.dispose();
+});
+
+Deno.test("VC 枠: 切断の猶予切れで枠が空いたときも、繰り上がった7人目に配信される（§3.2 / §3.6）", () => {
+  const { clock, manager } = setup();
+  const { host, members, outOfVc } = setupFullVcRoom(manager);
+  const target = members[0];
+  const selfBefore = joinedFor(outOfVc.link, outOfVc.id).length;
+
+  // 切断しただけでは在籍は残るので、枠の割り当ては変わらない（配信も無い）
+  manager.disconnect(target.link);
+  assertEquals(joinedFor(outOfVc.link, outOfVc.id).length, selfBefore);
+  assertEquals(last(outOfVc.link, "playerLeft")?.player.id, target.id);
+
+  // 猶予を超えると退室化し、そこで初めて繰り上がる
+  clock.advance(DISCONNECT_GRACE_MS);
+  const self = joinedFor(outOfVc.link, outOfVc.id);
+  assertEquals(self.length, selfBefore + 1);
+  assertEquals(self[self.length - 1].player.vcEligible, true);
+  manager.handle(host.link, { t: "rtcSignal", to: outOfVc.id, payload: { kind: "ready" } });
+  assertEquals(last(outOfVc.link, "rtcSignal")?.from, host.snapshot.youId);
+  manager.dispose();
+});
+
+Deno.test("VC 枠: 割り当てが変わらない出入りでは余計な配信をしない（§3.6）", () => {
+  const { manager } = setup();
+  const { host, members, outOfVc } = setupFullVcRoom(manager);
+  const inVc = members[0];
+  const hostBefore = all(host.link, "playerJoined").length;
+  const inVcBefore = all(inVc.link, "playerJoined").length;
+
+  // 枠外の7人目が抜けても、枠内の6人の割り当ては動かない
+  manager.handle(outOfVc.link, { t: "leave" });
+  assertEquals(all(host.link, "playerJoined").length, hostBefore);
+  assertEquals(all(inVc.link, "playerJoined").length, inVcBefore);
+  assertEquals(last(host.link, "playerLeft")?.player.id, outOfVc.id);
+
+  // 人が増える向きでも既存の参加順は動かない。届くのは新入りの1通だけ
+  const late = joinRoom(manager, host.snapshot.code, "あとから");
+  assertExists(late.state);
+  const lateId = late.state.snapshot.youId;
+  const hostJoined = all(host.link, "playerJoined");
+  assertEquals(hostJoined.length, hostBefore + 1);
+  assertEquals(hostJoined[hostJoined.length - 1].player.id, lateId);
+  assertEquals(hostJoined[hostJoined.length - 1].player.vcEligible, false);
+  assertEquals(all(inVc.link, "playerJoined").length, inVcBefore + 1);
+  manager.dispose();
+});
+
 // ---------------------------------------------------------------------------
 // チャット（§3.9）
 // ---------------------------------------------------------------------------
