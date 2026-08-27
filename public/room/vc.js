@@ -58,6 +58,13 @@
    */
   const DEFAULT_ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
 
+  /**
+   * remote description が入る前に溜めておける ICE candidate の上限（1ピアあたり）。
+   * ふつうの接続で流れる candidate は多くても十数件なので、これに触れるのは
+   * 相手が SDP を送ってこないまま candidate だけを流している異常時だけ。
+   */
+  const MAX_PENDING_CANDIDATES = 64;
+
   // -------------------------------------------------------------------------
   // 品質監視のしきい値（§3.6「品質劣化時は映像を自動停止し音声優先」）
   //
@@ -240,7 +247,11 @@
      * await から戻った時点で見分けて掴んだマイクを捨てるために持つ。
      */
     joinGen: 0,
-    /** 自分の接続世代。join のたびに新しくする */
+    /**
+     * 自分の接続世代。join のたびに新しくし、相手が抜けてピアを畳んだときにも
+     * 進める（invalidateSession）。相手はこの値の変化を見て「前の接続は捨てて
+     * 張り直す」と判断する（onReady）
+     */
     session: null,
     /** マイクの MediaStream */
     micStream: null,
@@ -914,6 +925,17 @@
        * （removeTrack / addTrack は再ネゴシエーションを伴うため）。
        */
       videoSender: null,
+      /**
+       * remote description が入る前に届いた ICE candidate の置き場（§3.6）。
+       *
+       * `addIceCandidate()` は remote description が入る前に呼ぶと必ず失敗する。
+       * ところが ready → desc → ice の順で送っても、相手の candidate は
+       * こちらが setRemoteDescription() を終える前に届き得る（シグナリングの
+       * 中継と SDP の適用は別の速さで進む）。捨てると経路の候補がそのぶん減り、
+       * 繋がるまでが遅くなる・繋がらないことがある。届いた順のまま溜めておき、
+       * remote description が入った時点でまとめて流し込む。
+       */
+      pendingCandidates: [],
       /** 直近の判定でこのピア向けの送出が劣化していたか */
       degraded: false,
       /** 相手が映像の送出を止めていると申告しているか（kind: "video"） */
@@ -1046,6 +1068,9 @@
     state.quality.window.delete(playerId);
     removeSpeechMeter(playerId);
     peer.closed = true;
+    // 溜めておいた candidate も一緒に捨てる。畳んだピアのぶんが残ると、
+    // 同じ相手を張り直したときに前の接続の候補が混ざる（＝ 溜め込みの漏れ）
+    peer.pendingCandidates.length = 0;
     peer.videoSender = null;
     peer.pc.onnegotiationneeded = null;
     peer.pc.onicecandidate = null;
@@ -1145,6 +1170,10 @@
       peer.settingRemoteAnswer = description.type === "answer";
       await pc.setRemoteDescription(description);
       peer.settingRemoteAnswer = false;
+      // 待っているあいだに届いていた candidate をここで流し込む（§3.6）。
+      // setLocalDescription より前でよい（addIceCandidate に必要なのは
+      // remote description だけ）。失敗しても中の try/catch が握りつぶす
+      await flushPendingCandidates(peer);
       if (description.type === "offer") {
         await pc.setLocalDescription();
         // 待っている間に畳まれた接続の情報は送らない
@@ -1296,15 +1325,55 @@
     });
   }
 
-  /** ICE candidate の処理。衝突で捨てたオファー由来の失敗は無視する */
-  async function onCandidate(from, candidate) {
-    const peer = state.peers.get(from);
-    if (peer === undefined) return;
+  /** remote description が既に入っているか */
+  function hasRemoteDescription(pc) {
+    const description = pc.remoteDescription;
+    return description !== null && description !== undefined;
+  }
+
+  /**
+   * candidate を1件流し込む。衝突で捨てたオファー由来の失敗は無視する。
+   * 壊れた candidate（型違い・別の接続のもの）でも例外は握りつぶす。
+   * 1件の失敗で残りの candidate まで捨てないため。
+   */
+  async function addCandidate(peer, candidate) {
+    if (peer.closed) return;
     try {
       await peer.pc.addIceCandidate(candidate === null ? undefined : candidate);
     } catch (e) {
       if (!peer.ignoreOffer) console.error("VC addIceCandidate failed:", e);
     }
+  }
+
+  /** 溜めておいた candidate を届いた順に流し込む（§3.6） */
+  async function flushPendingCandidates(peer) {
+    if (peer.pendingCandidates.length === 0) return;
+    // 先に取り出してから流す。await のあいだに新しい candidate が届いても
+    // 二重に適用しない（届いたぶんは remote description 済みなので直に入る）
+    const queued = peer.pendingCandidates.splice(0, peer.pendingCandidates.length);
+    for (const candidate of queued) await addCandidate(peer, candidate);
+  }
+
+  /**
+   * ICE candidate の処理。
+   *
+   * remote description が入る前に addIceCandidate() を呼ぶと必ず失敗するので、
+   * 入るまでは届いた順に溜めておき、onDescription() が入れた直後に流し込む。
+   */
+  async function onCandidate(from, candidate) {
+    const peer = state.peers.get(from);
+    if (peer === undefined) return;
+    if (peer.closed) return;
+    if (!hasRemoteDescription(peer.pc)) {
+      // 相手が SDP を送ってこないまま candidate だけを流し続ける経路（不具合・
+      // 悪意）でも溜め込みが膨らまないように上限を置く。溢れたら古い順に捨てる
+      if (peer.pendingCandidates.length >= MAX_PENDING_CANDIDATES) {
+        peer.pendingCandidates.shift();
+      }
+      peer.pendingCandidates.push(candidate);
+      return;
+    }
+    await addCandidate(peer, candidate);
   }
 
   // -------------------------------------------------------------------------
@@ -1349,11 +1418,21 @@
     }
   }
 
-  /** 再接続時などにピアをすべて張り直す（§8 VC 行: 再ネゴシエーション） */
-  function restartPeers() {
-    closeAllPeers();
-    state.session = randomId();
-    announceReady();
+  /**
+   * 相手へ「こちらの持っていた接続は捨てた」と伝えるために接続世代を進める。
+   *
+   * `session` は onReady() が「同じ session への ready には返事をしない」という
+   * 打ち止めに使っている。相手が居なくなってこちらがピアを畳んだあと、相手が
+   * 戻ってきて ready を交わすとき、session が畳む前と同じままだと相手の側では
+   * `existing.remoteSession === session` が成り立ってしまい、**相手が抱えている
+   * 死んだピアがそのまま生き残る**（＝ 復帰した人の声が戻らない）。
+   *
+   * 進めるのは「相手が在籍・VC 枠から消えたので畳んだ」ときだけにする。
+   * onReady() の中の closePeer() で進めると、返事の ready がまた相手の世代を
+   * 進めさせ、両者で張り直しが往復して止まらなくなる。
+   */
+  function invalidateSession() {
+    if (state.session !== null) state.session = randomId();
   }
 
   // -------------------------------------------------------------------------
@@ -2407,18 +2486,59 @@
   function handleServerMessage(msg) {
     if (typeof msg !== "object" || msg === null) return;
     switch (msg.t) {
-      case "roomState":
+      case "roomState": {
+        // ------------------------------------------------------------------
+        // roomState は入室・再接続だけでなく、**得点の確定やノック**でも配られる
+        // （server/rooms.ts の score 適用後の配り直し）。以前はこれを受けるたびに
+        // ピアを全部張り直していたので、あそんでいる最中に何度も卓全員の通話が
+        // 途切れていた。張り直すのは「顔ぶれが実際に変わったとき」だけにする。
+        //
+        // 顔ぶれ＝ eligiblePeerIds()（自分以外で VC 枠に入っている接続中の人）。
+        // ピアを張る／畳む条件そのものなので、これが変わらないかぎり張り直す
+        // 理由は無い。得点やノックでは中身（score）しか動かないので1通も出ない。
+        //
+        // 自分が再接続した場合、自分から見た顔ぶれは変わらないので何もしない。
+        // 復帰は相手側が駆動する（相手は自分の切断で playerLeft を受けて
+        // ピアを畳み、invalidateSession() で世代を進めてある。復帰の
+        // playerJoined を受けて新しい session の ready を送ってくるので、
+        // こちらの死んだピアはそこで畳まれて張り直る。docs/testing/vc-manual.md 4-3）
+        // ------------------------------------------------------------------
+        const before = state.active ? new Set(eligiblePeerIds()) : null;
         state.selfId = msg.snapshot.youId;
         syncPlayers(msg.snapshot.players);
-        // 再接続時は自分のピアがすべて無効になっているので張り直す
-        if (state.active) restartPeers();
+        if (before === null) return;
+        const after = new Set(eligiblePeerIds());
+        // 顔ぶれから消えた相手のピアだけを畳む（playerLeft を取りこぼした場合の保険）
+        for (const id of before) {
+          if (after.has(id)) continue;
+          closePeer(id);
+          invalidateSession();
+        }
+        // 新しく顔ぶれに入った相手にだけ参加を告げる。既にピアがある相手へは送らない。
+        // 告げ方は playerJoined の経路とそろえる（受け手は ready でピアを同期的に
+        // 作ってから戻るので、続けて送る映像・マイクの状態を取りこぼさない・§4.3）
+        for (const id of after) {
+          if (before.has(id)) continue;
+          if (state.peers.has(id)) continue;
+          signal(id, { kind: "ready", session: state.session });
+          announceVideoStateTo(id);
+          announceMicStateTo(id);
+        }
         return;
+      }
       case "playerJoined": {
         const known = state.peers.has(msg.player.id);
         upsertPlayer(msg.player);
         if (!state.active) return;
-        // 再接続してきた相手の古いピアは使えないので畳んでから告知する
-        if (known) closePeer(msg.player.id);
+        // 再接続してきた相手の古いピアは使えないので畳んでから告知する。
+        // 畳んだことは世代にも残す。こちらが相手の切断（playerLeft）を取りこぼして
+        // いた場合（例: 双方がほぼ同時に切れて、片方が先に戻った）、session が
+        // 据え置きだと下の ready が相手側で「同じ世代」と見なされ、相手が抱えて
+        // いる死んだピアがそのまま残る
+        if (known) {
+          closePeer(msg.player.id);
+          invalidateSession();
+        }
         if (msg.player.id !== state.selfId && msg.player.vcEligible) {
           signal(msg.player.id, { kind: "ready", session: state.session });
           // 後から入ってきた相手にも、いまの映像状態（カメラか画面か）を伝える（§4.3）
@@ -2431,11 +2551,16 @@
         // 切断・退室のどちらでも該当ピアだけを閉じる（§8 VC 行）
         upsertPlayer(msg.player);
         closePeer(msg.player.id);
+        // 畳んだことを世代に残す。この人が猶予内に戻ってきたとき、こちらから送る
+        // ready の session が変わっていないと、相手が抱えている死んだピアが
+        // 「同じ session だから何もしない」で生き残ってしまう
+        invalidateSession();
         return;
       case "playerKicked":
         // キックされた参加者との接続は即時クローズする（§3.6）
         state.players.delete(msg.playerId);
         closePeer(msg.playerId);
+        invalidateSession();
         return;
       case "kicked":
         leave();
