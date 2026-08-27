@@ -454,10 +454,9 @@ async function refreshAccount() {
   $("account-status").textContent = loggedIn ? `ログイン中: ${body.userId}` : "未ログイン";
   $("login-link").classList.toggle("hidden", loggedIn);
   // 名札（profile.html）はログイン中・ゲストどちらも編集できるので常に表示する
-  // 卓を建てるにはログインが必要（§3.1）。ゲストのまま押すと login.html へ
-  // 弾かれてしまうので、押せないよう見せるのではなくボタンごと隠す
-  $("create-room-link").classList.toggle("hidden", !loggedIn);
-  renderLogout();
+  // 店内を歩く・卓を建てるの出し分けは renderAccountBar() に任せる（卓に着いている
+  // 間も隠す必要があり、ログイン状態だけでは決まらないため）
+  renderAccountBar();
 
   // 保存済みのあだ名があれば入室欄に自動入力する（§3.0）。ユーザーが既に入力していたら上書きしない
   if (loggedIn && typeof body.nickname === "string" && $("nickname").value === "") {
@@ -920,15 +919,19 @@ function removePlayer(playerId) {
 }
 
 /**
- * 「お会計」の出し入れ。
+ * 上の帯（お会計・店内を歩く・卓を建てる）の出し入れ。
  *
- * お座敷一覧にいるときだけ出す。卓に着いている間は、抜ける道は
- * 「お先に失礼」の一本にしたい（帯からいきなり店を出られると、
- * 同席者への挨拶も VC の後始末も飛ばすことになる）。
+ * どれもお座敷一覧にいるときだけ出す。卓に着いている間は、
+ * 抜ける道は「お先に失礼」の一本にしたい（帯からいきなり店を出たり、
+ * 別の卓を建てたりできると、同席者への挨拶も VC の後始末も飛ばすことになる）。
  */
-function renderLogout() {
+function renderAccountBar() {
   const inRoom = state.snapshot !== null;
   $("logout").classList.toggle("hidden", !state.loggedIn || inRoom);
+  $("corridor-link").classList.toggle("hidden", inRoom);
+  // 卓を建てるにはログインが必要（§3.1）。ゲストのまま押すと login.html へ
+  // 弾かれてしまうので、押せないよう見せるのではなくボタンごと隠す
+  $("create-room-link").classList.toggle("hidden", !state.loggedIn || inRoom);
 }
 
 /**
@@ -950,7 +953,7 @@ function playerTagsRow(tags) {
 /** 画面全体を描き直す */
 function renderAll() {
   const snapshot = state.snapshot;
-  renderLogout();
+  renderAccountBar();
   $("entry").classList.toggle("hidden", snapshot !== null);
   $("room").classList.toggle("hidden", snapshot === null);
   $("vc").classList.toggle("hidden", snapshot === null);
