@@ -238,39 +238,83 @@ async function refreshMe() {
   $("me-result").textContent = "未ログイン";
 }
 
-$("register").addEventListener("click", async () => {
-  const userId = $("register-userid").value;
-  const password = $("register-password").value;
-  const { ok, status, body } = await callApi("/api/auth/register", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ userId, password }),
-  });
-  if (ok) {
-    showStatus(`登録・ログインしました（userId: ${body.userId}）`);
-    await playEnterAnimation();
-    location.href = "/entrance.html";
-  } else {
-    showRegisterError(`登録に失敗しました (${status}): ${body?.error ?? "unknown error"}`);
-  }
-});
+/**
+ * 送信中かどうか。二重送信の番人。
+ *
+ * サーバー側の上限は登録が3件/時、ログインが5回/分（server/auth.ts の
+ * REGISTER_LIMIT / LOGIN_LIMIT）。応答が遅いときに押し直すのはごく普通の操作
+ * なので、塞がないと3回連打しただけでその IP が1時間登録できなくなる。
+ * ボタンの disabled だけに頼らずフラグも持つのは、handler が直接呼ばれる経路
+ * （Enter キーの配線や自動化）でも1回に抑えるため（hayaoshi.js の buzzSent と同じ作法）
+ */
+let submitting = false;
 
-$("login").addEventListener("click", async () => {
-  const userId = $("login-userid").value;
-  const password = $("login-password").value;
-  const { ok, status, body } = await callApi("/api/auth/login", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ userId, password }),
-  });
-  if (ok) {
-    showStatus(`ログインしました（userId: ${body.userId}）`);
-    await playEnterAnimation();
+/**
+ * ログイン・登録の送信をまとめる。押した瞬間に塞ぐのがこの関数の役目。
+ *
+ * 成功したらそのまま暖簾をくぐる演出に入り、ページを離れる。その経路では
+ * 塞いだままにする（戻すと、遷移が始まるまでの間にもう一度押せてしまう）。
+ * 失敗・通信断のときだけ finally で戻す（debug.js の reset-limits と同じ形）
+ */
+async function submitCredentials({ path, userId, password, successText, failLabel, onFail }) {
+  if (submitting) return;
+  submitting = true;
+  setControlsDisabled(true);
+  showStatus("送信しています…");
+  let leaving = false;
+  try {
+    const { ok, status, body } = await callApi(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userId, password }),
+    });
+    if (!ok) {
+      onFail(`${failLabel}に失敗しました (${status}): ${body?.error ?? "unknown error"}`);
+      return;
+    }
+    showStatus(`${successText}（userId: ${body?.userId}）`);
+    try {
+      await playEnterAnimation();
+    } catch (err) {
+      // 演出が転んでも入店は止めない。ここで投げると塞いだまま戻れなくなる
+      // deno-lint-ignore no-console
+      console.error("enter animation failed", err);
+    }
+    // ここから先はページを離れるだけなので、塞ぎは戻さない。
+    // 途中で転んだときは戻す側に倒れるよう、印を立てるのは最後にする
+    leaving = true;
     location.href = "/entrance.html";
-  } else {
-    showLoginError(`ログインに失敗しました (${status}): ${body?.error ?? "unknown error"}`);
+  } catch {
+    // この callApi は fetch を包んでいないので、サーバー停止・圏外はここへ来る。
+    // 黙って戻すと「押したのに無反応」になり、まさに連打を誘う
+    onFail(`${failLabel}に失敗しました。サーバーに繋がりませんでした`);
+  } finally {
+    if (!leaving) {
+      submitting = false;
+      setControlsDisabled(false);
+    }
   }
-});
+}
+
+$("register").addEventListener("click", () =>
+  submitCredentials({
+    path: "/api/auth/register",
+    userId: $("register-userid").value,
+    password: $("register-password").value,
+    successText: "登録・ログインしました",
+    failLabel: "登録",
+    onFail: showRegisterError,
+  }));
+
+$("login").addEventListener("click", () =>
+  submitCredentials({
+    path: "/api/auth/login",
+    userId: $("login-userid").value,
+    password: $("login-password").value,
+    successText: "ログインしました",
+    failLabel: "ログイン",
+    onFail: showLoginError,
+  }));
 
 /**
  * ブラウザの「戻る」で bfcache から復元されたときの後始末。

@@ -11,6 +11,16 @@
 
 "use strict";
 
+/**
+ * 卓に付けられるタグの上限。server/types.ts の ROOM_TAGS_MAX と必ず同じにする
+ * （ビルド無しの構成なので値を二重に持つ）。
+ *
+ * 超えたまま送ると、卓そのものは WebSocket で建つのに、説明文とタグを載せる
+ * PATCH /api/rooms/:code だけが 400 で弾かれる。結果「卓はできたのに説明文が
+ * 丸ごと消えた」ように見えるので、遷移する前にここで止める
+ */
+const TAGS_MAX = 5;
+
 function $(id) {
   return document.getElementById(id);
 }
@@ -100,12 +110,19 @@ $("create-room-submit").addEventListener("click", () => {
     showError("お座敷一覧に出す卓には名前が必要です");
     return;
   }
+  const tags = checkedTagIds();
+  // サーバーと同じ上限をここでも見る。遷移してしまうと、弾かれたことに気づける
+  // 場所が卓の中の小さなエラー表示だけになり、書いた説明文も戻ってこない
+  if (tags.length > TAGS_MAX) {
+    showError(`タグは${TAGS_MAX}個以内で選んでください`);
+    return;
+  }
   RoomHandoff.setPendingCreateRoom({
     nickname,
     visibility,
     roomName,
     description: $("create-room-description").value,
-    tags: checkedTagIds(),
+    tags,
     entryMode: $("create-room-entry-mode").value === "knock" ? "knock" : "open",
     passphrase: $("create-room-passphrase").value,
   });
