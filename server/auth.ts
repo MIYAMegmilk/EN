@@ -89,8 +89,31 @@ function randomHex(byteLength: number): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/**
+ * PBKDF2 を実際に回した回数。
+ *
+ * 「存在しないユーザーIDでも、存在するユーザーIDと同じだけ鍵導出を回してから 401 を返す」
+ * ことをテストから**決定的に**確認するために公開する（時間そのものを測るテストは
+ * 並列実行で不安定になる。server/tests/senryu_test.ts の経緯を参照）。
+ * 秘密は一切含まない単なるカウンタ。
+ */
+let pbkdf2Calls = 0;
+
+/** PBKDF2 の実行回数（テスト用。login のタイミング均一化の検証に使う） */
+export function pbkdf2CallCount(): number {
+  return pbkdf2Calls;
+}
+
+/**
+ * ユーザーが存在しないときに使うダミー salt（プロセス起動時に1回だけ生成）。
+ * 実在のアカウントとは無関係な値で、外へは出ない。ここで作った salt に対して
+ * 本物と同じ反復回数の PBKDF2 を回し、応答時間からアカウントの有無が読めないようにする。
+ */
+const DUMMY_SALT = randomBase64(SALT_BYTES);
+
 /** PBKDF2-HMAC-SHA256 でパスワードをハッシュ化する（§3.0） */
 async function hashPassword(password: string, saltB64: string): Promise<string> {
+  pbkdf2Calls++;
   const keyMaterial = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(password),
@@ -392,6 +415,13 @@ export class AuthApi {
     const entry = await this.#kv.get<User>(["user", userId]);
     if (entry.value === null) {
       // ユーザー不在。応答は次のパスワード不一致と同じ401・同じ文言のまま変えない（§3.0）。
+      //
+      // 文言を揃えるだけでは足りない。ここで素通しすると KV 参照だけで 401 が返るのに対し、
+      // 実在するIDでは PBKDF2 600,000回（実測 約85ms）を挟んでから 401 になる。約150倍の
+      // 差はネットワークのゆらぎに埋もれないため、応答時間だけでアカウントの有無が分かる
+      // （ユーザー列挙）。実在する場合と**同じ回数**の鍵導出をダミー salt に対して回し、
+      // 結果は捨てることで経路を揃える。
+      await hashPassword(password, DUMMY_SALT);
       // 区別はこの内部記録だけで行う（オーナーの困りごと: 「どこでログインがはじかれているか」）。
       this.#debug?.record(
         "login.userNotFound",

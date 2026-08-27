@@ -13,6 +13,7 @@
  */
 
 import { loadSync } from "@std/dotenv";
+import { encodeBase64 } from "@std/encoding/base64";
 import { serveDir } from "@std/http/file-server";
 import { fromFileUrl } from "@std/path";
 import { AuthApi, sessionToken, verifySession } from "./auth.ts";
@@ -125,7 +126,12 @@ const SECURITY_HEADERS: ReadonlyArray<[string, string]> = [
 class SocketLink implements ClientLink {
   readonly id = crypto.randomUUID();
 
-  constructor(private readonly socket: WebSocket, readonly userId: string | null) {}
+  constructor(
+    private readonly socket: WebSocket,
+    readonly userId: string | null,
+    /** ハンドシェイク時の実クライアントIP。ノックのレート制限のキーに使う（§3.8） */
+    readonly clientIp: string,
+  ) {}
 
   send(msg: S2C): void {
     if (this.socket.readyState !== WebSocket.OPEN) return;
@@ -180,6 +186,53 @@ export class MessageRateLimiter {
     while (this.times.length > 0 && at - this.times[0] >= WS_RATE_WINDOW_MS) this.times.shift();
     this.times.push(at);
     return this.times.length <= this.max;
+  }
+}
+
+/**
+ * `/api/ice` の配布レート制限（§3.8）。1IPあたりの件数と判定窓。
+ *
+ * 正当な利用は「index.html を1回開くごとに1件」（public/app.js の start()）なので、
+ * 個人の使い方で当たることはまずない。共有IP（NAT の内側に何人もいる家庭・職場）を
+ * 塞がないよう 60件/分と緩めに置く。TURN 認証情報の本当の防御は「時限化」であり
+ * （TURN_SECRET / turnRestCredential 参照）、ここは大量収集と HMAC 計算の連打を
+ * 抑えるための保険。**締めすぎると TURN が配られず VC が繋がらなくなる**ので、
+ * 迷ったら緩い側に倒す（取得に失敗しても app.js は STUN のみで続行する）。
+ */
+export const ICE_RATE_MAX = 60;
+export const ICE_RATE_WINDOW_MS = 60_000;
+
+/**
+ * IP をキーにした簡易スライディングウィンドウ（§3.8）。
+ * auth.ts の RateLimiter と違い掃除用のタイマーを持たない（停止時に片付けるものを
+ * 増やさないため）。窓から外れた記録は呼び出しのたびに捨て、キー数が maxKeys を
+ * 超えたときにだけ全体を走査して古いキーを落とす。
+ */
+export class IpRateLimiter {
+  readonly #hits = new Map<string, number[]>();
+
+  constructor(
+    private readonly max: number,
+    private readonly windowMs: number,
+    private readonly maxKeys = 10_000,
+  ) {}
+
+  /** 呼び出しを1回計上し、上限を超えていれば false を返す */
+  tryConsume(key: string, now: number): boolean {
+    const cutoff = now - this.windowMs;
+    if (this.#hits.size > this.maxKeys) {
+      for (const [k, times] of this.#hits) {
+        if (times.length === 0 || times[times.length - 1] <= cutoff) this.#hits.delete(k);
+      }
+    }
+    const times = (this.#hits.get(key) ?? []).filter((t) => t > cutoff);
+    if (times.length >= this.max) {
+      this.#hits.set(key, times);
+      return false;
+    }
+    times.push(now);
+    this.#hits.set(key, times);
+    return true;
   }
 }
 
@@ -418,6 +471,7 @@ async function handleWebSocket(
   kv: Deno.Kv | null,
   debug: DebugRecorder,
   live: Set<ClientLink>,
+  ip: string,
 ): Promise<Response> {
   if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
     return new Response("expected websocket upgrade", { status: 400 });
@@ -434,7 +488,7 @@ async function handleWebSocket(
   const token = sessionToken(req);
   const userId = kv !== null ? await verifySession(kv, token) : null;
   const { socket, response } = Deno.upgradeWebSocket(req);
-  const link = new SocketLink(socket, userId);
+  const link = new SocketLink(socket, userId, ip);
   live.add(link);
   // レート制限は「1接続あたり」の規定（§3.8）だが、用途で枠を分ける。VC のシグナリング
   // （§3.6）はフルメッシュの trickle ICE が短時間に集中するため、一般枠（20件/秒）では
@@ -601,6 +655,44 @@ async function handleWebSocket(
 // ---------------------------------------------------------------------------
 
 /**
+ * 要求パスの先頭にある連続スラッシュを1つに畳む。
+ *
+ * `new URL("//evil.com/room", origin)` は**プロトコル相対URL**として解釈され、
+ * ホストが攻撃者の指定した値に入れ替わる。畳まずに配信へ渡すと
+ *   - `//evil.com/room` … `serveDir` のスラッシュ補完が `Location: http://evil.com/room/`
+ *     を返す（オープンリダイレクト）
+ *   - `//` `///` `//?a=1` … ホスト名が空になり `TypeError: Invalid URL`（無認証で500）
+ *   - `//nonexistent.txt` … 存在しないパスでも 200 + index.html が返る
+ *   - `//` … トップページの振り分け（未ログイン→login.html）を素通りする
+ * が起きる。畳めば `/evil.com/room` になり、`public/` に無いので普通に 404 になる。
+ */
+export function collapseLeadingSlashes(pathname: string): string {
+  return pathname.replace(/^\/{2,}/, "/");
+}
+
+/**
+ * デバッグ画面の静的ファイル（`/debug.html` `/debug.js`）への要求か。
+ *
+ * `url.pathname` はパーセントエンコードを保つため、生文字列の完全一致では
+ * `/%64ebug.html`（`d` → `%64`）や `/debug%2ehtml` がゲートを素通りする
+ * （`serveDir` は配信時にデコードするので本体は返ってしまう）。デコードしてから
+ * 判定し、開発機（大小を無視するファイルシステム）と本番で挙動が食い違わないよう
+ * 大文字小文字も無視する。
+ *
+ * 不正なパーセントエスケープ（`%zz` 等）は `decodeURIComponent` が例外を投げるので
+ * `null` を返し、呼び出し側が 400 にする。
+ */
+export function debugStaticPathOf(pathname: string): { isDebug: boolean } | null {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(collapseLeadingSlashes(pathname));
+  } catch {
+    return null;
+  }
+  return { isDebug: DEBUG_STATIC_PATHS.has(decoded.toLowerCase()) };
+}
+
+/**
  * public/ を配信する。serveDir が fsRoot の外へ出ないためパストラバーサルは起きない。
  * トップページはログイン済みなら entrance.html、未ログインなら login.html を返す。
  */
@@ -610,6 +702,9 @@ async function handleStatic(
   debugApi: DebugApi,
 ): Promise<Response> {
   const url = new URL(req.url);
+  // 先頭の "//" はプロトコル相対URLとして解釈される。配信へ渡す前に必ず畳む
+  // （collapseLeadingSlashes のコメント参照）
+  const pathname = collapseLeadingSlashes(url.pathname);
   // デバッグ画面（public/debug.html・public/debug.js の2ファイル）は EN_DEBUG_TOKEN が
   // 未設定のときだけ「存在しない」ように404を返す（無効を示す応答にしない）。
   //
@@ -618,15 +713,17 @@ async function handleStatic(
   // 送れないため、ここでトークン一致まで要求すると /debug.html に到達する手段が無くなり
   // デバッグ画面そのものが開けなくなる。実質的な防御は /api/debug/* 側のトークン一致で行う
   // （画面が開けても、トークンを知らなければ API が404を返すので中身は見えない）。
-  if (DEBUG_STATIC_PATHS.has(url.pathname) && !debugApi.isEnabled()) {
+  const debugPath = debugStaticPathOf(pathname);
+  if (debugPath === null) return new Response("bad request", { status: 400 });
+  if (debugPath.isDebug && !debugApi.isEnabled()) {
     return new Response("not found", { status: 404 });
   }
-  let path = url.pathname;
+  let path = pathname;
   // "/" の中身はログイン状態（Cookie）で変わるため、ブラウザにキャッシュさせない。
   // これが無いと、ログアウト後に "/" を開いてもキャッシュされた entrance.html が
   // そのまま返ってしまう（ログイン状態が変わったことにブラウザは気づけない）
-  const isSessionDependent = url.pathname === "/";
-  if (/^\/r\/[0-9]{6}\/?$/.test(url.pathname)) {
+  const isSessionDependent = pathname === "/";
+  if (/^\/r\/[0-9]{6}\/?$/.test(pathname)) {
     // 招待 URL（/r/{code}）は同じ画面を返す（§2）
     path = "/index.html";
   } else if (isSessionDependent) {
@@ -635,7 +732,11 @@ async function handleStatic(
     const userId = kv !== null ? await verifySession(kv, token) : null;
     path = userId !== null ? "/entrance.html" : "/login.html";
   }
-  const rewritten = new Request(new URL(path + url.search, url.origin), req);
+  // ベース URL への相対解決（new URL(path, origin)）は使わない。path 側にホストが
+  // 混ざる余地を無くすため、元の URL を複製して**パスだけ**を差し替える
+  const target = new URL(url);
+  target.pathname = path;
+  const rewritten = new Request(target, req);
   const res = await serveDir(rewritten, { fsRoot: PUBLIC_DIR, quiet: true });
   const headers = new Headers(res.headers);
   for (const [key, value] of SECURITY_HEADERS) headers.set(key, value);
@@ -657,12 +758,27 @@ export type IceServer = {
   credential?: string;
 };
 
-/**
- * ICE サーバー一覧を組み立てる。
- * TURN 認証情報は `.env`（無ければ環境変数）から読み、3つ揃ったときだけ載せる。
- * 値は /api/ice の応答以外に出さない（ログにも残さない §3.8）。
- */
-export function buildIceServers(): IceServer[] {
+/** TURN 認証情報の既定の有効期間（秒）。TURN_SECRET を設定したときだけ使う */
+export const TURN_CREDENTIAL_TTL_DEFAULT_SEC = 3600;
+/** 有効期間として受け付ける範囲（秒）。範囲外・数値でない値は既定へ倒す */
+const TURN_CREDENTIAL_TTL_MIN_SEC = 60;
+const TURN_CREDENTIAL_TTL_MAX_SEC = 24 * 3600;
+
+/** 起動時に1回だけ読む TURN の設定 */
+export type TurnConfig = {
+  /** TURN の URL。空なら TURN を配らない */
+  urls: string;
+  /** 長期認証情報（secret が空のときだけ使う） */
+  username: string;
+  credential: string;
+  /** coturn の static-auth-secret。設定すると時限クレデンシャルを発行する */
+  secret: string;
+  /** 時限クレデンシャルの有効期間（秒） */
+  ttlSec: number;
+};
+
+/** `.env`（無ければ環境変数）から TURN の設定を読む */
+export function readTurnConfig(): TurnConfig {
   let dotenv: Record<string, string> = {};
   try {
     dotenv = loadSync({ export: false });
@@ -670,12 +786,71 @@ export function buildIceServers(): IceServer[] {
     // .env を読めない環境（権限なし等）では環境変数だけを使う
   }
   const read = (key: string): string => (dotenv[key] ?? Deno.env.get(key) ?? "").trim();
+  const ttlRaw = Number(read("TURN_TTL_SEC"));
+  const ttlSec = Number.isInteger(ttlRaw) &&
+      ttlRaw >= TURN_CREDENTIAL_TTL_MIN_SEC && ttlRaw <= TURN_CREDENTIAL_TTL_MAX_SEC
+    ? ttlRaw
+    : TURN_CREDENTIAL_TTL_DEFAULT_SEC;
+  return {
+    urls: read("TURN_URL"),
+    username: read("TURN_USER"),
+    credential: read("TURN_PASS"),
+    secret: read("TURN_SECRET"),
+    ttlSec,
+  };
+}
+
+/**
+ * coturn の TURN REST API 方式（`use-auth-secret` + `static-auth-secret`）で
+ * 時限クレデンシャルを1件作る。
+ *
+ *   username   = "<有効期限のUNIX秒>:<ラベル>"
+ *   credential = base64(HMAC-SHA1(static-auth-secret, username))
+ *
+ * 共有秘密そのものはクライアントへ出ない。配った資格情報は ttlSec で失効するため、
+ * `/api/ice` から収集されても踏み台として使える時間が限られる（§3.8）。
+ */
+export async function turnRestCredential(
+  secret: string,
+  ttlSec: number,
+  nowMs: number,
+  label = "en",
+): Promise<{ username: string; credential: string }> {
+  const username = `${Math.floor(nowMs / 1000) + ttlSec}:${label}`;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-1" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(username));
+  return { username, credential: encodeBase64(new Uint8Array(signature)) };
+}
+
+/**
+ * ICE サーバー一覧を組み立てる。
+ * TURN_SECRET があれば時限クレデンシャルを発行し、無ければ従来どおり
+ * TURN_URL / TURN_USER / TURN_PASS の長期認証情報を（3つ揃ったときだけ）載せる。
+ * 値は /api/ice の応答以外に出さない（ログにも残さない §3.8）。
+ */
+export async function buildIceServers(
+  config: TurnConfig = readTurnConfig(),
+  nowMs: number = Date.now(),
+): Promise<IceServer[]> {
   const servers: IceServer[] = [{ urls: STUN_URL }];
-  const urls = read("TURN_URL");
-  const username = read("TURN_USER");
-  const credential = read("TURN_PASS");
-  if (urls !== "" && username !== "" && credential !== "") {
-    servers.push({ urls, username, credential });
+  if (config.urls === "") return servers;
+  if (config.secret !== "") {
+    const { username, credential } = await turnRestCredential(
+      config.secret,
+      config.ttlSec,
+      nowMs,
+    );
+    servers.push({ urls: config.urls, username, credential });
+    return servers;
+  }
+  if (config.username !== "" && config.credential !== "") {
+    servers.push({ urls: config.urls, username: config.username, credential: config.credential });
   }
   return servers;
 }
@@ -708,9 +883,9 @@ export function useKuromojiSenryu(): boolean {
 }
 
 /** JSON をそのまま返す。TURN 認証情報や在室人数を含むため保存させない */
-function jsonResponse(body: string): Response {
+function jsonResponse(body: string, status = 200): Response {
   return new Response(body, {
-    status: 200,
+    status,
     headers: {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
@@ -797,7 +972,18 @@ export function startServer(
     }),
   });
   // 環境変数の読込は起動時の1回だけにする
-  const iceBody = JSON.stringify({ iceServers: buildIceServers() });
+  const turnConfig = readTurnConfig();
+  // TURN_SECRET が無い（＝長期認証情報）の構成では応答が固定なので、初回に組み立てて使い回す。
+  // 時限クレデンシャルのときは使い回すと失効させる意味がなくなるので毎回作り直す
+  let staticIceBody: string | null = null;
+  const iceBodyFor = async (nowMs: number): Promise<string> => {
+    const body = JSON.stringify({ iceServers: await buildIceServers(turnConfig, nowMs) });
+    if (turnConfig.secret !== "") return body;
+    staticIceBody ??= body;
+    return staticIceBody;
+  };
+  /** /api/ice の配布制限（§3.8）。TURN 認証情報の収集を1IPあたりに抑える */
+  const iceLimiter = new IpRateLimiter(ICE_RATE_MAX, ICE_RATE_WINDOW_MS);
   // デバッグ機能（オーナー困りごと: 「どこでログインがはじかれているのかわからない」への対応）。
   // EN_DEBUG_TOKEN が設定されているときだけ有効。空文字（未設定 or 空値）は無効扱いにする。
   const debugToken = (Deno.env.get("EN_DEBUG_TOKEN") ?? "").trim();
@@ -815,16 +1001,59 @@ export function startServer(
     () => buildDebugSummary(manager, startedAt),
     auth !== null ? (ip?: string) => auth.resetRateLimits(ip) : null,
   );
-  const server = Deno.serve({ port, hostname, onListen: () => {} }, async (req, info) => {
+  const server = Deno.serve({
+    port,
+    hostname,
+    onListen: () => {},
+    /*
+     * 想定外の例外を 500 の定型応答と**1行**のログに畳む。
+     * 既定の onError はスタックトレースを丸ごと stderr に出すため、認証不要の
+     * 1リクエストで journald を膨らませられてしまう（DebugRecorder のリングバッファ
+     * とは別経路なので抑制も効かない）。応答本文に中身は出さない。
+     */
+    onError: (error: unknown) => {
+      console.error(
+        `unhandled request error: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return new Response("Internal Server Error", { status: 500 });
+    },
+  }, async (req, info) => {
     const url = new URL(req.url);
     if (url.pathname === "/ws") {
-      return await handleWebSocket(req, manager, kv ?? null, debug, liveLinks);
+      return await handleWebSocket(
+        req,
+        manager,
+        kv ?? null,
+        debug,
+        liveLinks,
+        clientIp(req, info.remoteAddr.hostname, proxyHops),
+      );
     }
+    // ICE サーバー設定（§3.6）。TURN の認証情報を載せるため、無認証でいくらでも
+    // 収集されないように Origin 検証とIPごとのレート制限を通す（§3.8）。
+    // ログイン必須にはしない: 卓にはゲストのまま入れる仕様（§3.0）なので、
+    // ログインを条件にするとゲストの VC が繋がらなくなる。
+    // 資格情報そのものは TURN_SECRET を設定すれば時限化される（buildIceServers 参照）
     if (url.pathname === "/api/ice") {
       if (req.method !== "GET") {
         return new Response("method not allowed", { status: 405, headers: { allow: "GET" } });
       }
-      return jsonResponse(iceBody);
+      if (!isAllowedOrigin(req)) {
+        debug.record(
+          "origin.rejected",
+          "APIリクエストを拒否: Origin がこのサーバーと一致しません",
+          { path: url.pathname, origin: req.headers.get("origin") ?? "" },
+        );
+        return new Response("forbidden origin", { status: 403 });
+      }
+      const now = Date.now();
+      if (!iceLimiter.tryConsume(clientIp(req, info.remoteAddr.hostname, proxyHops), now)) {
+        return jsonResponse(
+          JSON.stringify({ error: "リクエストが多すぎます。しばらくしてから再度お試しください" }),
+          429,
+        );
+      }
+      return jsonResponse(await iceBodyFor(now));
     }
     // 公開ルーム一覧（§4.0）。認証不要・10秒ポーリング前提なのでキャッシュさせない
     if (url.pathname === "/api/rooms") {

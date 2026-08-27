@@ -97,6 +97,37 @@ export const WS_GAME_EVENT_HARD_MAX = 150;
  */
 export const GAME_EVENT_PAYLOAD_MAX_BYTES = 4 * 1024;
 
+/**
+ * rtcSignal の payload の直列化サイズ上限（バイト、§3.6 / §3.8）。超過は棄却する。
+ *
+ * 上限が無いと WS 1メッセージの上限（MAX_MESSAGE_BYTES = 64KB）だけが効き、rtcSignal は
+ * 専用のレート枠（ソフト上限 WS_SIGNAL_RATE_MAX = 100件/秒）を持つため、同じ卓の VC 枠内の
+ * 相手1人へ 64KB × 100件/秒 ≒ 6.4MB/秒 を送りつけられる。
+ *
+ * 値の根拠（Chromium 151 で実測。offer を vc.js の payload 形
+ * `{kind:"desc",description:{type,sdp}}` に載せた JSON のバイト数）:
+ *
+ *   音声のみ（m-line 1本）                       1,507 B
+ *   音声+映像（このアプリの最大構成・トラック無し） 6,227 B
+ *   音声+映像（実トラックを載せた offer）         6,443 B
+ *   同上の answer                                6,142 B
+ *   音声+映像2本（将来 m-line が増えた場合）      10,951 B
+ *   音声+映像3本                                 15,669 B
+ *   ICE candidate 1件（trickle。最大）              235 B
+ *
+ * vc.js は音声1本 + 映像1本（カメラ/画面共有は同じ sender を replaceTrack で使い回す）
+ * なので実際の最大は約 6.4KB。16KB は実測最大の約2.5倍で、m-line が3本に増えても収まる。
+ * これより小さくすると（例: 8KB）ブラウザや将来のコーデック追加で正当な SDP が弾かれ、
+ * 通話が繋がらなくなる恐れがある。16KB にすると増幅は 1.6MB/秒 まで落ちる（64KB の1/4）。
+ */
+export const RTC_SIGNAL_PAYLOAD_MAX_BYTES = 16 * 1024;
+
+/**
+ * 1アカウントが同時に持てるルーム数の上限（§3.8「ルーム作成: 1アカウントにつき同時3ルームまで」）。
+ * ランダムマッチが生成する卓（ownerUserId が空文字）は誰の持ち物でもないので数えない。
+ */
+export const ROOMS_PER_ACCOUNT_MAX = 3;
+
 // ---------------------------------------------------------------------------
 // §5 データモデル
 // ---------------------------------------------------------------------------
@@ -347,7 +378,11 @@ export type RoomVisibility = "public" | "private";
 /** 公開ルームの入室方式（§3.1）。既定は open */
 export type RoomEntryMode = "open" | "knock";
 
-/** 同一セッションから同一ルームへノックできる間隔（ミリ秒、§3.8） */
+/**
+ * 同一の相手から同一ルームへノックできる間隔（ミリ秒、§3.8）。
+ * 「同一の相手」の判定キーは **IP**（取れないときは接続ID）。接続IDだけをキーにすると
+ * WS を張り直すだけで別キーになり、この間隔がまったく効かない（rooms.ts の knock 参照）。
+ */
 export const KNOCK_RATE_WINDOW_MS = 10_000;
 
 /** ランダムマッチの成立判定の周期（ミリ秒、§3.1.2） */
