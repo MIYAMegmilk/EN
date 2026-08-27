@@ -281,8 +281,10 @@ $("login").addEventListener("click", async () => {
  * bfcache 復元はスクリプトを再実行せず離脱時の DOM をそのまま蘇らせるため、
  * これらを戻さないと「暗転しきった画面で固まって何も押せない」状態になる。
  *
- * ログイン済みのまま戻ってきた場合は refreshMe() が entrance.html へ
- * 送り返してくれるので、ここでは画面を操作可能な状態に戻すだけでよい。
+ * ここで refreshMe() を呼んで entrance.html へ転送し直すこともできるが、
+ * それだと「戻るボタンを押した瞬間に画面がチラついて別の画面に飛ぶ」形に
+ * なってしまう。ログイン中でもこの画面のまま操作可能に戻すだけにしておけば、
+ * 素直な「戻る」の見た目になる（もう一度ログインしても実害はない）
  */
 globalThis.addEventListener("pageshow", (e) => {
   if (!e.persisted) return;
@@ -292,7 +294,6 @@ globalThis.addEventListener("pageshow", (e) => {
   $("status").textContent = "";
   $("login-error").textContent = "";
   $("register-error").textContent = "";
-  refreshMe();
 });
 
 Sound.bindButtons();
