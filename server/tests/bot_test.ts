@@ -33,13 +33,16 @@ import {
   CLOSING_TEXTS,
   CONTINUE_TEXTS,
   FINAL_REACTION_TEXTS,
+  NAMING_TEXTS,
   NICKNAME_ADJECTIVES,
   NICKNAME_NOUNS,
   ROUND_REACTION_TEXTS,
   SENRYU_EXACT_TEXTS,
   SENRYU_VOICE_TEXTS,
+  TAG_NICKNAME_WORDS,
   TOPIC_CARDS,
 } from "../bot_templates.ts";
+import { type HobbyTagId, hobbyTagLabel } from "../hobby_tags.ts";
 import { createKanaProvider, detectSenryu, SENRYU_TOLERANCE } from "../senryu.ts";
 import { NICKNAME_MAX } from "../types.ts";
 
@@ -115,17 +118,95 @@ function advanceToPoll(overrides: Partial<BotContext> = {}): { state: BotState; 
 // しゅんぴ（あだ名bot）
 // ---------------------------------------------------------------------------
 
-Deno.test("pickNickname: プリセットの組み合わせから20文字以内で選ぶ", () => {
-  const name = pickNickname(new Set(), firstRng);
-  assertEquals(name, `${NICKNAME_ADJECTIVES[0]}${NICKNAME_NOUNS[0]}`);
-  assert(name.length <= NICKNAME_MAX);
+/** pickNickname の呼び出しを短く書くためのヘルパー。既定は「タグ無し・空の卓」 */
+function nickname(
+  options: {
+    tags?: readonly HobbyTagId[];
+    taken?: Iterable<string>;
+    othersTags?: readonly HobbyTagId[];
+    rng?: () => number;
+  } = {},
+) {
+  return pickNickname({
+    tags: options.tags ?? [],
+    taken: new Set(options.taken ?? []),
+    othersTags: options.othersTags ?? [],
+  }, options.rng ?? firstRng);
+}
+
+/** 形容 × 名詞の総当たり。テスト側で「その段の候補」を作るのに使う */
+function combos(adjectives: readonly string[], nouns: readonly string[]): string[] {
+  return adjectives.flatMap((a) => nouns.map((n) => `${a}${n}`));
+}
+
+Deno.test("pickNickname: タグ無しなら汎用プールから20文字以内で選ぶ", () => {
+  const choice = nickname();
+  assertEquals(choice.name, `${NICKNAME_ADJECTIVES[0]}${NICKNAME_NOUNS[0]}`);
+  assertEquals(choice.tagId, undefined);
+  assert(choice.name.length <= NICKNAME_MAX);
 });
 
 Deno.test("pickNickname: すでに使われている名前は避ける", () => {
-  const taken = new Set([`${NICKNAME_ADJECTIVES[0]}${NICKNAME_NOUNS[0]}`]);
-  const name = pickNickname(taken, firstRng);
-  assert(!taken.has(name));
-  assert(name.length <= NICKNAME_MAX);
+  const taken = [`${NICKNAME_ADJECTIVES[0]}${NICKNAME_NOUNS[0]}`];
+  const choice = nickname({ taken });
+  assert(!taken.includes(choice.name));
+  assert(choice.name.length <= NICKNAME_MAX);
+});
+
+Deno.test("pickNickname: タグが1つならその連想語だけで組み立てる", () => {
+  const words = TAG_NICKNAME_WORDS.reading;
+  const choice = nickname({ tags: ["reading"] });
+  assertEquals(choice.name, `${words.adjectives[0]}${words.nouns[0]}`);
+  assertEquals(choice.tagId, "reading");
+});
+
+Deno.test("pickNickname: 由来タグの語が埋まったら他タグの形容を借りる", () => {
+  // firstRng は先頭を選ぶので由来タグは alcohol。その組み合わせを全部埋めておく
+  const alcohol = TAG_NICKNAME_WORDS.alcohol;
+  const camping = TAG_NICKNAME_WORDS.camping;
+  const choice = nickname({
+    tags: ["alcohol", "camping"],
+    taken: combos(alcohol.adjectives, alcohol.nouns),
+  });
+  assertEquals(choice.tagId, "alcohol");
+  assert(
+    combos(camping.adjectives, alcohol.nouns).includes(choice.name),
+    `他タグの形容 × 由来タグの名詞になっていない: ${choice.name}`,
+  );
+});
+
+Deno.test("pickNickname: 卓の他の人と被らないタグを由来に選ぶ", () => {
+  const choice = nickname({ tags: ["game", "reading"], othersTags: ["game"] });
+  assertEquals(choice.tagId, "reading");
+});
+
+Deno.test("pickNickname: 全部のタグが卓で被っていても由来は本人のタグから選ぶ", () => {
+  const choice = nickname({ tags: ["game"], othersTags: ["game", "game"] });
+  assertEquals(choice.tagId, "game");
+});
+
+Deno.test("pickNickname: 同じタグの語が枯れたら混成→汎用の順に降りる", () => {
+  const words = TAG_NICKNAME_WORDS.reading;
+  const pure = combos(words.adjectives, words.nouns);
+  // 1段目を埋めると、タグの語を片側だけ残した混成に降りる（由来はまだ reading）
+  const mixed = nickname({ tags: ["reading"], taken: pure });
+  assertEquals(mixed.tagId, "reading");
+  assert(
+    combos(NICKNAME_ADJECTIVES, words.nouns).includes(mixed.name) ||
+      combos(words.adjectives, NICKNAME_NOUNS).includes(mixed.name),
+    `混成になっていない: ${mixed.name}`,
+  );
+  // 混成まで埋めると汎用プールに落ち、由来タグは名乗らない
+  const generic = nickname({
+    tags: ["reading"],
+    taken: [
+      ...pure,
+      ...combos(NICKNAME_ADJECTIVES, words.nouns),
+      ...combos(words.adjectives, NICKNAME_NOUNS),
+    ],
+  });
+  assertEquals(generic.tagId, undefined);
+  assertEquals(generic.name, `${NICKNAME_ADJECTIVES[0]}${NICKNAME_NOUNS[0]}`);
 });
 
 Deno.test("pickNickname: 100人ぶん引いても重複しない", () => {
@@ -136,10 +217,27 @@ Deno.test("pickNickname: 100人ぶん引いても重複しない", () => {
     return seed / 2147483648;
   };
   for (let i = 0; i < 100; i++) {
-    const name = pickNickname(taken, rng);
-    assert(!taken.has(name), `重複: ${name}`);
-    assert(name.length <= NICKNAME_MAX);
-    taken.add(name);
+    const choice = pickNickname({ tags: [], taken, othersTags: [] }, rng);
+    assert(!taken.has(choice.name), `重複: ${choice.name}`);
+    assert(choice.name.length <= NICKNAME_MAX);
+    taken.add(choice.name);
+  }
+});
+
+Deno.test("pickNickname: 同じタグの100人ぶんでも重複せず20文字に収まる", () => {
+  const taken = new Set<string>();
+  const othersTags: HobbyTagId[] = [];
+  let seed = 7;
+  const rng = () => {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    return seed / 2147483648;
+  };
+  for (let i = 0; i < 100; i++) {
+    const choice = pickNickname({ tags: ["reading"], taken, othersTags }, rng);
+    assert(!taken.has(choice.name), `重複: ${choice.name}`);
+    assert(choice.name.length <= NICKNAME_MAX, `長すぎる: ${choice.name}`);
+    taken.add(choice.name);
+    othersTags.push("reading");
   }
 });
 
@@ -159,6 +257,35 @@ Deno.test("しゅんぴ: あだ名未入力のときだけ命名を告知する"
     ctx(T0),
   );
   assertEquals(withOwnName.utterances.filter((u) => u.botId === "shunpi").length, 0);
+});
+
+Deno.test("しゅんぴ: 連想元のタグを渡すと由来を明かす文面になる", () => {
+  const tagged = reduce(
+    createBotState(T0),
+    {
+      t: "playerJoined",
+      playerId: "p1",
+      nickname: "",
+      assignedNickname: "よふかしフクロウ",
+      namingTagId: "reading",
+    },
+    ctx(T0),
+  );
+  const naming = tagged.utterances.filter((u) => u.botId === "shunpi");
+  assertEquals(naming.length, 1);
+  assert(naming[0].text.includes("よふかしフクロウ"));
+  // タグの表示名は hobby_tags.ts が正本。bot 側に写していないことも兼ねて見る
+  assert(naming[0].text.includes(hobbyTagLabel("reading")), naming[0].text);
+
+  // タグ由来でないときは従来の文面。「{tag}」が埋まらずに漏れていないかも見る
+  const plain = reduce(
+    createBotState(T0),
+    { t: "playerJoined", playerId: "p1", nickname: "", assignedNickname: "たそがれカピバラ" },
+    ctx(T0),
+  );
+  const plainNaming = plain.utterances.filter((u) => u.botId === "shunpi");
+  assertEquals(plainNaming.length, 1);
+  assert(NAMING_TEXTS.some((t) => t.replace("{name}", "たそがれカピバラ") === plainNaming[0].text));
 });
 
 // ---------------------------------------------------------------------------

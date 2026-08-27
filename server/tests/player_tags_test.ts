@@ -14,6 +14,12 @@
 import { assert, assertEquals, assertExists } from "@std/assert";
 import { type ClientLink, RoomManager } from "../rooms.ts";
 import { SILENCE_MS } from "../bot.ts";
+import {
+  NAMING_TEXTS,
+  NICKNAME_ADJECTIVES,
+  NICKNAME_NOUNS,
+  TAG_NICKNAME_WORDS,
+} from "../bot_templates.ts";
 import { HOBBY_TAGS_MAX, type HobbyTagId } from "../hobby_tags.ts";
 import { MATCH_INTERVAL_MS } from "../types.ts";
 import type { S2C } from "../types.ts";
@@ -263,6 +269,107 @@ Deno.test("趣味タグ: 相席の待機列でも不正なタグは弾く（並�
   assertEquals(last(link, "error")?.code, "INVALID_INPUT");
   // 列に並べていないので、抜ける通知（queueStatus）も来ない
   assertEquals(last(link, "queueStatus"), undefined);
+  manager.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// 用途1の派生: あだ名の連想元（§3.10 しゅんぴ × §3.11）
+//
+// タグから連想したあだ名が付くこと自体は bot_test.ts が見ている。ここで見るのは
+// 「本人のタグが しゅんぴ まで届いているか」という配線で、rooms.ts が
+// あだ名を決めるより先にタグを検証していないと成立しない。
+// ---------------------------------------------------------------------------
+
+/** あだ名を省いて入る。しゅんぴが二つ名を付ける経路 */
+function joinAnonymously(manager: RoomManager, code: string, tags?: HobbyTagId[]) {
+  const link = new MockLink();
+  manager.handle(link, {
+    t: "join",
+    roomCode: code,
+    ...(tags === undefined ? {} : { tags }),
+  });
+  return link;
+}
+
+/** 卓にいる「ホスト以外の1人」のあだ名。しゅんぴが付けた名前を取り出す */
+function assignedName(link: MockLink): string {
+  const state = last(link, "roomState");
+  assertExists(state);
+  const guest = state.snapshot.players.find((p) => p.nickname !== "ホスト");
+  assertExists(guest);
+  return guest.nickname;
+}
+
+/** 形容 × 名詞の総当たり */
+function combos(adjectives: readonly string[], nouns: readonly string[]): string[] {
+  return adjectives.flatMap((a) => nouns.map((n) => `${a}${n}`));
+}
+
+Deno.test("趣味タグ: あだ名を省いた人には、タグから連想した二つ名が付く（§3.11 用途1）", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  const guest = joinAnonymously(manager, host.code, ["reading"]);
+
+  const words = TAG_NICKNAME_WORDS.reading;
+  const name = assignedName(guest);
+  assert(
+    combos(words.adjectives, words.nouns).includes(name),
+    `読書から連想した名前になっていない: ${name}`,
+  );
+  // しゅんぴが由来を明かす。あだ名が偶然でないと場に伝わらないと話題のフックにならない
+  const naming = botChats(guest).find((m) => m.botKind === "naming");
+  assertExists(naming);
+  assert(naming.text.includes(name), naming.text);
+  assert(naming.text.includes("読書"), naming.text);
+  manager.dispose();
+});
+
+Deno.test("趣味タグ: タグを選ばなかった人には従来どおり汎用の二つ名が付く", () => {
+  const { manager } = setup();
+  const host = createRoom(manager);
+  const guest = joinAnonymously(manager, host.code);
+
+  const name = assignedName(guest);
+  assert(
+    combos(NICKNAME_ADJECTIVES, NICKNAME_NOUNS).includes(name),
+    `汎用プールの名前になっていない: ${name}`,
+  );
+  const naming = botChats(guest).find((m) => m.botKind === "naming");
+  assertExists(naming);
+  // 由来にするタグが無いので、タグ入りの文面は使わない
+  assert(NAMING_TEXTS.some((t) => t.replace("{name}", name) === naming.text), naming.text);
+  manager.dispose();
+});
+
+Deno.test("趣味タグ: 先客と同じタグを持つ人は、被っていない側のタグから名付ける", () => {
+  const { manager } = setup();
+  const host = createRoom(manager, "ホスト", ["reading"]);
+  const guest = joinAnonymously(manager, host.code, ["reading", "camping"]);
+
+  const camping = TAG_NICKNAME_WORDS.camping;
+  const name = assignedName(guest);
+  assert(
+    combos(camping.adjectives, camping.nouns).includes(name),
+    `キャンプから連想した名前になっていない: ${name}`,
+  );
+  manager.dispose();
+});
+
+Deno.test("趣味タグ: あだ名もタグも不正なときは、タグの検証で弾く", () => {
+  // あだ名を決める材料にタグを使う都合で、検証の順序をタグ → あだ名に入れ替えた。
+  // どちらも INVALID_INPUT なので、通してしまわないことだけ担保しておく
+  const { manager } = setup();
+  const host = createRoom(manager);
+  const link = new MockLink();
+  manager.handle(link, {
+    t: "join",
+    roomCode: host.code,
+    nickname: "",
+    tags: ["nope"] as unknown as HobbyTagId[],
+  });
+
+  assertEquals(last(link, "error")?.code, "INVALID_INPUT");
+  assertEquals(last(link, "roomState"), undefined);
   manager.dispose();
 });
 
