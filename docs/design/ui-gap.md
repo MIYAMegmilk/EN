@@ -43,7 +43,7 @@
 |---|---|
 | **ルーム状態はメモリのみ** | `Room` は KV に置かない（`types.ts` §5 コメント / 設計書 §5）。サーバー再起動で全ルーム消滅。24時間で自動削除 |
 | **永続化されるのは4つだけ** | アカウント・認証セッション・ゲーム定義・共有コードマップ。**履歴・統計は一切残らない** |
-| **`/` の振り分け** | `main.ts` … ログイン済み → `index.html`、未ログイン → `login.html` |
+| **`/` の振り分け** | `main.ts` … ログイン済み → `entrance.html`、未ログイン → `login.html` |
 | **HTTP API** | 認証系・`/api/ice`・`/api/rooms`・`/api/room-tags`・`/api/rooms/:code`（PATCH）・`/api/tags`・`/api/profile` は実装済み。`main.ts` には `// TODO(チーム分担): §4.0 HTTP API（/api/rooms 以外の未実装分）` が残っており、`/api/games/*` などはまだ無い |
 
 ---

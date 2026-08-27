@@ -602,7 +602,7 @@ async function handleWebSocket(
 
 /**
  * public/ を配信する。serveDir が fsRoot の外へ出ないためパストラバーサルは起きない。
- * トップページはログイン済みなら index.html、未ログインなら login.html を返す。
+ * トップページはログイン済みなら entrance.html、未ログインなら login.html を返す。
  */
 async function handleStatic(
   req: Request,
@@ -629,7 +629,7 @@ async function handleStatic(
     // 壊れた Cookie ヘッダーでトップページが 500 にならないよう、取り出しは sessionToken に任せる
     const token = sessionToken(req);
     const userId = kv !== null ? await verifySession(kv, token) : null;
-    path = userId !== null ? "/index.html" : "/login.html";
+    path = userId !== null ? "/entrance.html" : "/login.html";
   }
   const rewritten = new Request(new URL(path + url.search, url.origin), req);
   const res = await serveDir(rewritten, { fsRoot: PUBLIC_DIR, quiet: true });
