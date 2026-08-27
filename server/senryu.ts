@@ -184,8 +184,13 @@ function quality(match: SenryuMatch): number {
 /** quality の最大値（全体をカバーし、かつちょうど 5-7-5） */
 const QUALITY_MAX = 3;
 
-/** 内部用。トークンにモーラ数を添えたもの */
-type Counted = { token: YomiToken; mora: number | null };
+/**
+ * 内部用。トークンにモーラ数と、カタカナに寄せた読みを添えたもの。
+ *
+ * kana は探索のループから何百回も読まれるので、ここで1回だけ作っておく。
+ * 毎回 toKatakana を呼ぶと、そのぶんだけ文字列を作り直すことになる。
+ */
+type Counted = { token: YomiToken; mora: number | null; kana: string };
 
 /** 句の終端候補 */
 type Candidate = { end: number; mora: number };
@@ -196,8 +201,10 @@ type Candidate = { end: number; mora: number };
  */
 function count(tokens: readonly YomiToken[]): Counted[] {
   return tokens.map((token) => {
-    if (token.separator === true) return { token, mora: 0 };
-    return { token, mora: token.yomi === null ? null : countMora(toKatakana(token.yomi)) };
+    if (token.separator === true) return { token, mora: 0, kana: "" };
+    if (token.yomi === null) return { token, mora: null, kana: "" };
+    const kana = toKatakana(token.yomi);
+    return { token, mora: countMora(kana), kana };
   });
 }
 
@@ -262,8 +269,31 @@ function trimSeparators(text: string): string {
 /** 読みをつなげる */
 function joinYomi(counted: readonly Counted[], from: number, to: number): string {
   let out = "";
-  for (let i = from; i < to; i++) out += toKatakana(counted[i].token.yomi ?? "");
+  for (let i = from; i < to; i++) out += counted[i].kana;
   return out;
+}
+
+/**
+ * from..to の読みに min 種類以上の音が含まれるか（SENRYU_MIN_DISTINCT の判定）。
+ *
+ * 読みをつないだ文字列を作ってから Set にすると、候補1つごとに文字列と Set を
+ * 作り直すことになる。ここは探索の最内側で最も多く通る場所なので、
+ * 文字列を組み立てずに数え、min に届いた時点で打ち切る。
+ */
+function hasDistinctYomi(
+  counted: readonly Counted[],
+  from: number,
+  to: number,
+  min: number,
+): boolean {
+  const seen = new Set<string>();
+  for (let i = from; i < to; i++) {
+    for (const ch of counted[i].kana) {
+      seen.add(ch);
+      if (seen.size >= min) return true;
+    }
+  }
+  return false;
 }
 
 /** findSenryu の調整項目 */
@@ -277,6 +307,37 @@ export type SenryuOptions = {
 };
 
 /**
+ * 1件の判定（findSenryu 1回）で検査してよい候補の数。
+ *
+ * 探索は「上句の終端候補 × 中句の終端候補 × 下句の終端候補」の3重ループで、
+ * 許容幅が 1 あると1句あたり最大3通りの終端が出る。したがって最悪ケースは
+ * 開始位置あたり 3 + 3×3 + 3×3×3 = 39 通りになり、SENRYU_TEXT_MAX（200字）を
+ * 1モーラ1トークンで埋めた入力では 200 × 39 ≒ 7800 通りまで膨らむ。
+ * 許容幅 0 では1句あたり終端が高々1通りなので、同じ入力でも 600 通りに収まる。
+ *
+ * Deno は単一スレッドなので、この差をそのまま踏むと1発言の判定でサーバー全体が
+ * 止まる（実測: 200字の「あ、い、う、え、お、」反復で 許容幅1 が 20.2ms、
+ * 許容幅0 が 1.6ms）。上限に達したら探索を打ち切り、そこまでで最良の候補を返す。
+ *
+ * 値は「許容幅 0 の最悪ケース（600）を絶対に切らない」ことを下限に、
+ * 実在の句が使う検査回数（後述のテスト参照。長くても数十回）から十分に離した
+ * 位置に置く。打ち切りが起きるのは、5-7-5 になり得る切れ目を大量に含む
+ * 長文（＝記号や1モーラ語を敷き詰めた入力）だけである。
+ */
+export const SENRYU_SEARCH_MAX_STEPS = 1_000;
+
+/** 探索の計測結果。上限に達したかを外から確かめられるようにするため */
+export type SenryuSearchStats = {
+  /** 検査した候補（3句そろった組み合わせ）の数 */
+  steps: number;
+  /** SENRYU_SEARCH_MAX_STEPS に達して探索を打ち切ったか */
+  truncated: boolean;
+};
+
+/** 探索の残り予算。searchWithTolerance が書き換える */
+type Budget = { left: number; truncated: boolean };
+
+/**
  * 指定した許容幅で 5-7-5 を探す。バックトラックで3句そろう組み合わせを見つける。
  * 許容幅があると1つの句の終端候補が複数出るため、候補を順に試す必要がある。
  *
@@ -284,11 +345,15 @@ export type SenryuOptions = {
  * ものを、途中で切れた候補より優先するため（投稿者が自分で区切った句を
  * 勝手に切り直さない）。最良（全体をカバーし、かつちょうど 5-7-5）に達したら
  * その時点で打ち切る。
+ *
+ * budget を使い切ったら、そこまでで最良の候補を返して打ち切る
+ * （SENRYU_SEARCH_MAX_STEPS 参照）。
  */
 function searchWithTolerance(
   counted: readonly Counted[],
   tolerance: number,
   options: SenryuOptions,
+  budget: Budget,
 ): SenryuMatch | null {
   const [upper, middle, lower] = SENRYU_PATTERN;
   const strictHead = options.allowWeakHead !== true;
@@ -301,16 +366,43 @@ function searchWithTolerance(
     // すでに quality 2 以上（= coversWhole）の候補があるなら、
     // start を進めても超えられないので打ち切る
     if (start > 0 && best !== null && quality(best) >= 2) break;
+    if (budget.left <= 0) {
+      budget.truncated = true;
+      break;
+    }
     // 記号から句を始めない（同じ句の重複候補になるだけ）
     if (counted[start].token.separator === true) continue;
     if (strictHead && hasWeakHead(counted, start)) continue;
     for (const a of endCandidates(counted, start, upper, tolerance)) {
       if (strictHead && hasWeakHead(counted, a.end)) continue;
+      if (budget.left <= 0) {
+        budget.truncated = true;
+        break;
+      }
       for (const b of endCandidates(counted, a.end, middle, tolerance)) {
         if (strictHead && hasWeakHead(counted, b.end)) continue;
+        if (budget.left <= 0) {
+          budget.truncated = true;
+          break;
+        }
         for (const c of endCandidates(counted, b.end, lower, tolerance)) {
+          if (budget.left <= 0) {
+            budget.truncated = true;
+            break;
+          }
+          budget.left--;
           const coversWhole = start === head && c.end === counted.length;
           if (options.wholeOnly === true && !coversWhole) continue;
+          const exactPattern = a.mora === upper && b.mora === middle && c.mora === lower;
+          // 表層形・読みを組み立てる前に、勝ち目のない候補を落とす。
+          // quality は coversWhole と exactPattern だけで決まるので、
+          // 既存の best に並ぶだけの候補は文字列を作らずに捨てられる
+          // （同点なら先に見つかったほうを残す、という従来の挙動と同じ）。
+          const rank = (coversWhole ? 2 : 0) + (exactPattern ? 1 : 0);
+          if (best !== null && rank <= quality(best)) continue;
+          // 同じ音の繰り返しだけの文字列は句として扱わない。
+          // 表層形（trimSeparators が1文字ずつ正規表現を回す）より安いので先に見る
+          if (!hasDistinctYomi(counted, start, c.end, SENRYU_MIN_DISTINCT)) continue;
           const lines: [string, string, string] = [
             join(counted, start, a.end),
             join(counted, a.end, b.end),
@@ -318,9 +410,6 @@ function searchWithTolerance(
           ];
           // 記号を詰め込んで表層形だけ伸ばした句は川柳と認めない
           if (lines.some((line) => [...line].length > SENRYU_LINE_MAX)) continue;
-          // 同じ音の繰り返しだけの文字列は句として扱わない
-          const reading = joinYomi(counted, start, c.end);
-          if (new Set(reading).size < SENRYU_MIN_DISTINCT) continue;
           const candidate: SenryuMatch = {
             lines,
             yomi: [
@@ -329,12 +418,12 @@ function searchWithTolerance(
               joinYomi(counted, b.end, c.end),
             ],
             morae: [a.mora, b.mora, c.mora],
-            exactPattern: a.mora === upper && b.mora === middle && c.mora === lower,
+            exactPattern,
             coversWhole,
           };
-          if (best === null || quality(candidate) > quality(best)) best = candidate;
+          best = candidate;
           // 全体をカバーし、かつちょうど 5-7-5。これ以上の候補はない
-          if (quality(candidate) === QUALITY_MAX) return candidate;
+          if (rank === QUALITY_MAX) return candidate;
         }
       }
     }
@@ -345,22 +434,43 @@ function searchWithTolerance(
 /**
  * トークン列から 5-7-5 を探す。見つからなければ null。
  * ちょうど 5-7-5 を優先し、無ければ許容幅を広げてもう一度探す。
+ *
+ * 探索の打ち切り情報も返す。時間を測らずに「重い経路に入っていない」ことを
+ * 確かめられるようにするため（テストが実行環境の速度に左右されない）。
+ * 予算は「ちょうど 5-7-5 の探索」と「許容幅つきの探索」で共有する。
+ * 1件の判定にかかる最悪コストを、2回ぶんに割られずに固定できる。
+ */
+export function findSenryuWithStats(
+  tokens: readonly YomiToken[],
+  options: SenryuOptions = {},
+): { match: SenryuMatch | null; stats: SenryuSearchStats } {
+  const counted = count(tokens);
+  const budget: Budget = { left: SENRYU_SEARCH_MAX_STEPS, truncated: false };
+  const stats = (): SenryuSearchStats => ({
+    steps: SENRYU_SEARCH_MAX_STEPS - budget.left,
+    truncated: budget.truncated,
+  });
+  const exact = searchWithTolerance(counted, 0, options, budget);
+  if (exact !== null && quality(exact) === QUALITY_MAX) return { match: exact, stats: stats() };
+  const tolerance = options.tolerance ?? 0;
+  if (tolerance <= 0) return { match: exact, stats: stats() };
+  // 許容幅を広げると「発言全体がちょうど収まる」候補が見つかることがある。
+  // ちょうど 5-7-5 でも途中で切れている候補より、そちらを優先する
+  const loose = searchWithTolerance(counted, tolerance, options, budget);
+  if (exact === null) return { match: loose, stats: stats() };
+  if (loose === null) return { match: exact, stats: stats() };
+  return { match: quality(loose) > quality(exact) ? loose : exact, stats: stats() };
+}
+
+/**
+ * トークン列から 5-7-5 を探す。見つからなければ null。
+ * ちょうど 5-7-5 を優先し、無ければ許容幅を広げてもう一度探す。
  */
 export function findSenryu(
   tokens: readonly YomiToken[],
   options: SenryuOptions = {},
 ): SenryuMatch | null {
-  const counted = count(tokens);
-  const exact = searchWithTolerance(counted, 0, options);
-  if (exact !== null && quality(exact) === QUALITY_MAX) return exact;
-  const tolerance = options.tolerance ?? 0;
-  if (tolerance <= 0) return exact;
-  // 許容幅を広げると「発言全体がちょうど収まる」候補が見つかることがある。
-  // ちょうど 5-7-5 でも途中で切れている候補より、そちらを優先する
-  const loose = searchWithTolerance(counted, tolerance, options);
-  if (exact === null) return loose;
-  if (loose === null) return exact;
-  return quality(loose) > quality(exact) ? loose : exact;
+  return findSenryuWithStats(tokens, options).match;
 }
 
 /** テキスト1件を判定する入口。前処理から検出までをまとめる */
