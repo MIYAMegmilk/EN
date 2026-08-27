@@ -65,6 +65,34 @@
    */
   const MAX_PENDING_CANDIDATES = 64;
 
+  /**
+   * 相手1人からの `ready` に反応する頻度の判定窓（ミリ秒）。
+   *
+   * `ready` は受け取ると反射（こちらの ready を返す）に加えて映像・マイクの
+   * 状態も送るので、**受信1件につき送信3件**になる。ここに上限が無いと、
+   * 同室の誰か1人が毎回違う session で `ready` を連投するだけで、こちらの
+   * rtcSignal 枠（server/types.ts の WS_SIGNAL_RATE_MAX = 100件/秒）を
+   * こちらの返信で使い切らせることができる。そうなると**他のピア**への
+   * offer / answer / ICE がサーバー側で破棄され、通話が成立しなくなる。
+   */
+  const READY_ADMIT_WINDOW_MS = 1000;
+
+  /**
+   * 判定窓のあいだに、同じ相手からの `ready` に反応してよい回数。
+   *
+   * 【暫定値】。根拠は上限側の計算のみで、実測はしていない。
+   * VC 枠は6人なので相手は最大5人。全員が同時に上限いっぱいまで攻めても
+   * 5人 × 3回 × 3件 = 45件/秒 で、WS_SIGNAL_RATE_MAX（100件/秒）の半分以下に
+   * 収まる。1人だけなら 9件/秒。
+   *
+   * 下限側（正常な接続確立を塞がないか）については、`session` が変わるのは
+   * 相手が VC に入り直したときと、相手の卓から誰かが抜けたときだけで、
+   * どちらも WebSocket の張り直しや退室を伴う。1秒に3回も起きない。
+   * 万一こぼしても、相手の offer が来れば onDescription() 側の保険
+   * （ensurePeer）でピアは張られるので、繋がらないままにはならない。
+   */
+  const READY_ADMIT_MAX = 3;
+
   // -------------------------------------------------------------------------
   // 品質監視のしきい値（§3.6「品質劣化時は映像を自動停止し音声優先」）
   //
@@ -253,6 +281,15 @@
      * 張り直す」と判断する（onReady）
      */
     session: null,
+    /**
+     * playerId → { at, count } … その相手からの `ready` に反応した記録。
+     * at は判定窓を開いた時刻（Date.now()）、count はその窓で反応した回数。
+     *
+     * **ピアを畳んでも消さない**。消してよいなら、相手は「session を変えた
+     * ready を投げる → こちらが畳む」を繰り返すだけで枠を作り直せてしまい、
+     * 上限が上限として働かなくなる。VC を畳むとき（shutdownVc）だけ捨てる。
+     */
+    readyAdmit: new Map(),
     /** マイクの MediaStream */
     micStream: null,
     /** カメラの MediaStream */
@@ -1130,6 +1167,35 @@
   }
 
   /**
+   * 相手1人からの `ready` に反応してよいか。★純粋関数★
+   *
+   * 引数以外の状態（state / Date.now()）を一切読まない。テスト可能性のために
+   * 現在時刻を受け取る（evaluateQuality / decideSpeaking と同じ流儀）。
+   *
+   * 判定窓は「最初に反応した時刻」を起点に固定で開き、窓を過ぎたら開き直す。
+   * 窓の中で READY_ADMIT_MAX 回まで反応し、それを超えたぶんは黙って捨てる。
+   * 捨てても記録は進めない（進めると窓が延びて、静かにした相手がいつまでも
+   * 締め出されてしまう）。
+   *
+   * @param {{at: number, count: number}|undefined} record その相手の直近の記録
+   * @param {number} now 現在時刻（Date.now() 相当）
+   * @returns {{admit: boolean, record: {at: number, count: number}}}
+   *          admit … 反応してよいか。record … 次に持ち越す記録
+   */
+  function admitReady(record, now) {
+    if (
+      record === undefined || record === null ||
+      typeof record.at !== "number" || typeof record.count !== "number" ||
+      now - record.at >= READY_ADMIT_WINDOW_MS || now < record.at
+    ) {
+      // 窓の外（初回・窓切れ・端末の時計が巻き戻った）。新しい窓を開く
+      return { admit: true, record: { at: now, count: 1 } };
+    }
+    if (record.count >= READY_ADMIT_MAX) return { admit: false, record };
+    return { admit: true, record: { at: record.at, count: record.count + 1 } };
+  }
+
+  /**
    * 相手の VC 参加告知。
    * 未知の相手・相手が入り直した（session が変わった）場合はピアを張り直し、
    * こちらの参加も返す。同じ session に対しては返さないので往復は有限で止まる。
@@ -1142,8 +1208,20 @@
         existing.remoteSession = session;
         return;
       }
-      closePeer(from);
     }
+    // ------------------------------------------------------------------
+    // ここから先は「送信3件＋ピアの張り直し」を伴う。相手が毎回違う session を
+    // 名乗れば何度でも通ってしまうので、相手ごとに頻度の上限を掛ける。
+    // 上限は判定の**手前**に置く。closePeer した後で捨てると、既にあった
+    // 接続だけが畳まれて張り直されない（相手に切られっぱなしになる）。
+    // 超過は黙って捨てる。利用者に出しても直せることが無く、連投されている
+    // あいだ中エラー欄が埋まって他の案内を押し流すため（サーバー側の
+    // rtcSignal 破棄と同じ扱い）。
+    // ------------------------------------------------------------------
+    const verdict = admitReady(state.readyAdmit.get(from), Date.now());
+    if (!verdict.admit) return;
+    state.readyAdmit.set(from, verdict.record);
+    if (existing !== undefined) closePeer(from);
     signal(from, { kind: "ready", session: state.session });
     ensurePeer(from, session);
     // ready → video の順に届く（WS は1接続を共用し、中継は順に send する）。
@@ -2684,6 +2762,9 @@
       for (const id of state.peers.keys()) signal(id, { kind: "bye" });
     }
     closeAllPeers();
+    // ready の頻度の記録は VC を畳むときだけ捨てる。ピア単位で捨てると
+    // 「畳ませてから作り直す」で上限を素通りできてしまう（onReady 参照）
+    state.readyAdmit.clear();
     stopStream(state.micStream);
     state.micStream = null;
     releaseCameraStream();
@@ -3261,5 +3342,7 @@
     resolveShareOwner,
     /** テスト用に公開する純粋関数（発話検知の判定） */
     decideSpeaking,
+    /** テスト用に公開する純粋関数（ready の反射レート判定） */
+    admitReady,
   };
 })(window);
