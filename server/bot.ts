@@ -49,9 +49,12 @@ import {
   SENRYU_EXACT_TEXTS,
   SENRYU_LOOSE_TEXTS,
   SENRYU_VOICE_TEXTS,
+  TAG_NICKNAME_WORDS,
+  TAGGED_NAMING_TEXTS,
   TOPIC_CARDS,
   type TopicCard,
 } from "./bot_templates.ts";
+import { type HobbyTagId, hobbyTagLabel } from "./hobby_tags.ts";
 import { SENRYU_PATTERN, type SenryuMatch } from "./senryu.ts";
 import type { BotCard, BotKind, ErrorCode, Phase } from "./types.ts";
 import { NICKNAME_MAX } from "./types.ts";
@@ -301,7 +304,14 @@ export type MessageSource = "chat" | "voice";
 
 /** bot に伝えるルームの出来事 */
 export type BotEvent =
-  | { t: "playerJoined"; playerId: string; nickname: string; assignedNickname?: string }
+  | {
+    t: "playerJoined";
+    playerId: string;
+    nickname: string;
+    assignedNickname?: string;
+    /** assignedNickname を連想した趣味タグ（§3.11）。しゅんぴが由来を明かすのに使う */
+    namingTagId?: HobbyTagId;
+  }
   /** 60秒猶予内の再接続（§3.2）。挨拶はしない */
   | { t: "playerRejoined"; playerId: string; nickname: string }
   /** 一時的な切断。まだ退室していないので投票は保持する（§8） */
@@ -324,7 +334,7 @@ export type BotContext = {
   now: number;
   /** 接続中の参加者ID（bot は含まない）。投票の有効判定と過半数の母数に使う */
   connectedPlayerIds: readonly string[];
-  /** 参加者に共通する趣味タグID（§3.11）。未実装のうちは空配列 */
+  /** 参加者に共通する趣味タグID（§3.11）。共通タグが無ければ空配列 */
   commonTags: readonly string[];
   /** 0 以上 1 未満の乱数 */
   rng: () => number;
@@ -415,28 +425,89 @@ function spend(times: readonly number[], now: number): number[] {
 // しゅんぴ（あだ名bot）
 // ---------------------------------------------------------------------------
 
+/** あだ名を組み立てる材料。しゅんぴは rooms.ts から直接この関数を呼ぶ */
+export type NicknameRequest = {
+  /** 入室者本人の趣味タグ（§3.11）。未選択なら空配列 */
+  tags: readonly HobbyTagId[];
+  /** すでにこの卓で使われているあだ名 */
+  taken: ReadonlySet<string>;
+  /**
+   * 卓の他の人が持っているタグ（重複可）。
+   * 「ゲーム好きが3人いる卓で3人ともゲーム由来の名前になる」のを避けるために見る
+   */
+  othersTags: readonly HobbyTagId[];
+};
+
+/** 割り当てたあだ名と、連想元にしたタグ（汎用プールから引いたときは undefined） */
+export type NicknameChoice = { name: string; tagId?: HobbyTagId };
+
+/**
+ * 連想元にするタグを1つ選ぶ。卓の他の人と被っていないタグを優先する。
+ * タグを1つも持たない人には連想元が無いので null を返す。
+ */
+function chooseNicknameTag(req: NicknameRequest, rng: () => number): HobbyTagId | null {
+  if (req.tags.length === 0) return null;
+  const unique = req.tags.filter((tag) => !req.othersTags.includes(tag));
+  return pick(unique.length > 0 ? unique : req.tags, rng);
+}
+
+/** 形容 × 名詞の総当たりのうち、NICKNAME_MAX に収まるものを返す */
+function combine(adjectives: readonly string[], nouns: readonly string[]): string[] {
+  const names: string[] = [];
+  for (const adjective of adjectives) {
+    for (const noun of nouns) {
+      const name = `${adjective}${noun}`;
+      if (name.length <= NICKNAME_MAX) names.push(name);
+    }
+  }
+  return names;
+}
+
 /**
  * あだ名未入力の参加者に付ける二つ名を選ぶ（§3.0 のあだ名は上書きしない運用）。
  * すでにルームで使われている名前は避け、20文字（NICKNAME_MAX）に収める。
+ *
+ * 本人の趣味タグ（§3.11）があれば、そこから連想した語で組み立てる。あだ名を
+ * 名札兼・話題のフックにするのが狙い（§3.11 用途1「初対面の話題のきっかけ」）。
+ * 例: reading →「よふかしフクロウ」、alcohol + camping →「ほろよいとっくり」。
+ *
+ * 候補は上から順に濃い連想の段を試し、名前が空いている最初の段で決める。
+ * 下の段ほど組み合わせ数が増えるので、同じタグの人が続いても枯れない。
  */
-export function pickNickname(taken: ReadonlySet<string>, rng: () => number): string {
-  const candidates: string[] = [];
-  for (const adjective of NICKNAME_ADJECTIVES) {
-    for (const noun of NICKNAME_NOUNS) {
-      const name = `${adjective}${noun}`;
-      if (name.length <= NICKNAME_MAX) candidates.push(name);
+export function pickNickname(req: NicknameRequest, rng: () => number): NicknameChoice {
+  const free = (names: readonly string[]): string[] => names.filter((n) => !req.taken.has(n));
+  const tagId = chooseNicknameTag(req, rng);
+  if (tagId !== null) {
+    const words = TAG_NICKNAME_WORDS[tagId];
+    // 本人が持つ「連想元以外」のタグ。1段目が埋まったときに形容だけを借りる
+    const others = req.tags.filter((tag) => tag !== tagId).map((tag) => TAG_NICKNAME_WORDS[tag]);
+    const ladder: string[][] = [
+      // 1段目: 連想元タグだけで組む（いちばん由来が分かりやすい）
+      free(combine(words.adjectives, words.nouns)),
+      // 2段目: 本人の他タグの形容 × 連想元タグの名詞（タグ2個以上のときだけ中身が入る）
+      free(combine(others.flatMap((w) => w.adjectives), words.nouns)),
+      // 3段目: 片側だけ汎用プールに落とす。まだタグの語が残るので由来は伝わる
+      [
+        ...free(combine(NICKNAME_ADJECTIVES, words.nouns)),
+        ...free(combine(words.adjectives, NICKNAME_NOUNS)),
+      ],
+    ];
+    for (const step of ladder) {
+      if (step.length > 0) return { name: pick(step, rng), tagId };
     }
   }
-  const free = candidates.filter((name) => !taken.has(name));
-  if (free.length > 0) return pick(free, rng);
-  // 全部埋まったときの保険。番号を足して一意にする
+  // 4段目: タグを選ばなかった人と、タグ由来が全部埋まったとき
+  const candidates = combine(NICKNAME_ADJECTIVES, NICKNAME_NOUNS);
+  const generic = free(candidates);
+  if (generic.length > 0) return { name: pick(generic, rng) };
+  // 5段目: 全部埋まったときの保険。番号を足して一意にする
   for (let suffix = 2; suffix < 1000; suffix++) {
     for (const base of candidates) {
       const name = `${base}${suffix}`;
-      if (name.length <= NICKNAME_MAX && !taken.has(name)) return name;
+      if (name.length <= NICKNAME_MAX && !req.taken.has(name)) return { name };
     }
   }
-  return "名無し";
+  return { name: "名無し" };
 }
 
 // ---------------------------------------------------------------------------
@@ -792,10 +863,18 @@ export function reduce(state: BotState, event: BotEvent, ctx: BotContext): BotRe
     case "playerJoined": {
       const utterances: BotUtterance[] = [];
       if (state.enabled.shunpi && event.assignedNickname !== undefined) {
+        // タグから連想して名付けたときは由来も明かす。「よふかしフクロウ」だけでは
+        // 偶然に見えるが、「読書から連想して」と添えると話しかけるとっかかりになる
+        const tagId = event.namingTagId;
         utterances.push({
           botId: "shunpi",
           kind: "naming",
-          text: fill(pick(NAMING_TEXTS, ctx.rng), { name: event.assignedNickname }),
+          text: tagId === undefined
+            ? fill(pick(NAMING_TEXTS, ctx.rng), { name: event.assignedNickname })
+            : fill(pick(TAGGED_NAMING_TEXTS, ctx.rng), {
+              name: event.assignedNickname,
+              tag: hobbyTagLabel(tagId),
+            }),
         });
       }
       let next = state;

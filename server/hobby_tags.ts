@@ -59,9 +59,32 @@ export const HOBBY_TAGS: readonly HobbyTag[] = [
   { id: "gardening", label: "ガーデニング" },
 ];
 
+/**
+ * 1人が選べるタグの上限（§3.11「入室・マッチ待機時に最大5個選択」）。
+ *
+ * プロフィール保存（auth.ts）と卓への持ち込み（rooms.ts）で同じ上限を使う。
+ * 片方だけ緩いと「保存はできたのに卓に入れない」が起きるので、正本はここ1か所にする
+ */
+export const HOBBY_TAGS_MAX = 5;
+
 const HOBBY_TAG_IDS: ReadonlySet<string> = new Set(HOBBY_TAGS.map((t) => t.id));
 
 /** 値がプリセットのタグIDかどうかを判定する（自由入力を弾く） */
 export function isValidHobbyTagId(value: unknown): value is HobbyTagId {
   return typeof value === "string" && HOBBY_TAG_IDS.has(value);
+}
+
+const HOBBY_TAG_LABELS: ReadonlyMap<HobbyTagId, string> = new Map(
+  HOBBY_TAGS.map((t) => [t.id, t.label]),
+);
+
+/**
+ * タグIDを表示名に直す（例: "reading" → "読書"）。
+ *
+ * ID→表示名の対応はここが正本（§3.11「表示テキストはサーバー由来のみ」）。
+ * bot の発話で「読書がお好きとのことなので」と言うときにも使うので、
+ * bot 側に対応表を写さずにこの関数を呼ぶこと。
+ */
+export function hobbyTagLabel(id: HobbyTagId): string {
+  return HOBBY_TAG_LABELS.get(id) ?? id;
 }

@@ -89,6 +89,7 @@ import {
   type BotUtterance,
   createBotState,
   END_POLL_MS,
+  type NicknameChoice,
   pickNickname,
   reduce as botReduce,
 } from "./bot.ts";
@@ -96,7 +97,8 @@ import { createKanaProvider, detectSenryuAny, SENRYU_TOLERANCE } from "./senryu.
 import type { SenryuMatch, YomiProvider } from "./senryu.ts";
 import { toSummary } from "./gamedef.ts";
 import { isOfficialGame, OFFICIAL_GAMES } from "./official_games.ts";
-import { charLength, hasControlChar, validateNickname } from "./validation.ts";
+import { charLength, hasControlChar, validateHobbyTags, validateNickname } from "./validation.ts";
+import { type HobbyTagId } from "./hobby_tags.ts";
 import { type RoomTagId } from "./room_tags.ts";
 
 /** ニックネームの検証ロジックの本体は validation.ts にある（auth.ts からも使うため）。
@@ -282,6 +284,8 @@ type Waiting = {
   link: ClientLink;
   /** 省略された場合は undefined。成立時に しゅんぴ が二つ名を付ける */
   nickname: string | undefined;
+  /** 趣味タグ（§3.11）。検証済みのものを持ち、成立した卓の参加者にそのまま渡す */
+  tags: HobbyTagId[];
   joinedAt: number;
 };
 
@@ -748,6 +752,12 @@ export class RoomManager {
       sendError(link, nickname.code, nickname.message);
       return;
     }
+    // 建てた本人の趣味タグ（§3.11）。卓に付けるルームタグとは別物
+    const hostTags = validateHobbyTags(msg.tags);
+    if (!hostTags.ok) {
+      sendError(link, hostTags.code, hostTags.message);
+      return;
+    }
     const code = this.allocateRoomCode();
     if (code === null) {
       sendError(
@@ -758,7 +768,7 @@ export class RoomManager {
       return;
     }
     const now = this.now();
-    const host = this.newPlayer(nickname.value);
+    const host = this.newPlayer(nickname.value, hostTags.value);
     host.userId = link.userId;
     const room: Room = {
       code,
@@ -896,14 +906,25 @@ export class RoomManager {
     // 公開ルームは「オープン入室」として扱い、コードだけで入れる（§3.1）。
     // TODO(チーム分担): §3.1.1 承認制（ノック → entryToken の検証・消費）。
     // 入室方式（open / knock）を Room に持たせたうえで、knock の側だけ必須にする
+    // 趣味タグ（§3.11）。再接続はこの手前で return しているので、ここに来るのは
+    // 新規入室だけ。復帰した人のタグは卓が覚えているものをそのまま使う。
+    // あだ名の連想元にするので、あだ名を決めるより先に検証する
+    const tags = validateHobbyTags(msg.tags);
+    if (!tags.ok) {
+      sendError(link, tags.code, tags.message);
+      return;
+    }
     // あだ名を省略した参加者にはしゅんぴが二つ名を付ける（§3.0 / §3.10）。
+    // 本人の趣味タグから連想した語で組み立てるので、卓の他の人のタグも渡す
+    // （同じ趣味の人が続いたときに由来を散らす）。
     // 空文字は「入力し忘れ」と区別できないので、従来どおり検証で弾く
-    let assignedNickname: string | undefined;
+    let assigned: NicknameChoice | undefined;
     let nicknameValue: string;
     if (msg.nickname === undefined) {
       const taken = new Set([...room.players.values()].map((p) => p.nickname));
-      assignedNickname = pickNickname(taken, this.rng);
-      nicknameValue = assignedNickname;
+      const othersTags = [...room.players.values()].flatMap((p) => p.tags ?? []);
+      assigned = pickNickname({ tags: tags.value, taken, othersTags }, this.rng);
+      nicknameValue = assigned.name;
     } else {
       const nickname = validateNickname(msg.nickname);
       if (!nickname.ok) {
@@ -927,7 +948,7 @@ export class RoomManager {
       }
       approvedSession = consumed.value;
     }
-    const player = this.newPlayer(nicknameValue);
+    const player = this.newPlayer(nicknameValue, tags.value);
     // 承認された人には、ノック時に割り当てたトークンをそのまま持たせる。
     // こうしておくと、キックされたあとに再ノックしてもブロックが効く
     if (approvedSession !== undefined) player.sessionToken = approvedSession;
@@ -949,9 +970,16 @@ export class RoomManager {
     // 逆順だと挨拶が履歴に載る前のスナップショットを掴んで、本人にだけ見えない
     this.applyBotEvent(
       entry,
-      assignedNickname === undefined
+      assigned === undefined
         ? { t: "playerJoined", playerId: player.id, nickname: player.nickname }
-        : { t: "playerJoined", playerId: player.id, nickname: player.nickname, assignedNickname },
+        : {
+          t: "playerJoined",
+          playerId: player.id,
+          nickname: player.nickname,
+          assignedNickname: assigned.name,
+          // 連想元のタグ。しゅんぴがこれを見て由来入りの文面に切り替える
+          ...(assigned.tagId === undefined ? {} : { namingTagId: assigned.tagId }),
+        },
     );
     this.broadcastExcept(entry, player.id, {
       t: "playerJoined",
@@ -994,14 +1022,18 @@ export class RoomManager {
     return null;
   }
 
-  /** 新しい参加者を作る。sessionToken は再接続の本人確認に使う */
-  private newPlayer(nickname: string): Player {
+  /**
+   * 新しい参加者を作る。sessionToken は再接続の本人確認に使う。
+   * tags は検証済みの趣味タグ（§3.11）。1つも無い人には持たせない
+   */
+  private newPlayer(nickname: string, tags: HobbyTagId[] = []): Player {
     return {
       id: crypto.randomUUID(),
       nickname,
       connected: true,
       sessionToken: crypto.randomUUID(),
       score: 0,
+      ...(tags.length === 0 ? {} : { tags }),
     };
   }
 
@@ -1662,7 +1694,13 @@ export class RoomManager {
       }
       nickname = validated.value;
     }
-    this.queue.push({ link, nickname, joinedAt: this.now() });
+    // 趣味タグ（§3.11）。成立した卓までそのまま持ち回る
+    const tags = validateHobbyTags(msg.tags);
+    if (!tags.ok) {
+      sendError(link, tags.code, tags.message);
+      return;
+    }
+    this.queue.push({ link, nickname, tags: tags.value, joinedAt: this.now() });
     this.armMatchTimer();
     this.sendQueueStatus();
   }
@@ -1751,14 +1789,20 @@ export class RoomManager {
     }
     const now = this.now();
     const taken = new Set<string>();
+    // 先に席についた人のタグ。あだ名の由来が卓の中で重ならないように積み上げる
+    const othersTags: HobbyTagId[] = [];
     const players = new Map<string, Player>();
     const links = new Map<string, ClientLink>();
     let hostId = "";
     for (const waiter of group) {
-      // あだ名を省いた人には、ここで しゅんぴ の二つ名を付ける（§3.0 / §3.10）
-      const nickname = waiter.nickname ?? pickNickname(taken, this.rng);
+      // あだ名を省いた人には、ここで しゅんぴ の二つ名を付ける（§3.0 / §3.10）。
+      // TODO(ひろし): この経路は playerJoined に assignedNickname を渡していないので
+      // しゅんぴの命名発話が出ない（あだ名だけ静かに付く）。別途直す
+      const nickname = waiter.nickname ??
+        pickNickname({ tags: waiter.tags, taken, othersTags }, this.rng).name;
       taken.add(nickname);
-      const player = this.newPlayer(nickname);
+      othersTags.push(...waiter.tags);
+      const player = this.newPlayer(nickname, waiter.tags);
       if (hostId === "") hostId = player.id;
       players.set(player.id, player);
       links.set(player.id, waiter.link);
@@ -1938,14 +1982,43 @@ export class RoomManager {
     this.applyBotEffects(entry, result.effects);
   }
 
+  /**
+   * いま卓を囲んでいる面々が分け合っている趣味タグを、多い順に並べる（§3.11 用途4）。
+   *
+   * 「共通」は**2人以上が持っていること**とする。全員一致にすると、1人5個までの
+   * タグで全員が重なる場面はほとんど無く、ぐっちーの話題カードが永久に汎用のまま
+   * になる。逆に1人でも数えると「共通」の意味が消える。
+   * ただし接続中が1人しか居ない卓だけは、その人のタグをそのまま使う
+   * （相手が居ないので「共通」を問う意味がなく、その人に合う話題を振る方がよい）。
+   *
+   * 数えるのは接続中の人だけ（一時切断中の人の趣味で話題を振っても相手が居ない）。
+   * 同数のタグは、卓に現れた順を保つ（Map の挿入順 + 安定ソート）ので、
+   * 同じ顔ぶれなら毎回同じ並びになる
+   */
+  private commonTags(entry: RoomEntry): string[] {
+    const counts = new Map<string, number>();
+    for (const playerId of entry.links.keys()) {
+      const player = entry.room.players.get(playerId);
+      if (player === undefined) continue;
+      for (const tag of player.tags ?? []) {
+        counts.set(tag, (counts.get(tag) ?? 0) + 1);
+      }
+    }
+    const required = entry.links.size >= 2 ? 2 : 1;
+    return [...counts.entries()]
+      .filter(([, count]) => count >= required)
+      .sort((a, b) => b[1] - a[1])
+      .map(([tag]) => tag);
+  }
+
   /** bot に渡す外部依存を組み立てる */
   private botContext(entry: RoomEntry) {
     return {
       now: this.now(),
       // 過半数の母数は「接続中の参加者」。一時切断は entry.links から外れる
       connectedPlayerIds: [...entry.links.keys()],
-      // TODO(チーム分担): §3.11 趣味タグが入ったら参加者の共通タグを渡す
-      commonTags: [] as readonly string[],
+      // 参加者の共通タグ（§3.11 用途4）。ぐっちーが話題カードを選ぶのに使う
+      commonTags: this.commonTags(entry),
       rng: this.rng,
       senryu: this.senryu,
       games: [...entry.room.availableGames.values()].map((g) => ({ id: g.id, title: g.title })),
@@ -2495,6 +2568,9 @@ export class RoomManager {
       isHost: entry.room.hostId === player.id,
       score: player.score,
       vcEligible: this.isVcEligible(entry, player.id),
+      // 選んでいない人の分までキーを増やさない（§3.11 用途1）。
+      // 配るのは ID だけで、表示名はクライアントが GET /api/tags で引く
+      ...(player.tags === undefined || player.tags.length === 0 ? {} : { tags: [...player.tags] }),
     };
   }
 }

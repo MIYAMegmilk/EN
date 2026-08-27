@@ -73,14 +73,20 @@ let pendingRoomMeta = null;
  * 混ぜて送るとエラーになる。create-room.js が入力欄を出し分けているが、
  * 積むかどうかの最終判断はこの関数が持つ。
  */
-function doCreateRoom({ nickname, visibility, roomName, description, tags, entryMode, passphrase }) {
+function doCreateRoom(
+  { nickname, visibility, roomName, description, tags: roomTags, entryMode, passphrase },
+) {
   state.rejoinAfterRestart = false;
-  const msg = { t: "createRoom", nickname, visibility };
+  // 卓を建てる本人の趣味タグ（§3.11）。下の roomTags（卓そのものに付くルームタグ）とは別物
+  const msg = withMyTags({ t: "createRoom", nickname, visibility });
   if (visibility === "public") {
     msg.roomName = roomName ?? "";
     // 既定は open。knock のときだけ積む（サーバーの既定に合わせる）
     if (entryMode === "knock") msg.entryMode = "knock";
-    pendingRoomMeta = { description: description ?? "", tags: Array.isArray(tags) ? tags : [] };
+    pendingRoomMeta = {
+      description: description ?? "",
+      tags: Array.isArray(roomTags) ? roomTags : [],
+    };
   } else {
     pendingRoomMeta = null;
     // 空欄なら積まない。付けない卓が大半なので、既定を「無し」にしておく
@@ -162,6 +168,45 @@ const state = {
   // サーバー時刻との差（serverTime - Date.now()）。ビューモジュールの秒読みに使う
   serverOffsetMs: 0,
 };
+
+/**
+ * 趣味タグID → 表示名（GET /api/tags の結果、§3.11）。
+ *
+ * サーバーは参加者のタグを ID でしか配らない（表示テキストをサーバー由来だけに
+ * 保つため）。卓の一覧に日本語で出すには、この対応表が要る。
+ * 取得に失敗したら空のままで、その場合は ID をそのまま出す（名前が出ないより良い）
+ */
+let hobbyTagLabels = new Map();
+
+/**
+ * 自分の趣味タグ（§3.11）。ログイン中はアカウント保存の値、ゲストは
+ * entrance.html で選んだ一時的な値。入室・卓作成・相席待ちのときに持ち込む
+ */
+let myHobbyTags = [];
+
+/** 趣味タグの対応表を取ってくる。失敗しても卓自体は使えるので握りつぶす */
+async function loadHobbyTagLabels() {
+  try {
+    const res = await fetch("/api/tags", { credentials: "same-origin" });
+    if (!res.ok) return;
+    const body = await res.json();
+    const tags = Array.isArray(body?.tags) ? body.tags : [];
+    hobbyTagLabels = new Map(tags.map((t) => [t.id, t.label]));
+  } catch {
+    // 対応表が無いだけなら ID で出す。ここで卓に入れなくなる方が困る
+  }
+}
+
+/**
+ * 送るメッセージに自分の趣味タグを積む（§3.11）。
+ *
+ * 1つも選んでいなければ積まない（空配列でも通るが、送らない方が意図が明確）。
+ * 同じ msg を返すので `send(withMyTags({ t: "join", ... }))` と書ける
+ */
+function withMyTags(msg) {
+  if (myHobbyTags.length > 0) msg.tags = [...myHobbyTags];
+  return msg;
+}
 
 /**
  * 専用モジュール型ゲーム（docs/design/games-unified.md §3.2）の表示。
@@ -420,6 +465,14 @@ async function refreshAccount() {
     const guest = GuestProfile.getGuestProfile();
     if (guest.nickname !== "") $("nickname").value = guest.nickname;
   }
+
+  // 趣味タグも同じ出どころから拾う（§3.11）。あだ名と違って入力欄が無いので、
+  // 画面には出さず、入室時に持ち込む値としてだけ控えておく
+  if (loggedIn) {
+    myHobbyTags = Array.isArray(body.tags) ? body.tags : [];
+  } else {
+    myHobbyTags = GuestProfile.getGuestProfile().tags;
+  }
 }
 
 /** サーバーへ送る */
@@ -461,7 +514,9 @@ function connect() {
       // あだ名を見ない（doJoin が reconnect で早期 return する）ので、あだ名を省略して
       // 入室した人も復帰できるよう空欄でも送る。猶予を過ぎていた場合は新規入室に
       // 倒れ、そこでも空欄ならあらためて二つ名が付く
-      const msg = { t: "join", roomCode: saved.code, session: saved.session };
+      // 猶予内なら session が勝ってタグは見られない。猶予切れで新規入室に倒れた
+      // ときのために積んでおく（サーバーは再接続と判断した時点で無視する）
+      const msg = withMyTags({ t: "join", roomCode: saved.code, session: saved.session });
       const nickname = $("nickname").value.trim();
       if (nickname.length > 0) msg.nickname = nickname;
       state.rejoinAfterRestart = afterRestart;
@@ -472,7 +527,7 @@ function connect() {
       // corridor.html で扉を選んだ卓に入る。あだ名は集めていないので空欄のまま送る
       // （join はあだ名省略可。サーバーが自動で二つ名を付ける、§3.10）
       state.rejoinAfterRestart = false;
-      send({ t: "join", roomCode: pendingJoin.roomCode });
+      send(withMyTags({ t: "join", roomCode: pendingJoin.roomCode }));
     }
   };
   ws.onclose = (event) => {
@@ -564,12 +619,12 @@ function handleKnockResult(msg) {
     return;
   }
   showNotice("通していただけました。入店します");
-  send({
+  send(withMyTags({
     t: "join",
     roomCode,
     nickname: knockState.nickname,
     entryToken: msg.entryToken,
-  });
+  }));
   knockState.roomCode = null;
 }
 
@@ -618,7 +673,7 @@ function renderQueue(text) {
 function joinQueue() {
   state.rejoinAfterRestart = false;
   pendingRoomMeta = null;
-  const msg = { t: "joinQueue" };
+  const msg = withMyTags({ t: "joinQueue" });
   const nickname = $("nickname").value.trim();
   if (nickname.length > 0) msg.nickname = nickname;
   send(msg);
@@ -868,6 +923,22 @@ function renderLogout() {
   $("logout").classList.toggle("hidden", !state.loggedIn || inRoom);
 }
 
+/**
+ * 参加者の趣味タグの札を作る（§3.11 用途1）。1つも無ければ null。
+ *
+ * 表示名は GET /api/tags の対応表から引く。引けなかったときは ID をそのまま出す
+ * （対応表の取得に失敗しているだけで、名前が消えるよりは手掛かりが残る）。
+ * サーバーはプリセットの ID しか配らないが、いずれにせよ textContent で入れる
+ */
+function playerTagsRow(tags) {
+  if (!Array.isArray(tags) || tags.length === 0) return null;
+  const row = el("div", undefined, "player-tags");
+  for (const id of tags) {
+    row.appendChild(el("span", hobbyTagLabels.get(id) ?? id, "tag"));
+  }
+  return row;
+}
+
 /** 画面全体を描き直す */
 function renderAll() {
   const snapshot = state.snapshot;
@@ -896,7 +967,13 @@ function renderAll() {
     if (p.id === snapshot.youId) marks.push("あなた");
     const suffix = marks.length > 0 ? `（${marks.join("・")}）` : "";
     const row = el("li");
-    row.appendChild(el("span", `${p.nickname}${suffix} ${p.score}点`));
+    // 名前とタグを1つの箱にまとめる。お引き取りボタンは行の右端に残したいので、
+    // 縦に積むのはこの箱の中だけにする
+    const main = el("div", undefined, "player-main");
+    main.appendChild(el("span", `${p.nickname}${suffix} ${p.score}点`));
+    const tags = playerTagsRow(p.tags);
+    if (tags !== null) main.appendChild(tags);
+    row.appendChild(main);
     // お引き取り（§3.1）。ホストにだけ、自分以外の行に出す。
     // 押した相手はこの卓に戻れなくなるので、確認を1枚挟む
     if (snapshot.youAreHost && p.id !== snapshot.youId) {
@@ -1898,7 +1975,7 @@ function bind() {
     state.rejoinAfterRestart = false;
     pendingRoomMeta = null;
     // コードは積まない。合言葉だけで卓を引く（§3.1）
-    const msg = { t: "join", passphrase: $("passphrase").value };
+    const msg = withMyTags({ t: "join", passphrase: $("passphrase").value });
     const nickname = $("nickname").value.trim();
     if (nickname.length > 0) msg.nickname = nickname;
     send(msg);
@@ -1909,7 +1986,7 @@ function bind() {
     state.rejoinAfterRestart = false;
     // 空欄なら nickname を積まない。省略するとしゅんぴが二つ名を付ける（§3.10）。
     // 空文字は「入力し忘れ」と区別できないのでサーバーが弾く（types.ts の join 参照）
-    const msg = { t: "join", roomCode: $("code").value };
+    const msg = withMyTags({ t: "join", roomCode: $("code").value });
     const nickname = $("nickname").value.trim();
     if (nickname.length > 0) msg.nickname = nickname;
     // 同じ卓のトークンを持っていれば必ず積む。猶予内なら再接続として復帰でき、
@@ -1976,7 +2053,9 @@ async function start() {
   Sound.mountControls();
   // 入室の音は鳴る間が決まっていて、その場で取りに行くと間に合わない
   Sound.preload("decide", "knock", "slidingScreen");
-  refreshAccount();
+  // 卓に入る前に済ませておく。入室に趣味タグを持ち込む（§3.11）ので、
+  // corridor.html からの自動入室に間に合わせるには connect() より前に要る
+  await Promise.all([refreshAccount(), loadHobbyTagLabels()]);
   bindVc(await fetchIceServers());
   connect();
 }
