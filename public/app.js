@@ -365,10 +365,11 @@ const store = {
   },
 };
 
-/** ログを1行追加する */
+/** ログを1行追加する（#log が無いページでは何もしない） */
 function log(direction, msg) {
-  const line = el("div", `${direction} ${JSON.stringify(msg)}`);
   const box = $("log");
+  if (box === null) return;
+  const line = el("div", `${direction} ${JSON.stringify(msg)}`);
   box.appendChild(line);
   box.scrollTop = box.scrollHeight;
 }

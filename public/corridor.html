@@ -150,24 +150,11 @@
   </head>
   <body>
     <div class="corridor-bar">
-      <!--
-        入り口へ戻る道。この画面へは entrance.html の「廊下を歩く」から来るので、
-        戻り先も入り口に揃える（create-room.html と同じ文言・同じ行き先）。
-        バーの先頭に置いてあるのは、狭い画面ではバーが横スクロールになり、
-        最初に見えている物しか押せないため。
-      -->
-      <a id="to-entrance" class="btn" href="/entrance.html">入り口に戻る</a>
+      <!-- 卓の一覧ページへ戻る -->
+      <a id="to-index" class="btn" href="/index.html">一覧で選ぶ</a>
+      <a id="create-room-link" class="btn" href="/create-room.html">卓を建てる</a>
 
-      <h1>今夜、灯りのついている卓</h1>
-
-      <div class="corridor-group" role="group" aria-label="表示の切り替え">
-        <button id="mode-3d" class="btn corridor-mode" type="button" aria-pressed="true">
-          店内を歩く
-        </button>
-        <button id="mode-list" class="btn corridor-mode" type="button" aria-pressed="false">
-          一覧で選ぶ
-        </button>
-      </div>
+      <h1>宴 -EN-</h1>
 
       <div id="walk-controls" class="corridor-group">
         <button id="left" class="btn" type="button">左を向く</button>
@@ -175,11 +162,6 @@
         <button id="fwd" class="btn" type="button">進む</button>
         <button id="right" class="btn" type="button">右を向く</button>
         <button id="enter" class="btn btn-gold" type="button" disabled>この卓に入る</button>
-      </div>
-
-      <div class="corridor-group" role="group" aria-label="VC の動作確認">
-        <button id="vc-join" class="btn" type="button">VCに入る（止める）</button>
-        <button id="vc-leave" class="btn" type="button" disabled>VCを抜ける（再開する）</button>
       </div>
 
       <span id="count" class="corridor-hint"></span>

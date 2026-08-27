@@ -235,45 +235,11 @@
         font-size: 6.5px;
       }
 
-      /* 廊下（3D）: 奥へ伸びる通路と中心の照準のミニチュア */
+      /* 廊下（3D）: 実際の画面のスクリーンショットをそのままサムネにする */
       .preview-corridor {
-        position: relative;
-        background: radial-gradient(60% 60% at 50% 100%, rgba(230, 166, 63, 0.12), transparent 70%);
-      }
-
-      .preview-corridor::before,
-      .preview-corridor::after {
-        content: "";
-        position: absolute;
-        bottom: 0;
-        width: 0;
-        height: 0;
-        border-style: solid;
-      }
-
-      .preview-corridor::before {
-        left: 50%;
-        border-width: 132px 60px 0 0;
-        border-color: var(--panel) transparent transparent transparent;
-        transform: translateX(-60px);
-      }
-
-      .preview-corridor::after {
-        left: 50%;
-        border-width: 132px 0 0 60px;
-        border-color: var(--panel) transparent transparent transparent;
-        transform: translateX(0);
-      }
-
-      .preview-aim {
-        position: absolute;
-        left: 50%;
-        top: 46%;
-        width: 12px;
-        height: 12px;
-        margin: -6px 0 0 -6px;
-        border: 1px solid rgba(230, 166, 63, 0.55);
-        border-radius: 50%;
+        background-image: url("./assets/corridor-preview.jpg");
+        background-size: cover;
+        background-position: center;
       }
 
       .proto-badge {
@@ -450,10 +416,8 @@
         </a>
 
         <a id="entrance-corridor" class="entrance-card card" href="/corridor.html">
-          <div class="entrance-preview preview-corridor" aria-hidden="true">
-            <div class="preview-aim"></div>
-          </div>
-          <h2>廊下を歩く<span class="badge proto-badge">試作中</span></h2>
+          <div class="entrance-preview preview-corridor" aria-hidden="true"></div>
+          <h2>廊下を歩く</h2>
           <p>3D の廊下を歩いて、灯りのついた扉を探して入ります。</p>
         </a>
 

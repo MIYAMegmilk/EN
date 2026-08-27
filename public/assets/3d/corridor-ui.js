@@ -274,6 +274,8 @@ function detectPage(doc) {
  * @param {"home"|"standalone"} [options.page] ページの種類。省略すると DOM から見分ける
  * @param {Document} [options.document] 差し替え用（テスト）
  * @param {(code: string) => void} [options.onEnter] 入店の経路。省略するとページ既定
+ * @param {() => void} [options.onModeList] 「一覧で選ぶ」が押されたときの経路。
+ *   省略すると同じページ内で一覧表示に切り替える（従来どおり）
  * @param {(view: object) => void} [options.onView] 3D が出来た時点で一度だけ呼ぶ。
  *   view はこの中で作るので、位置を毎フレーム見たい側（足音など）へ渡すための口
  * @returns {object|null} 受け皿が無ければ null
@@ -287,6 +289,9 @@ export function mountCorridor(options = {}) {
 
   const createView = options.createView ?? null;
   const onView = typeof options.onView === "function" ? options.onView : null;
+  const onModeList = typeof options.onModeList === "function"
+    ? options.onModeList
+    : () => setMode("list");
 
   const $ = (key) => {
     const id = page.ids[key];
@@ -1268,7 +1273,7 @@ export function mountCorridor(options = {}) {
     });
 
     els.mode3d?.addEventListener("click", () => setMode("3d"));
-    els.modeList?.addEventListener("click", () => setMode("list"));
+    els.modeList?.addEventListener("click", () => onModeList());
 
     // 単独ページの VC 疑似ボタン。本番では #entry の hidden がこの役目を持つ
     els.vcJoin?.addEventListener("click", () => {

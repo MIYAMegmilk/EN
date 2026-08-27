@@ -108,4 +108,9 @@ mountCorridor({
     if (Sound !== null) followFootsteps(view);
   },
   onEnter: handoffToIndex,
+  // 「一覧で選ぶ」は卓の一覧そのものが index.html にあるので、卓の情報を
+  // 何も持たずに index.html へ渡す（このページ自身では一覧を出さない）
+  onModeList: () => {
+    location.href = "/index.html";
+  },
 });
