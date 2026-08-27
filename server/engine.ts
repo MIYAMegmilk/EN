@@ -23,6 +23,7 @@ import type {
   ScoreEntry,
   Submission,
 } from "./types.ts";
+import { ROOM_CAPACITY } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // エンジン定数
@@ -52,6 +53,16 @@ export const CORRECT_BASE_POINT = 10;
 
 /** correct: 正解者を提出の早い順に並べたときの追加点（4位以降は 0） */
 export const CORRECT_SPEED_BONUS = [5, 3, 1];
+
+/** 匿名 reveal 用トークンの長さ（16進16文字 = 64bit） */
+export const REVEAL_TOKEN_HEX_LENGTH = 16;
+
+/**
+ * トークンを用意するラウンド数の上限。
+ * ゲーム定義の rounds は gamedef.ts が 1..ROUNDS_MAX(=10) に検証済みなので通常は届かない。
+ * 検証を経ない呼び出しで過大な rounds が来ても生成量が発散しないようにするための保険。
+ */
+const REVEAL_TOKEN_MAX_ROUNDS = 64;
 
 // ---------------------------------------------------------------------------
 // イベントと結果
@@ -191,14 +202,102 @@ function durationMs(state: GameState, phase: Phase): number | null {
   }
 }
 
-/** 文字列から 32bit の擬似乱数値を作る（FNV-1a）。匿名表示順の安定化に使う */
-function hash32(input: string): number {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < input.length; i++) {
-    h ^= input.charCodeAt(i);
-    h = Math.imul(h, 0x01000193) >>> 0;
+// ---------------------------------------------------------------------------
+// 匿名 reveal 用トークン（§3.2 原則3）
+// ---------------------------------------------------------------------------
+
+/**
+ * トークン1個を作る関数。既定は暗号乱数で、テストからは決定的な値を注入できる。
+ * ハッシュ導出（playerId や startedAt からの計算）は使わない。攻撃者は自分の回答から
+ * 「自分の playerId ↔ 自分のトークン」を1組必ず得られるため、鍵の無い導出では
+ * 他人のトークンまで再現されてしまう。
+ */
+export type RevealTokenSource = () => string;
+
+/** 暗号乱数から16進16文字（64bit）のトークンを作る */
+function randomRevealToken(): string {
+  const bytes = new Uint8Array(REVEAL_TOKEN_HEX_LENGTH / 2);
+  crypto.getRandomValues(bytes);
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
+}
+
+/**
+ * ラウンドごとのトークン束を作る（添字 = round-1、各ラウンド ROOM_CAPACITY 個）。
+ * ゲーム全体で値が重複しないことを保証する。重複すると投票先の解決が別人に化けるため、
+ * 生成器が重複を返した場合は作り直し、それでも解消しないときは連番を付けて一意にする。
+ */
+function buildRevealTokenPool(rounds: number, source: RevealTokenSource): string[][] {
+  const roundCount = Math.min(Math.max(1, Math.floor(rounds)), REVEAL_TOKEN_MAX_ROUNDS);
+  const used = new Set<string>();
+  let serial = 0;
+  const nextToken = (): string => {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const token = source();
+      if (token !== "" && !used.has(token)) {
+        used.add(token);
+        return token;
+      }
+    }
+    // 生成器が重複ばかり返す場合の最終手段。無限ループを避けつつ一意性だけは守る
+    let fallback = "";
+    do {
+      serial++;
+      fallback = `dup${serial}`;
+    } while (used.has(fallback));
+    used.add(fallback);
+    return fallback;
+  };
+  const pool: string[][] = [];
+  for (let r = 0; r < roundCount; r++) {
+    const row: string[] = [];
+    for (let i = 0; i < ROOM_CAPACITY; i++) row.push(nextToken());
+    pool.push(row);
   }
-  return h >>> 0;
+  return pool;
+}
+
+/**
+ * 現ラウンドのトークンを配り直す（startRound からのみ呼ぶ）。
+ * 1ラウンドで同時にトークンを要するのは在室中の採点対象者だけで、ルーム定員
+ * （ROOM_CAPACITY）を超えられないため、通常この配布で不足は起こらない。
+ */
+function assignRevealTokens(state: GameState): void {
+  const row = state.revealTokenPool[state.round - 1] ?? [];
+  const tokens: Record<string, string> = {};
+  scoredPlayerIds(state).forEach((id, index) => {
+    const token = row[index];
+    if (token !== undefined) tokens[id] = token;
+  });
+  state.revealTokens = tokens;
+}
+
+/** 匿名時のトークンを引く。割り当てが無ければ null */
+function revealTokenOf(state: GameState, playerId: string): string | null {
+  return state.revealTokens[playerId] ?? null;
+}
+
+/**
+ * トークンが引けなかったときの代替ID。1ラウンドで同時にトークンを要する人数は
+ * ルーム定員を超えられないため、設計上ここは使われない想定。
+ * それでも回答を隠したり投票不能にしたりすると当人が一方的に不利になるので、
+ * 実在の playerId とは決して一致しない形式でラウンド内一意の値を割り当て、表示と投票は成立させる。
+ */
+function fallbackRevealId(round: number, index: number): string {
+  return `anon#${round}#${index}`;
+}
+
+/** 匿名時に entry へ載せる公開IDと、本物の playerId の対応（現ラウンド分） */
+type AnonymousRevealId = { id: string; publicId: string; fallback: boolean };
+
+/** 現ラウンドの匿名IDを表示順に作る。トークンが無い分だけ代替IDで埋める */
+function anonymousRevealIds(state: GameState): AnonymousRevealId[] {
+  return revealOrder(state).map((id, index) => {
+    const token = revealTokenOf(state, id);
+    if (token !== null) return { id, publicId: token, fallback: false };
+    return { id, publicId: fallbackRevealId(state.round, index), fallback: true };
+  });
 }
 
 /** 状態を浅くコピーする（各コレクションは新しいオブジェクトにする） */
@@ -212,6 +311,9 @@ function cloneState(state: GameState): GameState {
     roundScores: { ...state.roundScores },
     totalScores: { ...state.totalScores },
     lastScores: [...state.lastScores],
+    revealTokens: { ...state.revealTokens },
+    // 各ラウンドの束は作った後に書き換えないが、共有参照を残さないよう行ごとに複製する
+    revealTokenPool: state.revealTokenPool.map((row) => [...row]),
   };
 }
 
@@ -391,6 +493,9 @@ function startRound(state: GameState, round: number, now: number): GameState {
       if (next.totalScores[id] === undefined) next.totalScores[id] = 0;
     }
   }
+  // 昇格が済んでから配る。ラウンドが変わればトークンも変わるので、
+  // 前ラウンドのトークンで投票しても解決できず弾かれる
+  assignRevealTokens(next);
   next = enterPhase(next, "prompt", now);
   return next;
 }
@@ -401,6 +506,7 @@ function toLobby(state: GameState, now: number): GameState {
   next.round = 0;
   next.submissions = {};
   next.votes = {};
+  next.revealTokens = {};
   next.deadline = null;
   return next;
 }
@@ -544,12 +650,17 @@ function eligibleVoteTargets(state: GameState, voterId: string): string[] {
 // 公開 API
 // ---------------------------------------------------------------------------
 
-/** ゲームを開始して intro フェーズの状態を作る */
+/**
+ * ゲームを開始して intro フェーズの状態を作る。
+ * 匿名 reveal 用のトークンはここで全ラウンド分をまとめて作る（reduce は純粋関数のままにする）。
+ * tokenSource はテストから決定的な値を入れるための注入口で、省略時は必ず暗号乱数を使う。
+ */
 export function startGame(
   definition: GameDefinition,
   players: EnginePlayerInput[],
   now: number,
   durations: PhaseDurations = DEFAULT_PHASE_DURATIONS,
+  tokenSource: RevealTokenSource = randomRevealToken,
 ): EngineResult {
   const participants: Record<string, GameParticipant> = {};
   const order: string[] = [];
@@ -580,6 +691,8 @@ export function startGame(
     totalScores,
     lastScores: [],
     startedAt: now,
+    revealTokens: {},
+    revealTokenPool: buildRevealTokenPool(definition.rounds, tokenSource),
   };
   const connectedCount = order.filter((id) => participants[id].connected).length;
   if (connectedCount < MIN_PLAYERS) {
@@ -716,14 +829,20 @@ function handleSubmitVote(
   if (state.votes[event.voterId] !== undefined) {
     return fail(state, "DUPLICATE", "すでに投票しています");
   }
-  if (event.targetPlayerId === event.voterId) {
+  // 匿名時にクライアントが持っているのは当ラウンドのトークンだけ。ここで本物の
+  // playerId へ解決してから検証する（state.votes には本物の playerId を入れる）
+  const targetId = resolveVoteTarget(state, event.targetPlayerId);
+  if (targetId === null) {
+    return fail(state, "INVALID_INPUT", "投票先が正しくありません");
+  }
+  if (targetId === event.voterId) {
     return fail(state, "INVALID_INPUT", "自分には投票できません");
   }
-  if (!eligibleVoteTargets(state, event.voterId).includes(event.targetPlayerId)) {
+  if (!eligibleVoteTargets(state, event.voterId).includes(targetId)) {
     return fail(state, "INVALID_INPUT", "投票先が正しくありません");
   }
   let next = cloneState(state);
-  next.votes[event.voterId] = event.targetPlayerId;
+  next.votes[event.voterId] = targetId;
   const effects: EngineEffect[] = [];
   const advanced = advanceIfComplete(next, event.now);
   if (advanced !== null) {
@@ -731,6 +850,24 @@ function handleSubmitVote(
     effects.push(...advanced.effects);
   }
   return { state: next, changed: true, effects };
+}
+
+/**
+ * クライアントが送ってきた投票先を本物の playerId へ解決する。
+ * reveal:"named" はそのまま本物の playerId を受ける。匿名時は**現ラウンドの**
+ * トークンだけを引くので、本物の playerId や前ラウンドのトークンは解決できず弾かれる。
+ */
+function resolveVoteTarget(state: GameState, target: string): string | null {
+  if (state.definition.reveal === "named") return target;
+  if (target === "") return null;
+  for (const id of Object.keys(state.revealTokens)) {
+    if (state.revealTokens[id] === target) return id;
+  }
+  // トークンが足りずに代替IDを配った場合だけ、その代替IDも受け付ける（buildRevealEntries と対）
+  const fallbackEntry = anonymousRevealIds(state).find(
+    (e) => e.fallback && e.publicId === target,
+  );
+  return fallbackEntry?.id ?? null;
 }
 
 /** 途中参加。lobby 以外では観戦者として登録する（§8） */
@@ -823,27 +960,50 @@ function handlePlayerKicked(
 // 受信者ごとの表示データ（§3.2 原則3）
 // ---------------------------------------------------------------------------
 
-/** 匿名表示のための擬似ランダム順に並べ替える（ラウンドごとに安定） */
+/**
+ * 表示順を決める。
+ * 匿名時は**そのラウンドのトークンの昇順**に並べる。トークンは毎ラウンド作り直す乱数なので、
+ * クライアントが知っている値（playerId・round・startedAt）からは並び順を再現できない。
+ * 以前は公開ハッシュ順だったため、並びから回答者を特定できてしまっていた。
+ */
 function revealOrder(state: GameState): string[] {
   const ids = scoredPlayerIds(state).filter((id) => state.submissions[id] !== undefined);
   if (state.definition.reveal === "named") return ids;
   return [...ids].sort((a, b) => {
-    const ha = hash32(`${a}:${state.round}:${state.startedAt}`);
-    const hb = hash32(`${b}:${state.round}:${state.startedAt}`);
-    if (ha !== hb) return ha - hb;
-    return a < b ? -1 : 1;
+    // トークンが無い場合は playerId で代替せず、末尾へ寄せて順序だけ安定させる
+    const ta = revealTokenOf(state, a);
+    const tb = revealTokenOf(state, b);
+    if (ta === null || tb === null) {
+      if (ta === tb) return 0;
+      return ta === null ? 1 : -1;
+    }
+    if (ta === tb) return 0;
+    return ta < tb ? -1 : 1;
   });
 }
 
-/** reveal / judge に載せる回答一覧を作る。匿名時は nickname を含めない */
+/**
+ * reveal / judge に載せる回答一覧を作る。
+ * reveal:"named" は本物の playerId と nickname を載せ、匿名時は playerId の代わりに
+ * そのラウンドのトークンだけを載せる（nickname は載せない）。
+ */
 function buildRevealEntries(state: GameState): RevealEntry[] {
-  const named = state.definition.reveal === "named";
-  return revealOrder(state).map((id) => {
-    const sub = state.submissions[id];
-    const entry: RevealEntry = { playerId: id, value: sub.value };
-    if (named) entry.nickname = state.participants[id].nickname;
-    return entry;
-  });
+  if (state.definition.reveal === "named") {
+    return revealOrder(state).map((id) => ({
+      playerId: id,
+      value: state.submissions[id].value,
+      nickname: state.participants[id].nickname,
+    }));
+  }
+  const anonymous = anonymousRevealIds(state);
+  const missing = anonymous.filter((e) => e.fallback).length;
+  if (missing > 0) {
+    // 設計上起こらないはずの経路。playerId は出さず、規模だけを記録する
+    console.warn(
+      `[engine] 匿名トークンが不足しました: round=${state.round} 不足=${missing}件 表示=${anonymous.length}件`,
+    );
+  }
+  return anonymous.map((e) => ({ playerId: e.publicId, value: state.submissions[e.id].value }));
 }
 
 /** 現在のお題の選択肢（choice のみ）。正解は含めない */
@@ -936,8 +1096,18 @@ export function buildPhaseView(state: GameState, viewerId: string): PhaseView {
         votedCount: active.filter((id) => state.votes[id] !== undefined).length,
         participantCount: active.length,
       };
+      // 匿名時は本物の playerId を返さない。投票者は自分が押した entry のIDを知っているので、
+      // ここに本物の playerId を載せると1ラウンドにつき1人の身元が確実に割れる
       const myVote = state.votes[viewerId];
-      if (myVote !== undefined) view.myVoteTargetId = myVote;
+      if (myVote !== undefined) {
+        if (def.reveal === "named") {
+          view.myVoteTargetId = myVote;
+        } else {
+          const publicId = revealTokenOf(state, myVote) ??
+            anonymousRevealIds(state).find((e) => e.id === myVote)?.publicId ?? null;
+          if (publicId !== null) view.myVoteTargetId = publicId;
+        }
+      }
       return view;
     }
     case "roundResult":

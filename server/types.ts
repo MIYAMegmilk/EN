@@ -526,6 +526,18 @@ export type GameState = {
   lastScores: ScoreEntry[];
   /** ゲーム開始時刻（epoch ms） */
   startedAt: number;
+  /**
+   * 匿名 reveal 用の不透明トークン（**現在のラウンド分だけ**）。playerId → トークン。
+   * ラウンド開始時に revealTokenPool から配り直すため、同じ人でもラウンドごとに別の値になる。
+   * **サーバー内部専用で、いかなる view にも載せてはならない**（§3.2 原則3）。
+   */
+  revealTokens: Record<string, string>;
+  /**
+   * ラウンドごとに配るトークンの束（添字 = round-1、各ラウンド ROOM_CAPACITY 個）。
+   * ゲーム開始時に暗号乱数でまとめて作り、ゲーム全体で値が重複しないことを保証する。
+   * reduce を純粋関数のままにするため、乱数生成は startGame に閉じ込めている。
+   */
+  revealTokenPool: string[][];
 };
 
 /** 得点の内訳。採点方式ごとに使うフィールドが異なる */
@@ -592,7 +604,11 @@ export type KnockPublic = {
 
 /** reveal / judge で表示する回答1件 */
 export type RevealEntry = {
-  /** 投票先の指定に使う不透明ID。匿名時もクライアントは表示に使わない */
+  /**
+   * 投票先の指定に使う識別子。クライアントは中身を解釈せず、そのまま submitVote へ返す。
+   * reveal:"named" のときは本物の playerId、それ以外（匿名）のときは
+   * **そのラウンドだけ有効な不透明トークン**が入る（回答者を特定できない）。
+   */
   playerId: string;
   /** 回答本体。choice の場合は選択肢の添字 */
   value: string | number;

@@ -65,6 +65,16 @@ function expectError(res: EngineResult, code: string) {
   assertEquals(res.changed, false);
 }
 
+/**
+ * 匿名ゲーム（reveal !== "named"）の投票先は、そのラウンドだけ有効な不透明トークンになる（H-3 の修正）。
+ * クライアントが entry から受け取るのと同じ値をサーバー内部の表から引く。
+ */
+function tokenOf(state: GameState, playerId: string): string {
+  const token = state.revealTokens[playerId];
+  assert(typeof token === "string" && token.length > 0, `トークンが無い: ${playerId}`);
+  return token;
+}
+
 // ---------------------------------------------------------------------------
 // §3.4 正規化規則
 // ---------------------------------------------------------------------------
@@ -313,9 +323,14 @@ function toJudge(def: GameDefinition, ids: string[], values: (string | number)[]
 Deno.test("vote: 投票数がそのまま得点になる", () => {
   let s = toJudge(makeDef(), ["a", "b", "c"], ["A", "B", "C"]);
   assertEquals(s.phase, "judge");
-  s = reduce(s, { t: "submitVote", voterId: "a", targetPlayerId: "b", now: T0 }).state;
-  s = reduce(s, { t: "submitVote", voterId: "b", targetPlayerId: "c", now: T0 }).state;
-  const res = reduce(s, { t: "submitVote", voterId: "c", targetPlayerId: "b", now: T0 });
+  s = reduce(s, { t: "submitVote", voterId: "a", targetPlayerId: tokenOf(s, "b"), now: T0 }).state;
+  s = reduce(s, { t: "submitVote", voterId: "b", targetPlayerId: tokenOf(s, "c"), now: T0 }).state;
+  const res = reduce(s, {
+    t: "submitVote",
+    voterId: "c",
+    targetPlayerId: tokenOf(s, "b"),
+    now: T0,
+  });
   assertEquals(res.state.phase, "roundResult");
   const scores = res.state.lastScores;
   assertEquals(scores.find((x) => x.playerId === "b")?.roundScore, 2);
@@ -351,9 +366,10 @@ Deno.test("vote: 未提出者・非参加者へは投票できない", () => {
 
 Deno.test("vote: 二重投票は DUPLICATE / 期限後は PHASE_MISMATCH", () => {
   const s = toJudge(makeDef(), ["a", "b", "c"], ["A", "B", "C"]);
-  const voted = reduce(s, { t: "submitVote", voterId: "a", targetPlayerId: "b", now: T0 }).state;
+  const voted =
+    reduce(s, { t: "submitVote", voterId: "a", targetPlayerId: tokenOf(s, "b"), now: T0 }).state;
   expectError(
-    reduce(voted, { t: "submitVote", voterId: "a", targetPlayerId: "c", now: T0 }),
+    reduce(voted, { t: "submitVote", voterId: "a", targetPlayerId: tokenOf(s, "c"), now: T0 }),
     "DUPLICATE",
   );
   expectError(
@@ -517,8 +533,8 @@ Deno.test("途中参加: 進行中は観戦扱いで、次ラウンドから採�
   s = reduce(s, { t: "submitInput", playerId: "b", value: "B", now: T0 }).state;
   assertEquals(s.phase, "reveal");
   s = skip(s, T0); // judge
-  s = reduce(s, { t: "submitVote", voterId: "a", targetPlayerId: "b", now: T0 }).state;
-  s = reduce(s, { t: "submitVote", voterId: "b", targetPlayerId: "a", now: T0 }).state;
+  s = reduce(s, { t: "submitVote", voterId: "a", targetPlayerId: tokenOf(s, "b"), now: T0 }).state;
+  s = reduce(s, { t: "submitVote", voterId: "b", targetPlayerId: tokenOf(s, "a"), now: T0 }).state;
   assertEquals(s.phase, "roundResult");
   assertFalse(s.lastScores.some((x) => x.playerId === "c"));
   s = skip(s, T0); // 次ラウンド
@@ -528,7 +544,8 @@ Deno.test("途中参加: 進行中は観戦扱いで、次ラウンドから採�
 
 Deno.test("キック: スコアごと除外され、当人への票が無効化される（§8）", () => {
   let s = toJudge(makeDef(), ["a", "b", "c"], ["A", "B", "C"]);
-  s = reduce(s, { t: "submitVote", voterId: "c", targetPlayerId: "a", now: T0 }).state;
+  s = reduce(s, { t: "submitVote", voterId: "c", targetPlayerId: tokenOf(s, "a"), now: T0 }).state;
+  // トークンで投票しても、state には本物の playerId が入る（採点は本物のIDで動くため）
   assertEquals(s.votes["c"], "a");
   const res = reduce(s, { t: "playerKicked", playerId: "a", now: T0 });
   s = res.state;
@@ -538,8 +555,13 @@ Deno.test("キック: スコアごと除外され、当人への票が無効化�
   // 当人への票は無効化され、投票者は再投票できる
   assertEquals(s.votes["c"], undefined);
   assertEquals(s.phase, "judge");
-  s = reduce(s, { t: "submitVote", voterId: "b", targetPlayerId: "c", now: T0 }).state;
-  const done = reduce(s, { t: "submitVote", voterId: "c", targetPlayerId: "b", now: T0 });
+  s = reduce(s, { t: "submitVote", voterId: "b", targetPlayerId: tokenOf(s, "c"), now: T0 }).state;
+  const done = reduce(s, {
+    t: "submitVote",
+    voterId: "c",
+    targetPlayerId: tokenOf(s, "b"),
+    now: T0,
+  });
   assertEquals(done.state.phase, "roundResult");
   assertFalse(done.state.lastScores.some((x) => x.playerId === "a"));
 });
@@ -663,11 +685,13 @@ Deno.test("PhaseView: judge の canVote と投票数", () => {
     assertEquals(before.votedCount, 0);
     assertEquals(before.myVoteTargetId, undefined);
   }
-  s = reduce(s, { t: "submitVote", voterId: "a", targetPlayerId: "b", now: T0 }).state;
+  const bToken = tokenOf(s, "b");
+  s = reduce(s, { t: "submitVote", voterId: "a", targetPlayerId: bToken, now: T0 }).state;
   const after = buildPhaseView(s, "a");
   if (after.phase === "judge") {
     assertEquals(after.canVote, false);
-    assertEquals(after.myVoteTargetId, "b");
+    // 匿名時は本物の playerId ではなくトークンを返す（H-3）
+    assertEquals(after.myVoteTargetId, bToken);
     assertEquals(after.votedCount, 1);
   }
   // match 方式では投票できない
@@ -693,10 +717,13 @@ Deno.test("PhaseView: 匿名 reveal の並び順は全員共通で、提出者�
   // 同一ラウンド内では全員に同じ順序で見える
   assertEquals(JSON.stringify(v1), JSON.stringify(v2));
   if (v1.phase === "judge") {
-    assertEquals(
-      [...v1.entries.map((e) => e.playerId)].sort(),
-      ["a", "b", "c", "d", "e"],
-    );
+    // 匿名時の entry.playerId はトークンなので、内部の表で本物のIDへ戻してから照合する（H-3）
+    const ids = v1.entries.map((e) => {
+      const found = Object.keys(s.revealTokens).find((id) => s.revealTokens[id] === e.playerId);
+      assert(found !== undefined, "トークンが解決できない");
+      return found;
+    });
+    assertEquals([...ids].sort(), ["a", "b", "c", "d", "e"]);
   }
 });
 

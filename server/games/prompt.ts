@@ -255,5 +255,7 @@ function emptyState(now: number): GameState {
     totalScores: {},
     lastScores: [],
     startedAt: now,
+    revealTokens: {},
+    revealTokenPool: [],
   };
 }
