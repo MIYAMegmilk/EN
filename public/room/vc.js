@@ -33,6 +33,7 @@
    *   { kind: "desc",    description }          … offer / answer（RTCSessionDescription）
    *   { kind: "ice",     candidate }            … ICE candidate（null は収集完了）
    *   { kind: "video",   on, source, surface }  … 自分の映像送出の ON / OFF
+   *   { kind: "mic",     muted }                … 自分のマイクのミュート状態
    *
    * video の source / surface は画面共有で足した拡張（vc-screenshare.md §4.3）。
    *   source  … "camera" | "screen"。省略時は "camera" とみなす。
@@ -41,6 +42,10 @@
    *   surface … "monitor" | "window" | "browser" | null。共有者が
    *             track.getSettings().displaySurface で事後確認した自己申告値。
    *             受信側では表示にしか使わない（信頼して制御に使ってはいけない）
+   *
+   * mic は卓上の在席表示で足した拡張。muted が届いていない相手は「声入り」と
+   * して扱う。届いていないことを切扱いにすると、この告知を知らない相手が
+   * 全員ミュートに見えてしまい、実際より状況が悪く読める。
    * サーバーは payload を解釈せずそのまま転送するので、ここに相乗りする限り
    * server/types.ts / server/rooms.ts の契約は変えなくてよい（§4.3）。
    */
@@ -109,6 +114,40 @@
    * 「エンコードが成立していない」と見なすか（vc-screenshare.md §8.4）【暫定値】。
    */
   const SCREEN_STALL_SAMPLES = 3;
+
+  // -------------------------------------------------------------------------
+  // 発話検知（誰がしゃべっているか）
+  //
+  // 自分のマイクと、各ピアの受信ストリームを同じ経路で測る。
+  // RTCRtpReceiver.getSynchronizationSources() は相手側にしか使えず、自分の枠
+  // だけ別の作りになるうえ、RTP のヘッダ拡張の折衝に依存する。AnalyserNode なら
+  // 自分と相手がまったく同じ道を通るので、片方だけ光らない事故が起きない。
+  // -------------------------------------------------------------------------
+
+  /** 音量を測る間隔（ms）【暫定値】 */
+  const SPEECH_SAMPLE_INTERVAL_MS = 120;
+  /** この音量（RMS・0〜1）を超えたら「話し中」にする【暫定値】 */
+  const SPEECH_ON_LEVEL = 0.045;
+  /** この音量を下回った状態が続いたら「話し中」を解く【暫定値】 */
+  const SPEECH_OFF_LEVEL = 0.03;
+  /**
+   * 下回ってから消すまでの保持時間（ms）【暫定値】。
+   * 息継ぎと語の切れ目で毎回消えると、卓上がちらついて逆に読めなくなる。
+   */
+  const SPEECH_HOLD_MS = 400;
+  /** AnalyserNode の窓。小さいほど反応は速いが、値は暴れる */
+  const SPEECH_FFT_SIZE = 512;
+
+  /** inline SVG を組むための名前空間（外部アイコンは読み込めない・§3.8 CSP） */
+  const SVG_NS = "http://www.w3.org/2000/svg";
+
+  /** マイクの線画。手元の操作の #vc-mute（index.html）とまったく同じ形 */
+  const MIC_PATHS = [
+    "M12 4a2.5 2.5 0 0 1 2.5 2.5v5a2.5 2.5 0 0 1-5 0v-5A2.5 2.5 0 0 1 12 4Z",
+    "M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7",
+  ];
+  /** 「切」を表す斜線。カメラ・画面共有の絵と共通の1本 */
+  const MIC_SLASH_PATH = "M4 3.5 20 20.5";
 
   // -------------------------------------------------------------------------
   // 画面共有の送出プロファイル（vc-screenshare.md §6.2 / §6.3）
@@ -243,6 +282,14 @@
     },
     /** ミュート中か */
     muted: false,
+    /**
+     * 発話検知の作業領域。AudioContext を使えない環境では何も入らない。
+     *   ctx    … 共有の AudioContext（使えなければ null）
+     *   sink   … gain 0 の吐き出し口。グラフを destination まで繋ぐためだけに要る
+     *   meters … playerId → { source, analyser, buffer, speaking, quietSince }
+     *   timer  … 計測器が1つ以上ある間だけ回す setInterval のハンドル
+     */
+    speech: { ctx: null, sink: null, meters: new Map(), timer: null },
     /** playerId → ピア情報 */
     peers: new Map(),
     /** ICE サーバー設定 */
@@ -413,12 +460,15 @@
     const share = createShareBadge("画面を共有中", () => requestZoom(playerId));
     share.zoom.setAttribute("aria-label", `${nicknameOf(playerId)} さんの共有画面を拡大表示`);
 
+    const mic = createMicMark();
+
     root.appendChild(label);
     root.appendChild(video);
     root.appendChild(share.root);
+    root.appendChild(mic);
     root.appendChild(audio);
     if (config.container !== null) config.container.appendChild(root);
-    return { root, label, audio, video, share };
+    return { root, label, audio, video, share, mic };
   }
 
   /**
@@ -445,6 +495,77 @@
     root.appendChild(zoom);
 
     return { root, caption, zoom };
+  }
+
+  /**
+   * 枠の右下に置くマイクマーク（在席表示）。
+   *
+   * 絵は手元の操作の #vc-mute と同じ線画を使う。同じ意味のものが違う形で出ると
+   * 「自分のボタン」と「卓上の札」が別の話に見えてしまう。外部アイコンは
+   * 読み込めない（§3.8 CSP）ので inline SVG で組む。
+   *
+   * 状態は data-state（"on" | "speaking" | "off"）だけで持ち、絵の差し替えと色は
+   * CSS に任せる（手元の操作の .vc-ctl とまったく同じ作り）。
+   */
+  function createMicMark() {
+    const root = document.createElement("span");
+    root.className = "vc-mic-mark";
+    root.dataset.state = "on";
+    root.setAttribute("role", "img");
+    root.setAttribute("aria-label", "マイク入");
+
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("class", "vc-mic-ico");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    svg.appendChild(micGlyph("vc-mic-ico-on", MIC_PATHS));
+    svg.appendChild(micGlyph("vc-mic-ico-off", MIC_PATHS.concat([MIC_SLASH_PATH])));
+    root.appendChild(svg);
+    return root;
+  }
+
+  /** マイクの線画1組。入と切は斜線が1本増えるかどうかの違いしかない */
+  function micGlyph(className, paths) {
+    const group = document.createElementNS(SVG_NS, "g");
+    group.setAttribute("class", className);
+    for (const d of paths) {
+      const path = document.createElementNS(SVG_NS, "path");
+      path.setAttribute("d", d);
+      group.appendChild(path);
+    }
+    return group;
+  }
+
+  /**
+   * マイクマークと枠の光りを、渡された状態のとおりに描く。
+   *
+   * 読み上げ名は「マイク入」「ミュート中」の2値だけにする。話し中まで
+   * aria-label に載せると、誰かがしゃべるたびに読み上げが走って会話の邪魔に
+   * なる。話し中は目で見て分かれば足りる。
+   */
+  function updateMicMark(view, muted, speaking) {
+    if (view === null || view === undefined) return;
+    if (view.mic === null || view.mic === undefined) return;
+    view.mic.dataset.state = muted ? "off" : speaking ? "speaking" : "on";
+    view.mic.setAttribute("aria-label", muted ? "ミュート中" : "マイク入");
+    view.root.classList.toggle("vc-peer-speaking", !muted && speaking);
+  }
+
+  /**
+   * 誰か1人のマイクマークを、いまの状態から描き直す。
+   * ミュートの告知と発話の判定は別々に届くので、描くときは必ず両方を見る。
+   */
+  function refreshMicMark(playerId) {
+    if (typeof playerId !== "string") return;
+    const muted = isMutedFor(playerId);
+    const speaking = !muted && speakingOf(playerId);
+    if (playerId === state.selfId) {
+      updateMicMark(state.localVideo, muted, speaking);
+      return;
+    }
+    const peer = state.peers.get(playerId);
+    if (peer !== undefined) updateMicMark(peer.view, muted, speaking);
   }
 
   /** 自動再生が拒否された場合に備えて再生を試みる（iOS Safari 対策） */
@@ -480,7 +601,9 @@
       root.className = "vc-peer vc-self";
       const label = document.createElement("p");
       label.className = "vc-peer-label";
-      label.textContent = "あなた";
+      // 自分の枠にも他人と同じくニックネームを出す。名前が出ないのは自分だけ、
+      // という状態を作らない（「あなた」は左上の札のほうで受け持つ）
+      label.textContent = nicknameOf(state.selfId);
       const video = document.createElement("video");
       video.autoplay = true;
       video.playsInline = true;
@@ -503,11 +626,21 @@
         stopScreenShare({ message: "画面共有を止めました" });
       });
       share.root.appendChild(stop);
+      // 「あなた」は左上に小さく置く。ラベルの位置と中身は他人の枠と揃えたまま、
+      // どれが自分かは一目で分かるようにする（金色の縁と同じ役目）
+      const tag = document.createElement("span");
+      tag.className = "vc-self-tag";
+      tag.textContent = "あなた";
+      const mic = createMicMark();
       root.appendChild(label);
       root.appendChild(video);
       root.appendChild(share.root);
+      root.appendChild(tag);
+      root.appendChild(mic);
       config.container.appendChild(root);
-      state.localVideo = { root, video, share };
+      state.localVideo = { root, label, video, share, mic };
+      // 枠を作り直した直後は既定の見た目なので、いまの状態を描き直す
+      refreshMicMark(state.selfId);
     }
     const video = state.localVideo.video;
     // 送出しているものを、そのまま自分にも見せる。共有中に「いま外に出ている
@@ -525,6 +658,16 @@
     video.hidden = false;
     video.srcObject = stream;
     tryPlay(video);
+  }
+
+  /**
+   * 自分の枠のラベルを、いまの名前に合わせて直す。
+   * スナップショットが枠より後に届くことも、名前が変わることもあるので、
+   * 枠を作った時点の値を持ち続けない（他人の枠を upsertPlayer で直すのと同じ）。
+   */
+  function refreshLocalLabel() {
+    if (state.localVideo === null || state.selfId === null) return;
+    state.localVideo.label.textContent = nicknameOf(state.selfId);
   }
 
   /**
@@ -615,6 +758,12 @@
       /** 相手が映像の送出を止めていると申告しているか（kind: "video"） */
       remoteVideoOff: false,
       /**
+       * 相手がマイクをミュートしていると申告しているか（kind: "mic"）。
+       * 既定は false（声入り）。告知が届いていないだけの相手を切扱いにすると、
+       * この告知を知らない古いクライアントが全員ミュートに見えてしまう。
+       */
+      remoteMuted: false,
+      /**
        * 相手が送っている映像の出どころ。"camera" | "screen" | null（送出なし）。
        * 届いたトラックがカメラか画面かは受信側では判別できないので、
        * 相手の告知（§4.3）だけが根拠になる。表示にしか使わない。
@@ -670,6 +819,8 @@
         // srcObject は付け直す（トラック追加後の再設定が必要なブラウザがあるため）
         peer.view.audio.srcObject = peer.stream;
         tryPlay(peer.view.audio);
+        // 受け取った声から話し中を測る（自分の声とまったく同じ経路）
+        addSpeechMeter(peer.id, peer.stream);
       }
       event.track.addEventListener("ended", () => {
         peer.stream.removeTrack(event.track);
@@ -728,6 +879,7 @@
     // 品質監視の作業領域も一緒に捨てる（閉じたピアのぶんが溜まらないように）
     state.quality.prev.delete(playerId);
     state.quality.window.delete(playerId);
+    removeSpeechMeter(playerId);
     peer.closed = true;
     peer.videoSender = null;
     peer.pc.onnegotiationneeded = null;
@@ -777,6 +929,9 @@
       case "video":
         onVideoState(from, payload);
         return;
+      case "mic":
+        onMicState(from, payload);
+        return;
       default:
         return;
     }
@@ -802,6 +957,7 @@
     // ready → video の順に届く（WS は1接続を共用し、中継は順に send する）。
     // 受け手は ready でピアを同期的に作ってから戻るので取りこぼさない（§4.3）
     announceVideoStateTo(from);
+    announceMicStateTo(from);
   }
 
   /** offer / answer の処理（MDN Perfect Negotiation） */
@@ -863,6 +1019,41 @@
       // 告知が行き違って2人が同時に共有した場合は、ここで1人に収束させる
       if (sharing) resolveShareConflict();
     }
+  }
+
+  /**
+   * 相手のマイクのミュート状態。
+   * 音そのものは相手側の track.enabled で落ちているので、これが届かなくても
+   * 会話には影響しない。届かなければ札が出ないだけ（表示にしか使わない）。
+   */
+  function onMicState(from, payload) {
+    const peer = state.peers.get(from);
+    if (peer === undefined) return;
+    peer.remoteMuted = payload.muted === true;
+    refreshMicMark(from);
+  }
+
+  /**
+   * 自分のマイクの状態を組み立てる。映像側と同じく引数は取らず、必ず現在の
+   * state から導く（「送ったつもり」と実際が食い違うと札だけが取り残される）。
+   */
+  function micStatePayload() {
+    return { kind: "mic", muted: state.muted };
+  }
+
+  /** 自分のミュート状態を全ピアへ伝える */
+  function announceMicState() {
+    const payload = micStatePayload();
+    for (const id of state.peers.keys()) signal(id, payload);
+  }
+
+  /**
+   * ピアを作った／受け入れた直後に、そのピアだけへ現在のミュート状態を送る。
+   * これが無いと「自分がミュートした後で入ってきた相手」の画面にだけ札が出ず、
+   * その人からは声入りのまま黙っている人に見える。
+   */
+  function announceMicStateTo(playerId) {
+    signal(playerId, micStatePayload());
   }
 
   /**
@@ -964,6 +1155,7 @@
         connected: player.connected === true,
       });
     }
+    refreshLocalLabel();
   }
 
   /** 参加者1人分を取り込む */
@@ -973,6 +1165,7 @@
       vcEligible: player.vcEligible === true,
       connected: player.connected === true,
     });
+    if (player.id === state.selfId) refreshLocalLabel();
     const peer = state.peers.get(player.id);
     if (peer !== undefined) {
       peer.view.label.textContent = player.nickname;
@@ -1842,6 +2035,181 @@
   }
 
   // -------------------------------------------------------------------------
+  // 発話検知
+  // -------------------------------------------------------------------------
+
+  /**
+   * 共有の AudioContext を用意する。使えない環境では null を返し、以降この
+   * 機能はまるごと素通りする（画面共有の特徴検出と同じ流儀・§2）。
+   * 話し中の表示が出ないだけで、会話も既存の表示も従来どおり動く。
+   */
+  function ensureAudioContext() {
+    const speech = state.speech;
+    if (speech.ctx !== null) return speech.ctx;
+    const Ctor = global.AudioContext ?? global.webkitAudioContext;
+    if (typeof Ctor !== "function") return null;
+    try {
+      speech.ctx = new Ctor();
+      // gain 0 の吐き出し口。Chrome は destination まで繋がっていないグラフを
+      // 回さないことがあるので、鳴らさないまま終端だけ繋いでおく
+      speech.sink = speech.ctx.createGain();
+      speech.sink.gain.value = 0;
+      speech.sink.connect(speech.ctx.destination);
+    } catch (e) {
+      console.error("VC AudioContext failed:", e);
+      speech.ctx = null;
+      speech.sink = null;
+      return null;
+    }
+    return speech.ctx;
+  }
+
+  /**
+   * ストリームの音量を測り始める。playerId ごとに1つだけ持つ。
+   * 音声トラックの無いストリームと、AudioContext を使えない環境では何もしない。
+   */
+  function addSpeechMeter(playerId, stream) {
+    if (typeof playerId !== "string" || stream === null || stream === undefined) return;
+    if (state.speech.meters.has(playerId)) return;
+    if (stream.getAudioTracks().length === 0) return;
+    const ctx = ensureAudioContext();
+    if (ctx === null) return;
+    let source = null;
+    let analyser = null;
+    try {
+      source = ctx.createMediaStreamSource(stream);
+      analyser = ctx.createAnalyser();
+      analyser.fftSize = SPEECH_FFT_SIZE;
+      source.connect(analyser);
+      analyser.connect(state.speech.sink);
+    } catch (e) {
+      console.error("VC createMediaStreamSource failed:", e);
+      return;
+    }
+    // join はユーザー操作の直後なので通るはず。通らなくても声は audio 要素で
+    // 鳴っているので、ここは黙って諦める（話し中の表示が出ないだけ）
+    if (ctx.state === "suspended" && typeof ctx.resume === "function") {
+      const resumed = ctx.resume();
+      if (resumed !== undefined && typeof resumed.catch === "function") resumed.catch(() => {});
+    }
+    state.speech.meters.set(playerId, {
+      source,
+      analyser,
+      buffer: new Uint8Array(analyser.fftSize),
+      speaking: false,
+      quietSince: null,
+    });
+    startSpeechTimer();
+  }
+
+  /** 測るのをやめて繋ぎも外す。ピアを畳むときと VC を抜けるときに必ず呼ぶ */
+  function removeSpeechMeter(playerId) {
+    const meter = state.speech.meters.get(playerId);
+    if (meter === undefined) return;
+    state.speech.meters.delete(playerId);
+    try {
+      meter.source.disconnect();
+      meter.analyser.disconnect();
+    } catch (e) {
+      console.error("VC disconnect failed:", e);
+    }
+    refreshMicMark(playerId);
+    if (state.speech.meters.size === 0) stopSpeechTimer();
+  }
+
+  /** 計測器が1つ以上ある間だけタイマーを回す */
+  function startSpeechTimer() {
+    if (state.speech.timer !== null) return;
+    state.speech.timer = global.setInterval(sampleSpeech, SPEECH_SAMPLE_INTERVAL_MS);
+  }
+
+  /** タイマーを止める。止め損ねると VC を抜けた後も回り続ける */
+  function stopSpeechTimer() {
+    if (state.speech.timer === null) return;
+    global.clearInterval(state.speech.timer);
+    state.speech.timer = null;
+  }
+
+  /**
+   * 発話検知をまるごと畳む（VC の後始末から呼ぶ）。
+   * AudioContext は閉じずに取っておく。入り直すたびに作ると、ブラウザが
+   * 数個で作らせなくなり、2回目以降は誰も光らなくなる。
+   */
+  function resetSpeech() {
+    for (const id of [...state.speech.meters.keys()]) removeSpeechMeter(id);
+    stopSpeechTimer();
+  }
+
+  /** 1回ぶんの音量サンプル。卓にいる全員をまとめて見る */
+  function sampleSpeech() {
+    const now = Date.now();
+    for (const [playerId, meter] of state.speech.meters) {
+      // ミュート中は測らない。track.enabled を落とせば無音になるので結果は
+      // 同じだが、切り替えの一瞬だけ光ってしまうのを防ぐ
+      if (isMutedFor(playerId)) {
+        meter.speaking = false;
+        meter.quietSince = null;
+        refreshMicMark(playerId);
+        continue;
+      }
+      const next = decideSpeaking(readLevel(meter), meter, now);
+      meter.speaking = next.speaking;
+      meter.quietSince = next.quietSince;
+      refreshMicMark(playerId);
+    }
+  }
+
+  /** その人がミュートしているか（自分は手元の状態、相手は告知された状態） */
+  function isMutedFor(playerId) {
+    if (playerId === state.selfId) return state.muted;
+    const peer = state.peers.get(playerId);
+    return peer !== undefined && peer.remoteMuted === true;
+  }
+
+  /** その人がいま話し中と判定されているか */
+  function speakingOf(playerId) {
+    const meter = state.speech.meters.get(playerId);
+    return meter !== undefined && meter.speaking === true;
+  }
+
+  /** 音量（RMS・0〜1）。無音は 0、はっきり話して 0.1 前後まで上がる */
+  function readLevel(meter) {
+    const buffer = meter.buffer;
+    meter.analyser.getByteTimeDomainData(buffer);
+    let sum = 0;
+    for (let i = 0; i < buffer.length; i++) {
+      // 128 が無音の中心。±128 で正規化してから二乗和を取る
+      const v = (buffer[i] - 128) / 128;
+      sum += v * v;
+    }
+    return Math.sqrt(sum / buffer.length);
+  }
+
+  /**
+   * 「話し中」かどうかを決める。★純粋関数★
+   *
+   * 入りと出でしきい値を変え（ヒステリシス）、下回ってからも SPEECH_HOLD_MS の
+   * あいだは保持する。しきい値ひとつで素直に判定すると、息継ぎと語の切れ目の
+   * たびに点滅して、卓上がちらつくだけで誰が話しているかは読めなくなる。
+   *
+   * @param {number} level 直近の音量（RMS）
+   * @param {{speaking: boolean, quietSince: number|null}} prev 直前の判定
+   * @param {number} now 現在時刻（Date.now()）
+   * @returns {{speaking: boolean, quietSince: number|null}}
+   */
+  function decideSpeaking(level, prev, now) {
+    const wasSpeaking = prev !== null && prev !== undefined && prev.speaking === true;
+    if (!wasSpeaking) {
+      return { speaking: level >= SPEECH_ON_LEVEL, quietSince: null };
+    }
+    if (level > SPEECH_OFF_LEVEL) return { speaking: true, quietSince: null };
+    const before = prev.quietSince;
+    const since = before === null || before === undefined ? now : before;
+    if (now - since >= SPEECH_HOLD_MS) return { speaking: false, quietSince: null };
+    return { speaking: true, quietSince: since };
+  }
+
+  // -------------------------------------------------------------------------
   // 公開 API
   // -------------------------------------------------------------------------
 
@@ -1887,6 +2255,7 @@
           signal(msg.player.id, { kind: "ready", session: state.session });
           // 後から入ってきた相手にも、いまの映像状態（カメラか画面か）を伝える（§4.3）
           announceVideoStateTo(msg.player.id);
+          announceMicStateTo(msg.player.id);
         }
         return;
       }
@@ -1969,6 +2338,9 @@
     state.session = randomId();
     // カメラが切でも自分の枠を出す（着席したことが画面で分かるように）
     renderLocalVideo();
+    // 自分の声も他人と同じ経路で測る。自分の枠だけ光らないのは不自然だし、
+    // 「マイクが拾えているか」を確かめる場所が卓上から無くなる
+    addSpeechMeter(state.selfId, state.micStream);
     notify("vcState", "VC に参加しました");
     announceReady();
     return true;
@@ -2014,6 +2386,7 @@
     if (!state.active) return;
     // タイマーを残さないよう、ピアを畳む前に監視を止める
     resetQuality();
+    resetSpeech();
     if (options.notifyPeers) {
       for (const id of state.peers.keys()) signal(id, { kind: "bye" });
     }
@@ -2072,6 +2445,9 @@
       track.enabled = !state.muted;
     }
     notify("vcState", state.muted ? "マイクをミュートしました" : "ミュートを解除しました");
+    // 手元の札を先に直してから告知する。自分の操作の反映を往復に待たせない
+    refreshMicMark(state.selfId);
+    announceMicState();
     return state.muted;
   }
 
@@ -2585,5 +2961,7 @@
     displayConstraints,
     pickProfile,
     resolveShareOwner,
+    /** テスト用に公開する純粋関数（発話検知の判定） */
+    decideSpeaking,
   };
 })(window);

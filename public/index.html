@@ -1331,11 +1331,126 @@
         position: relative;
         z-index: 2;
         margin: 0;
-        padding: 7px 10px;
+        /* 右はマイクマークの場所。名前が長くてもマークの下へ潜らせない */
+        padding: 7px 32px 7px 10px;
         font-family: var(--serif);
         font-size: 12.5px;
         color: var(--cream);
         background: linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.72));
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      /*
+       * 卓上の在席表示（誰が声を出していて、誰がミュートか）。
+       *
+       * 右下に置くのは、名前と同じ行の端＝すでに目が行く場所だから。
+       * 常に出しておく（無言のときも薄く残す）。ミュートのときだけ出す作りに
+       * すると、「無言」と「マークの出し忘れ」が画面から見分けられない。
+       */
+      .vc-mic-mark {
+        position: absolute;
+        right: 8px;
+        bottom: 7px;
+        z-index: 4;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+        transition: color 0.15s, opacity 0.15s;
+      }
+
+      /* 絵は手元の操作と同じ線画。15px でも潰れないよう塗りは使わない */
+      .vc-mic-ico {
+        width: 15px;
+        height: 15px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.9;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        /* 暗い映像の上でも輪郭が残るように、絵そのものに影を落とす */
+        filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.85));
+      }
+
+      /* 無言。出ていることは分かるが、目立たせはしない */
+      .vc-mic-mark[data-state="on"] {
+        color: var(--cream);
+        opacity: 0.55;
+      }
+
+      /* 話し中。枠の縁の光り（.vc-peer-speaking）と同じ金色で揃える */
+      .vc-mic-mark[data-state="speaking"] {
+        color: var(--gold-3);
+        opacity: 1;
+      }
+
+      /* 切のときに赤くするのはマイクだけ（手元の操作と同じ方針・Discord に倣う） */
+      .vc-mic-mark[data-state="off"] {
+        color: #e0736a;
+        opacity: 1;
+      }
+
+      .vc-mic-ico-off {
+        display: none;
+      }
+
+      .vc-mic-mark[data-state="off"] .vc-mic-ico-on {
+        display: none;
+      }
+
+      .vc-mic-mark[data-state="off"] .vc-mic-ico-off {
+        display: block;
+      }
+
+      /*
+       * 話し中は枠の縁も光らせる。マークだけだと、人数が増えたときに
+       * どの枠の右下が光ったのかを探すことになる。
+       * .vc-peer の overflow: hidden が切るのは中身だけなので、外向きの
+       * box-shadow はそのまま出る。
+       */
+      .vc-peer-speaking {
+        box-shadow: 0 0 0 2px var(--gold-3), 0 0 12px rgba(198, 160, 90, 0.35);
+      }
+
+      .vc-peer {
+        transition: box-shadow 0.12s ease-out;
+      }
+
+      /*
+       * 動きを減らす設定では、光り方の変化だけを止める。
+       * リング自体は状態そのものなので消さない（消すと誰が話しているか
+       * 分からなくなり、設定の趣旨を超えて機能が減る）。
+       */
+      @media (prefers-reduced-motion: reduce) {
+        .vc-peer,
+        .vc-mic-mark {
+          transition: none;
+        }
+      }
+
+      /*
+       * 「あなた」の札。名前は他人と同じく下のラベルに出したうえで、
+       * どれが自分の枠かは左上のこれと金色の縁で示す。
+       */
+      .vc-self-tag {
+        position: absolute;
+        top: 6px;
+        left: 6px;
+        z-index: 4;
+        padding: 2px 7px;
+        border-radius: var(--r-sm, 4px);
+        background: rgba(0, 0, 0, 0.6);
+        font-size: 10px;
+        letter-spacing: 0.08em;
+        color: var(--gold-3);
+        pointer-events: none;
+      }
+
+      /* 自分の枠だけ、共有中の札を「あなた」の下へ1段ずらして重なりを避ける */
+      .vc-self .vc-share-badge {
+        top: 32px;
       }
 
       /* 品質劣化時の映像自動停止（§3.6）。異常ではないのでエラー表示とは別枠にする */
