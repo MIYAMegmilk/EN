@@ -279,20 +279,20 @@ Deno.test("interior.svg: 3D・遷移画面・到着が同じ1枚を使ってい�
   }
 });
 
-Deno.test("corridor.html: 入り口へ戻るリンクが entrance.html を指している", async () => {
+Deno.test("corridor.html: 一覧へ戻るリンクが index.html を指している", async () => {
   const kv = await Deno.openKv(":memory:");
   const server = startServer(0, "127.0.0.1", kv);
   try {
     const res = await fetch(`http://127.0.0.1:${server.port}/corridor.html`);
     const html = await res.text();
     assert(
-      html.includes('id="to-entrance"') && html.includes('href="/entrance.html"'),
-      "corridor.html に entrance.html へ戻るリンクが必要です",
+      html.includes('id="to-index"') && html.includes('href="/index.html"'),
+      "corridor.html に index.html へ戻るリンクが必要です",
     );
     // 狭い画面ではバーが横スクロールになり、最初に見えている物しか押せない。
     // 見出しより後ろへ動かすと、スマホでは戻れなくなる
     assert(
-      html.indexOf('id="to-entrance"') < html.indexOf("<h1>"),
+      html.indexOf('id="to-index"') < html.indexOf("<h1>"),
       "戻るリンクはバーの見出しより前に置く必要があります",
     );
   } finally {

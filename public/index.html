@@ -326,8 +326,7 @@
       #bot,
       .stage-board,
       #vc-media,
-      #chat-log,
-      #log {
+      #chat-log {
         scrollbar-width: thin;
         scrollbar-color: var(--line) transparent;
       }
@@ -1604,32 +1603,6 @@
         flex: none;
       }
 
-      /* 通信ログ（開発用）。画面を食わないよう、畳んだ状態は1行ぶんに収める */
-      .devlog {
-        flex: none;
-        border: 1px solid var(--line-soft);
-        border-radius: var(--r-md);
-      }
-
-      .devlog summary {
-        padding: 5px 12px;
-        font-size: 11.5px;
-        color: var(--dim);
-        cursor: pointer;
-      }
-
-      #log {
-        max-height: 22vh;
-        overflow-y: auto;
-        padding: 8px 14px 12px;
-        border-top: 1px solid var(--line-soft);
-        font-size: 11px;
-        line-height: 1.6;
-        white-space: pre-wrap;
-        overflow-wrap: anywhere;
-        color: var(--dim);
-      }
-
       /* 3列を保てる下限まではレールと右欄を細らせて粘る */
       @media (max-width: 1180px) {
         .stage {
@@ -1707,14 +1680,6 @@
       .alert {
         background: rgba(50, 12, 10, 0.78);
         color: #f6cdc8;
-      }
-
-      .devlog {
-        background: rgba(16, 11, 7, 0.62);
-      }
-
-      .devlog summary {
-        color: var(--muted);
       }
 
     </style>
@@ -1989,11 +1954,6 @@
           </section>
         </aside>
       </div>
-
-      <details class="devlog">
-        <summary>通信ログ（開発用）</summary>
-        <div id="log"></div>
-      </details>
     </main>
 
     <!--
