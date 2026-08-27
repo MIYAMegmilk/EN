@@ -359,6 +359,16 @@
         display: none;
       }
 
+      /*
+        入力欄を包む <form>。ブラウザ既定の余白が付く実装があるので明示的に消す
+        （包む前と見た目を変えないため。包んだ目的は Enter での送信とパスワード
+        マネージャへの手がかりで、レイアウトを変えることではない）
+      */
+      #login-form,
+      #register-form {
+        margin: 0;
+      }
+
       #login-panel .rule,
       #register-panel .rule {
         margin: 12px 0 10px;
@@ -412,30 +422,39 @@
         </div>
 
         <section id="login-panel" class="panel">
-          <div class="field">
-            <label for="login-userid">ユーザーID</label>
-            <input
-              class="input"
-              id="login-userid"
-              autocomplete="username"
-              maxlength="20"
-              placeholder="taro2026"
-            />
-          </div>
-          <div class="field">
-            <label for="login-password">パスワード</label>
-            <input
-              class="input"
-              id="login-password"
-              type="password"
-              autocomplete="current-password"
-              maxlength="64"
-            />
-          </div>
-          <p id="login-error" class="alert" role="alert"></p>
-          <button id="login" class="btn btn-gold btn-block btn-lg btn-noren" type="button">
-            のれんをくぐる
-          </button>
+          <!--
+            入力欄を <form> で包むのは、Enter で送れるようにするためと、
+            パスワードマネージャに「ユーザーID＋パスワードの組」だと分からせるため。
+            送信ボタンは type="button" のままにしてあるので、暗黙の送信（＝ページの
+            再読み込み）は起きない。実際の送信は login.js が submit / click / keydown
+            の3経路から同じ関数を呼んで行う（room/chat.js と同じ形）
+          -->
+          <form id="login-form">
+            <div class="field">
+              <label for="login-userid">ユーザーID</label>
+              <input
+                class="input"
+                id="login-userid"
+                autocomplete="username"
+                maxlength="20"
+                placeholder="taro2026"
+              />
+            </div>
+            <div class="field">
+              <label for="login-password">パスワード</label>
+              <input
+                class="input"
+                id="login-password"
+                type="password"
+                autocomplete="current-password"
+                maxlength="64"
+              />
+            </div>
+            <p id="login-error" class="alert" role="alert"></p>
+            <button id="login" class="btn btn-gold btn-block btn-lg btn-noren" type="button">
+              のれんをくぐる
+            </button>
+          </form>
           <span class="fineprint dim">パスワードの再発行はできません</span>
 
           <div class="rule">または</div>
@@ -448,24 +467,27 @@
         </section>
 
         <section id="register-panel" class="panel" hidden>
-          <div class="field">
-            <label for="register-userid">ユーザーID（半角英数 4〜20文字）</label>
-            <input class="input" id="register-userid" autocomplete="username" maxlength="20" />
-          </div>
-          <div class="field">
-            <label for="register-password">パスワード（8〜64文字）</label>
-            <input
-              class="input"
-              id="register-password"
-              type="password"
-              autocomplete="new-password"
-              maxlength="64"
-            />
-          </div>
-          <p id="register-error" class="alert" role="alert"></p>
-          <button id="register" class="btn btn-gold btn-block btn-lg btn-noren" type="button">
-            登録して暖簾をくぐる
-          </button>
+          <!-- ログイン側と同じ理由で <form> に入れる（login.html の #login-form 参照） -->
+          <form id="register-form">
+            <div class="field">
+              <label for="register-userid">ユーザーID（半角英数 4〜20文字）</label>
+              <input class="input" id="register-userid" autocomplete="username" maxlength="20" />
+            </div>
+            <div class="field">
+              <label for="register-password">パスワード（8〜64文字）</label>
+              <input
+                class="input"
+                id="register-password"
+                type="password"
+                autocomplete="new-password"
+                maxlength="64"
+              />
+            </div>
+            <p id="register-error" class="alert" role="alert"></p>
+            <button id="register" class="btn btn-gold btn-block btn-lg btn-noren" type="button">
+              登録して暖簾をくぐる
+            </button>
+          </form>
 
           <button id="show-login" class="mode-switch" type="button">ログイン画面に戻る</button>
         </section>

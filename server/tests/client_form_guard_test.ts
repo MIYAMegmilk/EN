@@ -105,10 +105,14 @@ type LoginPage = {
   respond(res: { ok: boolean; status: number; body: unknown }): void;
   /** 直前の fetch を通信断にする */
   reject(): void;
+  /** 入力欄で Enter を押す（IME 変換確定中なら composing: true） */
+  pressEnter(id: string, composing?: boolean): void;
+  /** form の submit を起こす（パスワードマネージャの自動送信の経路） */
+  submitForm(id: string): void;
   settle(): Promise<void>;
 };
 
-function loadLogin(): LoginPage {
+function loadLogin(meFails = false): LoginPage {
   // login.js は #guest-link の aria-disabled を付け外しする。fake_dom.ts の要素は
   // setAttribute しか持たないので、この1要素だけ removeAttribute を足して差し込む
   const elements = new Map<string, FakeElement>();
@@ -130,8 +134,10 @@ function loadLogin(): LoginPage {
 
   const fetchStub = (path: string, init?: { method?: string; body?: string }) => {
     calls.push({ path, init });
-    // /api/me は「未ログイン」で即答する（ページを開いた時点の確認）
+    // /api/me は「未ログイン」で即答する（ページを開いた時点の確認）。
+    // meFails のときは通信断（fetch そのものが投げる）にする
     if (path === "/api/me") {
+      if (meFails) return Promise.reject(new TypeError("Failed to fetch"));
       return Promise.resolve({ ok: false, status: 401, json: () => Promise.resolve({}) });
     }
     return new Promise((resolve, reject) => pending.push({ resolve, reject }));
@@ -181,6 +187,18 @@ function loadLogin(): LoginPage {
       const next = pending.shift();
       if (next === undefined) throw new Error("応答を待っている fetch がありません");
       next.reject(new TypeError("Failed to fetch"));
+    },
+    pressEnter: (id: string, composing = false) => {
+      const el = document.getElementById(id);
+      for (const handler of el.handlers.get("keydown") ?? []) {
+        handler({ key: "Enter", isComposing: composing, preventDefault: () => {} });
+      }
+    },
+    submitForm: (id: string) => {
+      const el = document.getElementById(id);
+      for (const handler of el.handlers.get("submit") ?? []) {
+        handler({ preventDefault: () => {} });
+      }
     },
     settle: () => settle(timers.run),
   };
@@ -281,6 +299,106 @@ Deno.test("login.js: 成功したら塞いだまま入店へ進む", async () =>
   assert(page.el("login").disabled);
 });
 
+Deno.test("login.js: /api/me が通信断でも画面は動く（M-01: callApi の try/catch）", async () => {
+  // callApi が fetch を包んでいないと、ページを開いた時点で refreshMe() が
+  // 未処理の Promise 拒否になり、#me-result は空のまま、以降の操作も
+  // 「押しても何も出ない」になる
+  const page = loadLogin(true);
+  await page.settle();
+
+  assert(page.el("me-result").textContent.length > 0, "何も出さずに終わらない");
+  assertFalse(
+    page.el("me-result").textContent === "未ログイン",
+    "確認できなかっただけなのに『未ログイン』と言い切らない",
+  );
+
+  // 画面はそのまま使える（ログインを送れる）
+  page.el("login-userid").value = "taro2026";
+  page.el("login-password").value = "hunter2hunter2";
+  page.el("login").click();
+  await page.settle();
+  assertEquals(authCalls(page).length, 1);
+});
+
+Deno.test("login.js: 通信できなかったことを『(0)』ではなく言葉で出す（異常系）", async () => {
+  const page = loadLogin();
+  page.el("login-userid").value = "taro2026";
+  page.el("login-password").value = "hunter2hunter2";
+
+  page.el("login").click();
+  page.reject();
+  await page.settle();
+
+  const message = page.el("login-error").textContent;
+  assert(message.includes("繋がりません"), `理由が読める文言にする: ${message}`);
+  assertFalse(message.includes("(0)"), "callApi の内部表現（status 0）を画面に出さない");
+});
+
+// ---------------------------------------------------------------------------
+// login.js（M-02: Enter キーで送れる）
+// ---------------------------------------------------------------------------
+
+Deno.test("login.js: パスワード欄で Enter を押すと送信する（正常系）", async () => {
+  const page = loadLogin();
+  page.el("login-userid").value = "taro2026";
+  page.el("login-password").value = "hunter2hunter2";
+
+  page.pressEnter("login-password");
+  await page.settle();
+
+  assertEquals(authCalls(page).length, 1, "ログイン画面でいちばん多い操作を通す");
+  assertEquals(authCalls(page)[0].path, "/api/auth/login");
+});
+
+Deno.test("login.js: ユーザーID欄の Enter でも送信する（正常系）", async () => {
+  const page = loadLogin();
+  page.el("login-userid").value = "taro2026";
+  page.el("login-password").value = "hunter2hunter2";
+
+  page.pressEnter("login-userid");
+  await page.settle();
+
+  assertEquals(authCalls(page).length, 1);
+});
+
+Deno.test("login.js: 新規登録側の Enter は登録に送る（正常系）", async () => {
+  const page = loadLogin();
+  page.el("register-userid").value = "taro2026";
+  page.el("register-password").value = "hunter2hunter2";
+
+  page.pressEnter("register-password");
+  await page.settle();
+
+  assertEquals(authCalls(page).length, 1);
+  assertEquals(authCalls(page)[0].path, "/api/auth/register");
+});
+
+Deno.test("login.js: IME の変換確定の Enter では送らない（境界値）", async () => {
+  const page = loadLogin();
+  page.el("login-userid").value = "taro2026";
+  page.el("login-password").value = "hunter2hunter2";
+
+  page.pressEnter("login-password", true);
+  await page.settle();
+
+  assertEquals(authCalls(page).length, 0, "変換を確定しただけで送ってしまう");
+});
+
+Deno.test("login.js: form の submit（自動送信）でも1回だけ送る（境界値）", async () => {
+  const page = loadLogin();
+  page.el("login-userid").value = "taro2026";
+  page.el("login-password").value = "hunter2hunter2";
+
+  // パスワードマネージャの自動入力＋自動送信はこの経路で来る
+  page.submitForm("login-form");
+  // 続けて Enter とクリックが来ても、送信は1回に抑える
+  page.pressEnter("login-password");
+  page.el("login").click();
+  await page.settle();
+
+  assertEquals(authCalls(page).length, 1, "入口が増えても送信は1回");
+});
+
 // ---------------------------------------------------------------------------
 // profile.js（H-13: 取得失敗でタグを消さない）
 // ---------------------------------------------------------------------------
@@ -302,6 +420,7 @@ type ProfilePage = {
 async function loadProfile(
   tagsOk: boolean,
   myTags: string[] = ["game", "music"],
+  offline: { tags?: boolean; save?: boolean } = {},
 ): Promise<ProfilePage> {
   const base = createFakeDocument();
   const document = {
@@ -321,6 +440,8 @@ async function loadProfile(
       });
     }
     if (path === "/api/tags") {
+      // 通信断（fetch そのものが投げる）。5xx とは別の経路
+      if (offline.tags === true) return Promise.reject(new TypeError("Failed to fetch"));
       if (!tagsOk) {
         return Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve(null) });
       }
@@ -338,6 +459,7 @@ async function loadProfile(
       });
     }
     // PUT /api/profile。サーバーは正本を返す
+    if (offline.save === true) return Promise.reject(new TypeError("Failed to fetch"));
     const sent = JSON.parse(init?.body ?? "{}") as { nickname?: string; tags?: string[] };
     return Promise.resolve({
       ok: true,
@@ -420,6 +542,33 @@ Deno.test("profile.js: タグが0個の人は、取得に失敗しても0個の�
   await page.save();
 
   assertEquals(page.saved()?.tags, [], "無い人に勝手に増やさない");
+});
+
+Deno.test("profile.js: /api/tags が通信断でも画面は最後まで組み上がる（M-09）", async () => {
+  // callApi が fetch を包んでいないと、init() が未処理の Promise 拒否で止まり、
+  // タグもあだ名も描かれない真っ白なフォームだけが残る（エラー表示も出ない）
+  const page = await loadProfile(true, ["game", "music"], { tags: true });
+
+  assertEquals(page.el("error").textContent, "趣味タグ一覧の取得に失敗しました", "理由を出す");
+  assertEquals(page.el("profile-nickname").value, "たろう", "init() の残りまで走り切る");
+});
+
+Deno.test("profile.js: /api/tags が通信断のときも、保存で既存タグを消さない（異常系）", async () => {
+  const page = await loadProfile(true, ["game", "music"], { tags: true });
+
+  await page.save();
+
+  assertEquals(page.saved()?.tags, ["game", "music"]);
+});
+
+Deno.test("profile.js: 保存が通信断なら、押しても無反応にせず理由を出す（異常系）", async () => {
+  const page = await loadProfile(true, ["game"], { save: true });
+
+  await page.save();
+
+  const message = page.el("error").textContent;
+  assert(message.includes("繋がりません"), `理由が読める文言にする: ${message}`);
+  assertFalse(message.includes("(0)"), "callApi の内部表現（status 0）を画面に出さない");
 });
 
 // ---------------------------------------------------------------------------
@@ -524,6 +673,104 @@ Deno.test("create-room.js: タグを1つも選ばなくても建てられる（�
 
   page.submit();
 
+  assertEquals(page.getPending()?.tags, []);
+  assertEquals(page.location.href, "/index.html");
+});
+
+// ---------------------------------------------------------------------------
+// create-room.js（M-12: 合言葉の下限 / M-07: 一覧に出さない卓の説明文・タグ）
+// ---------------------------------------------------------------------------
+
+/** server/types.ts の PASSPHRASE_MIN と同じ値であることを、テスト側でも念のため見る */
+const PASSPHRASE_MIN = 4;
+
+/** 一覧に出さない卓として、必須項目だけ埋める */
+function fillPrivateRoom(page: CreateRoomPage): void {
+  page.el("create-room-nickname").value = "ホスト太郎";
+  const select = page.el("create-room-visibility");
+  select.value = "private";
+  for (const handler of select.handlers.get("change") ?? []) handler({});
+}
+
+Deno.test("create-room.js: 合言葉が3文字なら、遷移せずにその場で知らせる（境界値）", async () => {
+  const page = await loadCreateRoom();
+  fillPrivateRoom(page);
+  page.el("create-room-passphrase").value = "abc";
+
+  page.submit();
+
+  // 送ってしまうと index.html へ遷移したあとで validatePassphrase に弾かれ、
+  // 卓そのものが建たない。原因は別の画面の小さなエラー表示にしか出ない
+  assertEquals(page.getPending(), null, "受け渡しに書かない");
+  assertEquals(page.location.href, "/create-room.html", "遷移しない");
+  assertEquals(
+    page.el("error").textContent,
+    `合言葉は${PASSPHRASE_MIN}文字以上で入力してください`,
+  );
+});
+
+Deno.test("create-room.js: 合言葉がちょうど4文字なら建てられる（境界値）", async () => {
+  const page = await loadCreateRoom();
+  fillPrivateRoom(page);
+  page.el("create-room-passphrase").value = "abcd";
+
+  page.submit();
+
+  assertEquals(page.getPending()?.passphrase, "abcd");
+  assertEquals(page.location.href, "/index.html");
+});
+
+Deno.test("create-room.js: 合言葉が空欄なら、付けない卓として建てられる（境界値）", async () => {
+  const page = await loadCreateRoom();
+  fillPrivateRoom(page);
+
+  page.submit();
+
+  assertEquals(page.location.href, "/index.html");
+  assertEquals(page.getPending()?.passphrase, "");
+});
+
+Deno.test("create-room.js: 一覧に出す卓では合言葉欄を見ない（境界値）", async () => {
+  const page = await loadCreateRoom();
+  fillPublicRoom(page);
+  // 招待制のときに書いて、公開に切り替えた残り。合言葉は公開卓には付かない
+  page.el("create-room-passphrase").value = "ab";
+
+  page.submit();
+
+  assertEquals(page.location.href, "/index.html", "使わない欄で足止めしない");
+});
+
+Deno.test("create-room.js: 一覧に出さない卓では説明文・タグの欄を隠す（M-07）", async () => {
+  const page = await loadCreateRoom();
+  fillPrivateRoom(page);
+
+  // 出したままだと、書いても送られないものを書かせることになる
+  assert(page.el("create-room-description-field").className.split(" ").includes("hidden"));
+  assert(page.el("create-room-tags-field").className.split(" ").includes("hidden"));
+});
+
+Deno.test("create-room.js: 一覧に出す卓では説明文・タグの欄を出す（正常系）", async () => {
+  const page = await loadCreateRoom();
+  fillPublicRoom(page);
+
+  assertFalse(page.el("create-room-description-field").className.split(" ").includes("hidden"));
+  assertFalse(page.el("create-room-tags-field").className.split(" ").includes("hidden"));
+});
+
+Deno.test("create-room.js: 公開で書いてから private に切り替えたら、説明文・タグは積まない", async () => {
+  const page = await loadCreateRoom();
+  fillPublicRoom(page);
+  page.checkTags(2);
+  // ここで「一覧に出さない」へ切り替える。欄は隠れるが、打った値は DOM に残る
+  fillPrivateRoom(page);
+
+  page.submit();
+
+  // app.js の doCreateRoom は private のとき pendingRoomMeta を null にするので、
+  // 積んでも捨てられる。積まないと決め切っておけば、後から経路が変わっても
+  // 「送ったのに反映されない」にならない
+  assertEquals(page.getPending()?.description, "");
   assertEquals(page.getPending()?.tags, []);
   assertEquals(page.location.href, "/index.html");
 });

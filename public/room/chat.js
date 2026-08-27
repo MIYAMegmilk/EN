@@ -75,7 +75,14 @@
       deps.onError("チャットに制御文字は使えません");
       return;
     }
-    deps.send({ t: "chat", text });
+    // 送れたときだけ入力欄を空にする。app.js の send() は、WebSocket が
+    // 繋がっていなければ「サーバーに接続していません」を出して false を返す。
+    // そこで消してしまうと、切断・サーバー再起動の最中に打った長文がそのまま
+    // 消える（打ち直しになる）。
+    //
+    // 見るのは「はっきり false だったか」だけにしておく。戻り値を返さない
+    // send を渡す呼び出し側（テストの偽物など）では、これまでどおり消える
+    if (deps.send({ t: "chat", text }) === false) return;
     deps.inputEl.value = "";
   }
 

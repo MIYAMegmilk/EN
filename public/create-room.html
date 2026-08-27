@@ -97,7 +97,12 @@
             placeholder="金曜の反省会"
           />
         </div>
-        <div class="field">
+        <!--
+          説明文とタグは「お座敷一覧に出す卓」だけのもの。一覧に出さない卓では
+          サーバーへ送る経路そのものが無いので、出しっぱなしにすると書いた内容が
+          黙って捨てられる。合言葉欄と同じく、この画面の配線が出し入れする
+        -->
+        <div class="field" id="create-room-description-field">
           <label for="create-room-description">説明文（100文字以内・任意）</label>
           <textarea
             class="input"
@@ -107,7 +112,7 @@
             placeholder="今夜は焼酎の会です"
           ></textarea>
         </div>
-        <div class="field">
+        <div class="field" id="create-room-tags-field">
           <label>タグ（最大5個・任意）</label>
           <div id="create-room-tags"></div>
         </div>
@@ -132,6 +137,7 @@
           <input
             class="input"
             id="create-room-passphrase"
+            minlength="4"
             maxlength="20"
             autocomplete="off"
             placeholder="付けるとコードなしで入れます"
