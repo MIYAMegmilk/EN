@@ -650,6 +650,32 @@ export async function playNorenIntro(stageEl, options = {}) {
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
+  /**
+   * 演出の rAF を外から畳むための口。本編が回り始めている間だけ入る。
+   * 揺れを嫌う設定（一コマだけ描く経路）では最初から null のまま。
+   */
+  let stopFrames = null;
+  let contextLost = false;
+
+  /**
+   * GPU 側の描画文脈が落ちたとき。ドライバの再起動や他アプリの負荷で実際に起きる。
+   *
+   * 手当てが無いと、何も描かれなくなった canvas の上で演出の残り時間ぶん rAF が
+   * 回り続ける。**戻す道は選ばない。**この演出は 2.6 秒の一本道で、途中から
+   * 作り直しても時間軸が飛んで却って見苦しく、復帰を待つあいだ利用者を止めることになる。
+   * 代わりに演出をその場で畳んで先へ進める（呼び出し側の login.js が暗転して遷移する）。
+   * 板の背景色は 3D の夜と同じ #140d07 なので、真っ黒が残ることはない。
+   */
+  function onContextLost(ev) {
+    // three.js の WebGLRenderer も自前で同じことをしているが、こちらの登録順に
+    // 依存しないよう自分でも止めておく（preventDefault は何度呼んでも害が無い）
+    ev.preventDefault();
+    if (contextLost) return;      // 二重に来ても畳むのは1回だけ
+    contextLost = true;
+    stopFrames?.();
+  }
+  renderer.domElement.addEventListener("webglcontextlost", onContextLost);
+
   const scene = new THREE.Scene();
   // 霧が無いと、実体を置くのをやめた先が黒く抜ける（corridor-view.js と同じ理由）
   scene.background = new THREE.Color(NIGHT);
@@ -781,9 +807,10 @@ export async function playNorenIntro(stageEl, options = {}) {
     if (disposed) return;
     disposed = true;
     globalThis.removeEventListener("resize", onResize);
+    renderer.domElement.removeEventListener("webglcontextlost", onContextLost);
 
     // 形と材質は glb の中で共有されている（壁の桟は同じ箱を使い回す等）ので、
-    // 集めてから重複なく捨てる。corridor-view.js:1156-1172 と同じ手当て
+    // 集めてから重複なく捨てる。corridor-view.js:1224-1244 と同じ手当て
     const geometries = new Set();
     const materials = new Set();
     root.traverse((obj) => {
@@ -834,6 +861,12 @@ export async function playNorenIntro(stageEl, options = {}) {
   stageEl.replaceChildren(renderer.domElement);
 
   // ── 揺れを嫌う設定: くぐり終えた一コマだけ ──────────
+  /*
+   * この経路は rAF を回さないので stopFrames は null のまま＝畳むものが無い。
+   * ここで文脈が落ちると、描いた一コマが消えて #noren-stage の背景色
+   * （3D の夜と同じ #140d07）だけが STILL_HOLD_MS のあいだ出る。
+   * 絵は出ないが止まりもしないので、そのまま暗転して遷移させる。
+   */
   if (reducedMotion) {
     drawFrame(-1, 0);
     await showStage(stageEl);
@@ -866,11 +899,19 @@ export async function playNorenIntro(stageEl, options = {}) {
       cancelAnimationFrame(rafId);
       clearTimeout(guard);
       signal?.removeEventListener("abort", finish);
+      stopFrames = null;
       resolve();
     }
     // タブが裏に回ると rAF が止まる。戻ってこられないと遷移まで詰まるので保険を張る
     const guard = setTimeout(finish, T_END + 1500);
     signal?.addEventListener("abort", finish, { once: true });
+    // 文脈が落ちたときに演出を畳めるようにしておく。ここへ来る前に落ちていれば即座に畳む
+    // （guard の後に置くこと。finish が guard を読むので、宣言前に呼ぶと落ちる）
+    stopFrames = finish;
+    if (contextLost) {
+      finish();
+      return;
+    }
 
     function tick(now) {
       const elapsed = now - start;

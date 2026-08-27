@@ -238,6 +238,8 @@ interface ViewLog {
   focus: Room | null;
   /** 3D 側が扉のタップ・Enter キーで呼ぶ入店の口 */
   onEnter: ((code: string) => void) | null;
+  /** 3D 側が「描画文脈が落ちた／戻った」を知らせてくる口（H-18） */
+  onContextChange: ((state: "lost" | "restored") => void) | null;
 }
 
 /** どの API を生やすか。まだ入っていない状態も試せるようにしておく */
@@ -470,6 +472,7 @@ function makeView(options: LoadOptions = {}) {
     yaw: 0,
     focus: null,
     onEnter: null,
+    onContextChange: null,
   };
   let created = false;
 
@@ -483,11 +486,15 @@ function makeView(options: LoadOptions = {}) {
 
   const createCorridorView = (
     container: FakeEl,
-    opts: { onEnter?: (code: string) => void } = {},
+    opts: {
+      onEnter?: (code: string) => void;
+      onContextChange?: (state: "lost" | "restored") => void;
+    } = {},
   ) => {
     if (options.throwOnCreate !== undefined) throw new Error(options.throwOnCreate);
     created = true;
     log.onEnter = opts.onEnter ?? null;
+    log.onContextChange = opts.onContextChange ?? null;
     const canvas = new FakeEl("canvas");
     container.appendChild(canvas);
     // deno-lint-ignore no-explicit-any
@@ -628,6 +635,8 @@ async function load(options: LoadOptions = {}) {
     fetched,
     tick: clock.tick,
     fireDocument: win.fireDocument,
+    /** 3D 側から「描画文脈が落ちた／戻った」を知らせる（H-18） */
+    fireContext: (state: "lost" | "restored") => view.log.onContextChange?.(state),
     get created() {
       return view.created;
     },
@@ -707,6 +716,7 @@ async function loadHome(options: LoadOptions & { rooms?: Room[] } = {}) {
     tick: clock.tick,
     fireDocument: win.fireDocument,
     fireMutations: win.fireMutations,
+    fireContext: (state: "lost" | "restored") => view.log.onContextChange?.(state),
     get created() {
       return view.created;
     },
@@ -1484,6 +1494,93 @@ Deno.test("corridor.js: VC に入ると描画を止め、抜けると再開す�
   assertFalse(h.log.paused, "VC を抜けても再開していない");
   h.tick();
   assert(h.signs().length > 0, "再開しても札が戻らない");
+});
+
+// ── 描画文脈のロスト（H-18） ──────────────────────────
+
+/*
+ * GPU ドライバの再起動・タブの長時間放置・他アプリの負荷で、WebGL の描画文脈は
+ * 実際に落ちる。手当てが無いと真っ黒な canvas の上で rAF だけが回り続け、
+ * 利用者からは「固まった」ようにしか見えない。
+ * ここで見るのは受け取り側（corridor-ui.js）の振る舞い。3D 側が本当に
+ * rAF を止めるかは server/tests/corridor_view_lifecycle_test.ts で実測している。
+ */
+
+Deno.test("corridor.js: 描画文脈が落ちたら毎フレームの処理を止め、理由を画面に出す", async () => {
+  const h = await load();
+  h.log.doors = doorFixture();
+  h.tick();
+  assert(h.signs().length > 0, "落ちる前から札が出ていない");
+
+  h.fireContext("lost");
+  assert(h.log.paused, "落ちたのに 3D 側を止めていない");
+  assertEquals(h.signs().length, 0, "描けていないのに札だけ残っている");
+  assertStringIncludes(h.$("error").textContent, "中断");
+  assertFalse(h.$("error").classList.contains("hidden"), "案内が隠れたままになっている");
+
+  const before = h.log.inputs.length;
+  h.tick(3);
+  assertEquals(h.log.inputs.length, before, "止めたのに毎フレームの処理が回っている");
+});
+
+Deno.test("corridor.js: 描画文脈が戻れば再開し、案内も消す", async () => {
+  const h = await load();
+  h.log.doors = doorFixture();
+  h.fireContext("lost");
+  assert(h.log.paused, "落ちたのに 3D 側を止めていない（この前提が崩れると以下が無意味）");
+  h.fireContext("restored");
+  assertFalse(h.log.paused, "戻ったのに再開していない");
+  assertEquals(h.$("error").textContent, "", "案内が残ったままになっている");
+  assert(h.$("error").classList.contains("hidden"), "空の案内が出たままになっている");
+  h.tick();
+  assert(h.signs().length > 0, "再開しても札が戻らない");
+});
+
+Deno.test("corridor.js: ロストや復帰が二重に来ても壊れない", async () => {
+  const h = await load();
+  h.log.doors = doorFixture();
+  h.fireContext("lost");
+  h.fireContext("lost");
+  assert(h.log.paused);
+  const before = h.log.inputs.length;
+  h.tick(3);
+  assertEquals(h.log.inputs.length, before, "二重のロストで毎フレームの処理が復活している");
+
+  h.fireContext("restored");
+  h.fireContext("restored");
+  assertFalse(h.log.paused);
+  h.tick();
+  assertEquals(
+    h.log.inputs.length,
+    before + 1,
+    "復帰が二重に来て毎フレームの処理まで二重に回っている",
+  );
+});
+
+Deno.test("corridor.js: 落ちていないのに復帰の合図が来ても画面を触らない", async () => {
+  const h = await load();
+  h.$("error").textContent = "別の理由で出ている案内";
+  h.fireContext("restored");
+  assertEquals(h.$("error").textContent, "別の理由で出ている案内", "他の案内を消している");
+  assertFalse(h.log.paused, "止まっていないのに止めている");
+});
+
+Deno.test("corridor.js: 描画文脈が落ちても卓の一覧へ逃げられる", async () => {
+  const h = await load();
+  h.fireContext("lost");
+  assertStringIncludes(h.$("error").textContent, "一覧で選ぶ", "逃げ道を案内していない");
+  assertFalse(h.$("mode-list").disabled, "逃げ道まで塞いでいる");
+  h.$("mode-list").fire("click");
+  assertFalse(h.$("list-view").classList.contains("hidden"), "一覧へ切り替えられない");
+  assertEquals(h.$("rooms-list").children.length, 7, "一覧に卓のカードが並んでいない");
+});
+
+Deno.test("corridor.js: ホームでも描画文脈のロストを画面に出す", async () => {
+  const h = await loadHome({ stored: "3d" });
+  assertEquals(h.$("corridor-error").textContent, "", "落ちる前から案内が出ている");
+  h.fireContext("lost");
+  assert(h.log.paused, "落ちたのに 3D 側を止めていない");
+  assertStringIncludes(h.$("corridor-error").textContent, "中断");
 });
 
 // ── CorridorView 側がまだ揃っていない場合 ──────────────

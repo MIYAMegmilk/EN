@@ -27,7 +27,7 @@ export class WebGLRenderer {
     this.toneMappingExposure = 1;
     this.shadowMap = { enabled: false, type: 0 };
     this.capabilities = { getMaxAnisotropy: () => 1 };
-    this.domElement = { style: {}, remove() {} };
+    this.domElement = makeFakeCanvas();
     this.renderCount = 0;
     this.disposeCount = 0;
     this.contextLossCount = 0;
@@ -58,4 +58,28 @@ export class PMREMGenerator {
     return { texture, dispose() {} };
   }
   dispose() {}
+}
+
+/**
+ * canvas の代わり。本物の domElement は canvas なので addEventListener を持つ。
+ * noren-scene.js は webglcontextlost をここへ足すので、偽物にも同じ口を用意する
+ * （corridor-harness/three-shim.js の makeFakeCanvas と同じ形）。
+ */
+function makeFakeCanvas() {
+  const listeners = new Map();
+  return {
+    style: {},
+    remove() {},
+    addEventListener(type, fn) {
+      listeners.set(type, fn);
+    },
+    removeEventListener(type) {
+      listeners.delete(type);
+    },
+    /** 検証台からイベントを流し込む口 */
+    fire(type, ev) {
+      listeners.get(type)?.(ev);
+    },
+    listeners,
+  };
 }

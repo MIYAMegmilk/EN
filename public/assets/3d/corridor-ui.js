@@ -214,6 +214,16 @@ const PAGES = {
 
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
+/**
+ * GPU 側の描画文脈が落ちている間に出す案内。
+ *
+ * 落ちると canvas は真っ黒なまま何も描かれない。黙って出し続けると「固まった」と
+ * しか見えないので、原因と待てば戻ること、待たずに済ませる道（一覧）を書く。
+ * 一覧への切り替えボタンは塞がないので、この文言のとおり操作できる。
+ */
+const CONTEXT_LOST_TEXT = "3D の描画が中断されました（GPU の再起動などで起きます）。" +
+  "復帰を待っています。すぐ卓を選びたいときは「一覧で選ぶ」へ。";
+
 /** テキストとクラスだけを持つ要素を作る（rooms.js と同じ作り） */
 function el(doc, tag, className, text) {
   const node = doc.createElement(tag);
@@ -335,6 +345,8 @@ export function mountCorridor(options = {}) {
   let suspended = false;
   let suspendNote = "";
   let running = false;
+  /** GPU 側の描画文脈が落ちている間は true（setContextLost を参照） */
+  let contextLost = false;
 
   /** stage の寸法。毎フレーム clientWidth を読まないよう ResizeObserver で控えておく */
   let stageW = 1;
@@ -978,7 +990,7 @@ export function mountCorridor(options = {}) {
    * GPU と電池を食うだけなので止める。壊さない（dispose ではなく pause）ので戻れる。
    */
   function syncRunning() {
-    const shouldRun = view !== null && mode === "3d" && !suspended && !doc.hidden;
+    const shouldRun = view !== null && mode === "3d" && !suspended && !contextLost && !doc.hidden;
     if (shouldRun === running) return;
     running = shouldRun;
 
@@ -992,6 +1004,29 @@ export function mountCorridor(options = {}) {
     hideAllDoors();
     setText(els.note, suspended ? suspendNote : "");
     if (view !== null && typeof view.pause === "function") view.pause();
+  }
+
+  /**
+   * GPU 側の描画文脈が落ちた／戻ったときの見せ方。
+   *
+   * 落ちると canvas は真っ黒なまま何も描かれなくなる。黙って出し続けると
+   * 利用者からは「固まった」ようにしか見えないので、何が起きているか・いま何が
+   * できるかを画面に出す。描画そのものは corridor-view.js 側で止まっている。
+   */
+  function setContextLost(on) {
+    if (contextLost === on) return;   // 二重に来ても表示を二重に触らない
+    contextLost = on;
+    if (els.error !== null) {
+      if (on) {
+        els.error.textContent = CONTEXT_LOST_TEXT;
+        els.error.classList.remove("hidden");
+      } else if (els.error.textContent === CONTEXT_LOST_TEXT) {
+        // 3D が使えないときの案内（fallbackToList）が出ていたら、それは消さない
+        els.error.textContent = "";
+        els.error.classList.add("hidden");
+      }
+    }
+    syncRunning();
   }
 
   /** 見えていない間は止める。理由の文言は呼び出し側から渡す */
@@ -1234,6 +1269,8 @@ export function mountCorridor(options = {}) {
       created = factory(els.stage, {
         onEnter: askEnterByCode,
         onFocus: renderFocus,
+        // 描けなくなったら毎フレームの位置決めごと止め、画面に理由を出す
+        onContextChange: (state) => setContextLost(state === "lost"),
         tagLabels,
       });
       await created.ready;
