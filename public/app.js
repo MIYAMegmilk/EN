@@ -757,6 +757,8 @@ function resetToEntry() {
   Voice.reset();
   Bot.reset();
   unmountGameModule();
+  // 主役は見ている人ごとの手元の状態。次に入った卓へ持ち越さない
+  resetStage();
   renderAll();
 }
 
@@ -1008,6 +1010,9 @@ function renderAll() {
   // 見るぶんには全員に開けたほうが、次に何をやるか相談しやすい
   $("game-open").disabled = false;
 
+  // あそびが動き出したら主役へ、終われば定位置へ。#phase を動かすだけなので
+  // renderPhase より前でも後でもよいが、描く前に置き場所を決めておく
+  syncStage();
   renderPhase();
 }
 
@@ -1774,86 +1779,229 @@ function autoStartVoice(msg) {
   Voice.setEnabled(true);
 }
 
-/**
- * 拡大表示中の共有者の playerId（docs/design/vc-screenshare.md §7）。
- * 開いていなければ null。共有が止まったときに「いま開いているのが
- * その人の画面か」を確かめてから閉じるために持つ。
- */
-let vcZoomPlayerId = null;
-
 /** 画面共有の開始・停止を押した直後、この時間はボタンを閉じる（§9-4）【暫定値】 */
 const VC_SCREEN_COOLDOWN_MS = 2000;
 
 /** そのボタンが再び押せるようになる時刻（Date.now()） */
 let vcScreenCooldownUntil = 0;
 
+// ---------------------------------------------------------------------------
+// 主役エリア（#vc-stage）
+//
+// クリックされた人・共有画面・あそびを、卓上のいちばん大きな場所へ出す。
+// 誰を主役にするかは **見ている人ごとの手元の状態**で、卓には一切送らない
+// （サーバーとの契約は増えない）。以前の覆い（#vc-zoom）はここに一本化した。
+// ---------------------------------------------------------------------------
+
 /**
- * 共有画面を拡大表示する（§7.2）。
- *
- * タイルの video を DOM ごと移すのではなく、覆いの中の video に**同じ
- * MediaStream を張る**。vc.js の closePeer() はタイルごと要素を消すので、
- * 要素の持ち主を移すと後始末が壊れる。同じストリームを2枚に張るのは
- * 通常の使い方で、デコードは1回・描画が2回になるだけ（受信帯域は増えない）。
+ * いま主役に出ているもの。
+ *   kind … "none"（誰も出ていない）| "peer"（人の映像）| "game"（あそびの面）
+ *   playerId … kind が "peer" のときの相手。それ以外は null
+ *   source … kind が "peer" のときの映像の出どころ（"camera" | "screen"）
  */
-function openVcZoom(view) {
-  vcZoomPlayerId = view.playerId;
-  // ニックネームはユーザー由来なので textContent で入れる（§3.8）
-  $("vc-zoom-title").textContent = `${view.nickname} さんの共有画面`;
-  const video = $("vc-zoom-video");
-  video.srcObject = view.stream;
-  $("vc-zoom").classList.remove("hidden");
-  const played = video.play();
-  if (played !== undefined && typeof played.catch === "function") {
-    played.catch(() => {});
-  }
-  syncVcZoomFullscreenLabel();
-  $("vc-zoom-close").focus();
+const vcStage = { kind: "none", playerId: null, source: "camera" };
+
+/** いまあそびが動いているか（＝あそびの面を主役にしてよいか） */
+function gameIsRunning() {
+  return state.snapshot !== null && state.phase !== "lobby";
 }
 
 /**
- * 拡大表示を閉じる。playerId を渡すと、その人の画面を出しているときだけ閉じる
- * （共有が止まったのが別の人だったときに巻き添えで閉じないため）。
+ * あそびの面（#phase）を主役エリアへ移す／定位置へ戻す。
+ *
+ * 人の映像と違い、あそびは**セクションごと動かす**。内蔵のあそび（大喜利・
+ * クイズ）は器を使わず #phase-body に直に描くので、器だけを動かしたのでは
+ * 両方式を同じ扱いにできない。renderPhase は id で #phase-body を引くため、
+ * #phase がどこにあっても描画は変わらない。
+ *
+ * 戻し先は #phase-slot（.stage-board の中の定位置）。入れ物を挟んであるので、
+ * appendChild だけで #result より前という並びが必ず戻る。
+ * 移す前に必ず remove() する。付け替えではなく二重に挿さるのを防ぐため。
  */
-function closeVcZoom(playerId) {
-  if (vcZoomPlayerId === null) return;
-  if (playerId !== undefined && playerId !== null && playerId !== vcZoomPlayerId) return;
-  vcZoomPlayerId = null;
-  $("vc-zoom-video").srcObject = null;
-  $("vc-zoom").classList.add("hidden");
-  if (typeof document.exitFullscreen === "function" && document.fullscreenElement) {
+function movePhaseTo(target) {
+  const phase = $("phase");
+  phase.remove();
+  target.appendChild(phase);
+}
+
+/** 主役エリアの中身を、いまの vcStage のとおりに描く */
+function renderStage() {
+  const stage = $("vc-stage");
+  const video = $("vc-stage-video");
+  const title = $("vc-stage-title");
+  // CSS はここだけを見て、卓上の高さの配り方と呑み手の面の並べ方を変える
+  document.body.dataset.vcStage = vcStage.kind;
+  stage.hidden = vcStage.kind === "none";
+  // 押し口の aria-pressed と枠の見た目を vc.js に合わせてもらう
+  if (typeof VC.setSpotlight === "function") {
+    VC.setSpotlight(vcStage.kind === "peer" ? vcStage.playerId : null);
+  }
+  if (vcStage.kind === "peer") {
+    video.hidden = false;
+    // 共有画面は端を切らない。人の顔は枠に合わせて切ってよい（§7.3 と同じ判断）
+    video.classList.toggle("vc-stage-video-screen", vcStage.source === "screen");
+    const played = video.play();
+    if (played !== undefined && typeof played.catch === "function") played.catch(() => {});
+  } else {
+    video.hidden = true;
+    video.srcObject = null;
+  }
+  if (vcStage.kind === "game") {
+    // あそびが主役のあいだは降りる口を出さない。降ろしても行き先が無く、
+    // 次に描き直した時点でまた戻ってくるだけになる（誰かを押せば入れ替わる）
+    $("vc-stage-close").classList.add("hidden");
+    title.textContent = "あそび";
+  } else {
+    $("vc-stage-close").classList.remove("hidden");
+  }
+}
+
+/**
+ * 人を主役にする。
+ *
+ * タイルの video を DOM ごと移すのではなく、主役の video に**同じ
+ * MediaStream を張る**（vc-screenshare.md §7.2）。vc.js の closePeer() は
+ * タイルごと要素を消すので、要素の持ち主を移すと後始末が壊れる。同じ
+ * ストリームを2枚に張るのは通常の使い方で、デコードは1回・描画が2回に
+ * なるだけ（受信帯域は増えない）。
+ */
+function spotlightPeer(view) {
+  // あそびが出ていたなら定位置へ帰す。主役はひとつだけ
+  if (vcStage.kind === "game") movePhaseTo($("phase-slot"));
+  vcStage.kind = "peer";
+  vcStage.playerId = view.playerId;
+  vcStage.source = view.source === "screen" ? "screen" : "camera";
+  // ニックネームはユーザー由来なので textContent で入れる（§3.8）
+  $("vc-stage-title").textContent = vcStage.source === "screen"
+    ? `${view.nickname} さんの共有画面`
+    : `${view.nickname} さん`;
+  // 同じストリームを張り直さない。共有⇔カメラの告知は何度も届くので、
+  // そのたびに付け替えると再生が止まってちらつく
+  const video = $("vc-stage-video");
+  if (video.srcObject !== view.stream) video.srcObject = view.stream;
+  renderStage();
+}
+
+/** あそびを主役にする */
+function spotlightGame() {
+  if (vcStage.kind === "game") return;
+  vcStage.kind = "game";
+  vcStage.playerId = null;
+  movePhaseTo($("vc-stage-body"));
+  renderStage();
+}
+
+/**
+ * 主役を降ろす。あそびが動いていれば、そのままあそびが主役に戻る
+ * （空いた大きな場所に何も出ないほうが不便なので）。
+ */
+function clearStage() {
+  if (vcStage.kind === "game") movePhaseTo($("phase-slot"));
+  vcStage.kind = "none";
+  vcStage.playerId = null;
+  renderStage();
+  // 主役が居なくなるので、端末の全画面に渡したままにしない
+  if (stageIsFullscreen() && typeof document.exitFullscreen === "function") {
     document.exitFullscreen().catch(() => {});
   }
+  if (gameIsRunning()) spotlightGame();
+}
+
+/**
+ * vc.js から「この人を主役にしてほしい」と頼まれたときの処理。
+ * すでにその人が主役なら降ろす（同じタイルをもう一度押したときの往復）。
+ */
+function requestStagePeer(view) {
+  if (view === null || view === undefined) return;
+  if (vcStage.kind === "peer" && vcStage.playerId === view.playerId) {
+    clearStage();
+    return;
+  }
+  spotlightPeer(view);
+}
+
+/**
+ * vc.js から届く、ある人の映像の状態の知らせ。
+ * その人がいま主役でなければ何もしない（勝手に主役を奪わない）。
+ *   view が null … 映像が止まった・退室した。主役を降ろす
+ *   view がある  … カメラ⇔画面が入れ替わった。中身を差し替える
+ */
+function updateStagePeer(view, playerId) {
+  if (vcStage.kind !== "peer" || vcStage.playerId !== playerId) return;
+  if (view === null) {
+    clearStage();
+    return;
+  }
+  spotlightPeer(view);
+}
+
+/**
+ * あそびの動き出し・終わりに合わせて主役を入れ替える。
+ * 動き出したときに主役が空いていれば、あそびが主役になる（Discord の
+ * アクティビティと同じで、始めた当人が探さなくても目に入るように）。
+ * 誰かが主役に出ているあいだは奪わない。
+ */
+function syncStage() {
+  if (gameIsRunning()) {
+    if (vcStage.kind === "none") spotlightGame();
+    return;
+  }
+  if (vcStage.kind === "game") clearStage();
+}
+
+/** 卓を出たときに主役を初期化する。次に入った卓へ持ち越さない */
+function resetStage() {
+  if (vcStage.kind === "game") movePhaseTo($("phase-slot"));
+  vcStage.kind = "none";
+  vcStage.playerId = null;
+  vcStage.source = "camera";
+  $("vc-stage-title").textContent = "";
+  renderStage();
 }
 
 /**
  * 端末の全画面へ渡す（§7.2）。
  * iOS Safari は Element.requestFullscreen() を持たず、video の
- * webkitEnterFullscreen() しかない。どちらも無ければ覆いだけで完結する。
+ * webkitEnterFullscreen() しかない。どちらも無ければ主役エリアだけで完結する。
+ *
+ * 全画面にするのは #vc-stage-body（映像とあそびの入れ物）。video だけを
+ * 渡すとあそびが主役のときに何も起きない。
  */
-function toggleVcZoomFullscreen() {
-  if (typeof document.exitFullscreen === "function" && document.fullscreenElement) {
-    document.exitFullscreen().catch(() => {});
+function toggleStageFullscreen() {
+  if (stageIsFullscreen()) {
+    if (typeof document.exitFullscreen === "function") document.exitFullscreen().catch(() => {});
     return;
   }
-  const stage = $("vc-zoom-stage");
-  if (typeof stage.requestFullscreen === "function") {
-    const entered = stage.requestFullscreen();
+  const body = $("vc-stage-body");
+  if (typeof body.requestFullscreen === "function") {
+    const entered = body.requestFullscreen();
     if (entered !== undefined && typeof entered.catch === "function") entered.catch(() => {});
     return;
   }
-  const video = $("vc-zoom-video");
+  const video = $("vc-stage-video");
   if (typeof video.webkitEnterFullscreen === "function") video.webkitEnterFullscreen();
 }
 
 /**
- * 全画面の押し口の文言を、いまの状態に合わせる。
- * 文言は「押すとどうなるか」を出す（品書きの他の押し口と同じ流儀）。
- * iOS の webkitEnterFullscreen() は fullscreenchange を出さないので、
- * その端末では「端末の全画面」のままになる（押しても害はない）。
+ * 主役エリアが端末の全画面に出ているか。
+ *
+ * document.fullscreenElement が真かどうかではなく、**それが主役エリアか**
+ * まで確かめる。真かどうかだけで判定すると、他の全画面（品書きなど）が
+ * 出ているときの Escape まで巻き添えで抑えてしまう。
  */
-function syncVcZoomFullscreenLabel() {
-  const full = document.fullscreenElement === $("vc-zoom-stage");
-  $("vc-zoom-full").textContent = full ? "全画面を終える" : "端末の全画面";
+function stageIsFullscreen() {
+  return document.fullscreenElement === $("vc-stage-body");
+}
+
+/**
+ * 全画面の押し口の文言を、いまの状態から引き直す。
+ * 押したときに自前でひっくり返すのではなく状態から引くのは、F11 や
+ * ブラウザの UI で外れることがあるため（そのときも文言が合う）。
+ * iOS Safari の webkitEnterFullscreen() は fullscreenchange を出さないので、
+ * その端末では文言が変わらない。害は無いのでそのままにしてある。
+ */
+function syncStageFullscreenLabel() {
+  $("vc-stage-full").textContent = stageIsFullscreen() ? "全画面を終える" : "端末の全画面";
 }
 
 /** VC モジュールを組み込む。iceServers が null なら VC 側の既定を使う */
@@ -1862,10 +2010,12 @@ function bindVc(iceServers) {
     send,
     iceServers,
     container: $("vc-people"),
-    // 拡大表示の覆いはこちらの持ち物。vc.js からは開閉だけを頼まれる（§7.2）
-    onZoom: (view, playerId) => {
-      if (view === null) closeVcZoom(playerId);
-      else openVcZoom(view);
+    // 主役エリアはこちらの持ち物。vc.js からは出し入れだけを頼まれる（§7.2）。
+    // playerId が付いていれば「その人が主役なら」という条件付きの知らせで、
+    // 付いていなければ押されたという合図（vc.js の onSpotlight の契約）
+    onSpotlight: (view, playerId) => {
+      if (playerId === undefined) requestStagePeer(view);
+      else updateStagePeer(view, playerId);
     },
     onStatus: (event) => {
       if (event.kind === "error") showError(event.message);
@@ -1904,20 +2054,20 @@ function bindVc(iceServers) {
     // 種類は「文字」固定（vc.js の SCREEN_DEFAULT_KIND）
     Promise.resolve(VC.startScreenShare()).then(renderVc, renderVc);
   });
-  $("vc-zoom-close").addEventListener("click", () => closeVcZoom());
-  $("vc-zoom-full").addEventListener("click", toggleVcZoomFullscreen);
-  // 映像そのものを二度押しでも全画面に入れる（動画の作法に合わせる）
-  $("vc-zoom-stage").addEventListener("dblclick", toggleVcZoomFullscreen);
-  // Escape や F11 で全画面が外れることもあるので、文言は状態から引き直す
-  document.addEventListener("fullscreenchange", syncVcZoomFullscreenLabel);
-  // 覆いの余白を押したら閉じる（品書きと同じ作法）
-  $("vc-zoom").addEventListener("click", (event) => {
-    if (event.target === $("vc-zoom")) closeVcZoom();
-  });
+  $("vc-stage-close").addEventListener("click", () => clearStage());
+  $("vc-stage-full").addEventListener("click", toggleStageFullscreen);
+  // 映像の二度押しでも全画面に入れる（動画の作法に合わせる）
+  $("vc-stage-video").addEventListener("dblclick", toggleStageFullscreen);
   // 端末の全画面に対応していなければ、その押し口は出さない（§7.2）
-  const canFullscreen = typeof $("vc-zoom-stage").requestFullscreen === "function" ||
-    typeof $("vc-zoom-video").webkitEnterFullscreen === "function";
-  $("vc-zoom-full").classList.toggle("hidden", !canFullscreen);
+  const canFullscreen = typeof $("vc-stage-body").requestFullscreen === "function" ||
+    typeof $("vc-stage-video").webkitEnterFullscreen === "function";
+  $("vc-stage-full").classList.toggle("hidden", !canFullscreen);
+  // 文言は状態から引き直す。F11 やブラウザの UI で外れることがあるため。
+  // bindVc は起動時に1回しか呼ばれないので、ここで登録して二重にならない
+  document.addEventListener("fullscreenchange", syncStageFullscreenLabel);
+  syncStageFullscreenLabel();
+  // 主役はまだ居ない。CSS が見る body の data 属性を最初から入れておく
+  renderStage();
   $("vc-resume").addEventListener("click", () => {
     // 自動停止した映像は本人の明示操作でのみ戻す（§3.6）
     if (typeof VC.resumeCamera !== "function") {
@@ -2006,13 +2156,16 @@ function bind() {
   });
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
-    // 端末の全画面中の Escape は「全画面を出る」ための押下。ここで覆いまで
-    // 畳むと、一度で共有画面そのものが消えてしまう（ブラウザ側が外すので
-    // 何もしないのが正しい。文言は fullscreenchange で引き直される）
-    if (document.fullscreenElement) return;
     toggleGamePlatform(false);
-    // 共有画面の拡大表示も同じ作法で閉じる（vc-screenshare.md §7.2）
-    closeVcZoom();
+    // 端末の全画面に出ているあいだの Escape は、ブラウザが全画面を外すための
+    // 押下である。ここで主役まで降ろすと、一度の Escape で共有画面そのものが
+    // 消えてしまう（全画面を外しただけのつもりなのに中身が無くなる）
+    if (stageIsFullscreen()) return;
+    // 降ろせるのは人の主役だけ。あそびは降ろしても行き先が無く、次に描き直した
+    // 時点でまた戻ってくるだけなので、#phase を無駄に付け替えない
+    if (vcStage.kind !== "peer") return;
+    // 主役表示も同じ作法で降ろす（vc-screenshare.md §7.2）
+    clearStage();
   });
   $("platform-start").addEventListener("click", () => {
     toggleGamePlatform(false);

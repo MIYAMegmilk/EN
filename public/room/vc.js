@@ -191,13 +191,20 @@
     container: null,
     onStatus: null,
     /**
-     * 拡大表示（vc-screenshare.md §7）の開閉を頼む口。
-     * 覆いそのものは app.js が持つ。タイルは vc.js が作って消すので、
-     * 要素の持ち主を跨がないよう「開けてほしい／閉じてほしい」だけを渡す。
-     *   引数 { playerId, nickname, stream } … 開く
-     *   引数 null                            … 閉じる（共有が止まったとき）
+     * 主役表示（#vc-stage）の出し入れを頼む口。
+     * 主役エリアそのものは app.js が持つ。タイルは vc.js が作って消すので、
+     * 要素の持ち主を跨がないよう「出してほしい／降ろしてほしい」だけを渡す。
+     *
+     * 引数は onSpotlight(view, playerId) の2つで、組み合わせで意味が変わる。
+     *   view あり・playerId なし … 押された。この人を主役にしてほしい
+     *   view あり・playerId あり … その人が主役なら中身を差し替えてほしい
+     *                              （カメラ⇔画面の切り替えなど）
+     *   view なし・playerId あり … その人が主役なら降ろしてほしい
+     *                              （映像が止まった・退室した）
+     * view は { playerId, nickname, stream, source }。source は
+     * "camera" | "screen" で、主役側の object-fit の出し分けに使う。
      */
-    onZoom: null,
+    onSpotlight: null,
     /**
      * getStats の注入口。既定は RTCPeerConnection.getStats() をそのまま呼ぶ。
      * テストから統計を差し替えられるようにするためだけに存在する。
@@ -209,6 +216,13 @@
   const state = {
     /** 自分の playerId（roomState.youId から取る） */
     selfId: null,
+    /**
+     * いま主役に出ている人の playerId（居なければ null）。
+     * 決めるのは app.js で、こちらは押し口の見た目と aria-pressed を
+     * それに合わせるためだけに控える（見ている人ごとの手元の状態なので、
+     * 卓には一切送らない）。
+     */
+    spotlightId: null,
     /** playerId → { nickname, vcEligible, connected } */
     players: new Map(),
     /** VC に参加中か */
@@ -457,27 +471,96 @@
     video.hidden = true;
 
     // 共有中の札と拡大の口（§9-3 / §7）。共有していないあいだは隠しておく
-    const share = createShareBadge("画面を共有中", () => requestZoom(playerId));
-    share.zoom.setAttribute("aria-label", `${nicknameOf(playerId)} さんの共有画面を拡大表示`);
+    const share = createShareBadge("画面を共有中", () => requestSpotlight(playerId));
+    share.zoom.setAttribute("aria-label", `${nicknameOf(playerId)} さんの共有画面を主役にする`);
 
     const mic = createMicMark();
+    const pick = createPickButton();
 
+    // 押し口は名前より先に入れる。同じ z-index なので、後から入れた名前が
+    // 上に出て読める（押下は名前の pointer-events: none がこちらへ通す）
+    root.appendChild(pick);
     root.appendChild(label);
     root.appendChild(video);
     root.appendChild(share.root);
     root.appendChild(mic);
     root.appendChild(audio);
     if (config.container !== null) config.container.appendChild(root);
-    return { root, label, audio, video, share, mic };
+    const view = { root, label, audio, video, share, mic, pick };
+    pick.addEventListener("click", () => requestSpotlight(playerId));
+    updatePick(view, playerId);
+    return view;
+  }
+
+  /**
+   * タイルを押して主役にするための押し口（設計の分かれ目なので経緯を残す）。
+   *
+   * 枠（.vc-peer）そのものを <button> にはできない。中には既に「拡大」
+   * 「共有をやめる」のボタンがあり、<button> の入れ子は HTML として不正で、
+   * 実際にブラウザが中のボタンを外へ弾き出してしまう。かといって div に
+   * role="button" と tabindex を付ける手は、ARIA の第一原則
+   * （ネイティブ要素で済むならそちらを使う）に反するうえ、Enter / Space の
+   * 扱いを自前で書くことになる。
+   * そこで**中身の空のネイティブ <button> を枠いっぱいに敷く**。キーボード
+   * 操作（Tab で移動して Enter / Space）はブラウザが受け持ち、既存の
+   * ボタンは札（z-index: 3）の中に残るので入れ子にならない。
+   *
+   * 読み上げ名は空のままでは「ボタン」としか読まれないので、必ず
+   * aria-label を入れる（中身は updatePick が textContent と同じ経路の
+   * setAttribute で入れる。文字列から HTML を組み立てはしない・§3.8）。
+   * 押し下げ状態は APG のトグルボタンに倣って aria-pressed で持つ。
+   */
+  function createPickButton() {
+    const pick = document.createElement("button");
+    pick.type = "button";
+    pick.className = "vc-peer-pick";
+    pick.setAttribute("aria-pressed", "false");
+    return pick;
+  }
+
+  /**
+   * 押し口の名前・押し下げ状態・枠の見た目を、いまの状態に合わせて描く。
+   * 映像が出ていない人は主役にしても黒い枠しか出ないので、押せなくする。
+   */
+  function updatePick(view, playerId) {
+    if (view === null || view === undefined) return;
+    if (view.pick === null || view.pick === undefined) return;
+    const onStage = state.spotlightId === playerId;
+    const name = nicknameOf(playerId);
+    view.pick.setAttribute("aria-pressed", onStage ? "true" : "false");
+    view.pick.setAttribute(
+      "aria-label",
+      onStage ? `${name} の主役表示をやめる` : `${name} を主役にする`,
+    );
+    view.pick.disabled = spotlightViewOf(playerId) === null;
+    view.root.classList.toggle("vc-peer-onstage", onStage);
+  }
+
+  /** 誰か1人の押し口を描き直す。自分の枠も他人の枠も同じ扱いでよい */
+  function refreshPick(playerId) {
+    if (typeof playerId !== "string") return;
+    if (playerId === state.selfId) {
+      updatePick(state.localVideo, playerId);
+      return;
+    }
+    const peer = state.peers.get(playerId);
+    if (peer !== undefined) updatePick(peer.view, playerId);
+  }
+
+  /** すべての枠の押し口を描き直す（主役が変わったとき） */
+  function refreshAllPicks() {
+    if (state.selfId !== null) updatePick(state.localVideo, state.selfId);
+    for (const [id, peer] of state.peers) updatePick(peer.view, id);
   }
 
   /**
    * 「画面を共有中」の札を作る（§9-3）。
    * 文言は固定文字列で、ニックネームを混ぜるときも textContent で入れる（§3.8）。
-   * onZoom を渡すと「拡大」の押し口が付く。拡大表示が無いとタイルの中では
-   * 文字が読めない（§7.1）ので、この押し口は飾りではなく機能の一部である。
+   * onPick を渡すと「拡大」の押し口が付く。この押し口は主役エリアへ
+   * その共有画面を出す。タイルの中では文字が読めない（§7.1）ので、
+   * これは飾りではなく機能の一部である。
    */
-  function createShareBadge(text, onZoom) {
+  function createShareBadge(text, onPick) {
     const root = document.createElement("div");
     root.className = "vc-share-badge";
     root.hidden = true;
@@ -491,7 +574,7 @@
     zoom.type = "button";
     zoom.className = "vc-share-zoom";
     zoom.textContent = "拡大";
-    zoom.addEventListener("click", onZoom);
+    zoom.addEventListener("click", onPick);
     root.appendChild(zoom);
 
     return { root, caption, zoom };
@@ -593,6 +676,8 @@
       if (state.localVideo !== null) {
         state.localVideo.root.remove();
         state.localVideo = null;
+        // 枠ごと消えるので、自分が主役に出ていたなら一緒に降ろす
+        if (state.selfId !== null) closeSpotlight(state.selfId);
       }
       return;
     }
@@ -613,10 +698,10 @@
       video.hidden = true;
       // 共有中は顔が出ない（§4.1）ので、不具合と誤解されないよう札で断る（§9-3）
       const share = createShareBadge("画面を共有中（カメラは停止中）", () => {
-        if (state.selfId !== null) requestZoom(state.selfId);
+        if (state.selfId !== null) requestSpotlight(state.selfId);
       });
       share.root.classList.add("vc-share-self");
-      share.zoom.setAttribute("aria-label", "自分が共有している画面を拡大表示");
+      share.zoom.setAttribute("aria-label", "自分が共有している画面を主役にする");
       // 止めるのは常に1手で済ませる（§9-1）。共有中ずっと目に入る位置に置く
       const stop = document.createElement("button");
       stop.type = "button";
@@ -632,13 +717,20 @@
       tag.className = "vc-self-tag";
       tag.textContent = "あなた";
       const mic = createMicMark();
+      // 自分の枠も他人と同じく押して主役にできる（押し口は名前より先に入れる）
+      const pick = createPickButton();
+      const selfId = state.selfId;
+      pick.addEventListener("click", () => {
+        if (selfId !== null) requestSpotlight(selfId);
+      });
+      root.appendChild(pick);
       root.appendChild(label);
       root.appendChild(video);
       root.appendChild(share.root);
       root.appendChild(tag);
       root.appendChild(mic);
       config.container.appendChild(root);
-      state.localVideo = { root, label, video, share, mic };
+      state.localVideo = { root, label, video, share, mic, pick };
       // 枠を作り直した直後は既定の見た目なので、いまの状態を描き直す
       refreshMicMark(state.selfId);
     }
@@ -653,11 +745,17 @@
     if (stream === null) {
       video.hidden = true;
       video.srcObject = null;
+      refreshPick(state.selfId);
+      // 自分が主役に出ていたなら降ろしてもらう（黒い枠だけを残さない）
+      syncSpotlightFor(state.selfId);
       return;
     }
     video.hidden = false;
     video.srcObject = stream;
     tryPlay(video);
+    refreshPick(state.selfId);
+    // カメラ⇔画面が入れ替わったときは、主役の中身も追随させる
+    syncSpotlightFor(state.selfId);
   }
 
   /**
@@ -668,6 +766,7 @@
   function refreshLocalLabel() {
     if (state.localVideo === null || state.selfId === null) return;
     state.localVideo.label.textContent = nicknameOf(state.selfId);
+    updatePick(state.localVideo, state.selfId);
   }
 
   /**
@@ -682,46 +781,95 @@
     peer.view.video.classList.toggle("vc-video-screen", sharing);
     peer.view.share.zoom.setAttribute(
       "aria-label",
-      `${nicknameOf(peer.id)} さんの共有画面を拡大表示`,
+      `${nicknameOf(peer.id)} さんの共有画面を主役にする`,
     );
+    // カメラ⇔画面が入れ替わると主役側の object-fit も変わるので伝え直す
+    syncSpotlightFor(peer.id);
   }
 
   /**
-   * 拡大表示を頼む（§7.2）。覆いは app.js が持っているので、
-   * ここでは「誰の・どのストリームを」だけを渡す。
-   * 同じ MediaStream を2つの video に張るのは通常の使い方で、
-   * デコードは1回・描画が2回になるだけ（追加の受信帯域はゼロ）。
+   * その人を主役に出せるか、出せるなら何を出すかを返す（出せなければ null）。
+   *
+   * タイルの DOM ごと移すのではなく、主役側の video に**同じ MediaStream を
+   * 張る**ための材料だけを渡す（vc-screenshare.md §7.2）。closePeer() は
+   * タイルごと要素を消すので、要素の持ち主を移すと後始末が壊れる。同じ
+   * ストリームを2枚に張るのは通常の使い方で、デコードは1回・描画が2回に
+   * なるだけ（受信帯域は増えない）。
+   *
+   * 共有中に限らずカメラの映像も返す。主役は「拡大」だけの仕組みではなく、
+   * 誰の顔を大きく見るかを選ぶ仕組みでもあるため。共有かカメラかは source で
+   * 伝え、主役側の object-fit の出し分けに使ってもらう。
    */
-  function requestZoom(playerId) {
-    if (typeof config.onZoom !== "function") return;
-    const stream = playerId === state.selfId ? activeVideoStream() : peerShareStream(playerId);
-    if (stream === null) return;
-    try {
-      config.onZoom({
+  function spotlightViewOf(playerId) {
+    if (typeof playerId !== "string") return null;
+    if (playerId === state.selfId) {
+      const stream = activeVideoStream();
+      if (stream === null) return null;
+      return {
         playerId,
-        nickname: playerId === state.selfId ? "あなた" : nicknameOf(playerId),
+        nickname: nicknameOf(playerId),
         stream,
-      });
-    } catch (e) {
-      console.error("VC onZoom failed:", e);
+        source: currentVideoSource() === "screen" ? "screen" : "camera",
+      };
     }
-  }
-
-  /** 共有中のピアの受信ストリーム。共有していなければ null */
-  function peerShareStream(playerId) {
     const peer = state.peers.get(playerId);
-    if (peer === undefined || peer.remoteVideoSource !== "screen") return null;
-    return peer.stream;
+    if (peer === undefined || peer.remoteVideoOff) return null;
+    const live = peer.stream.getVideoTracks().some((t) => t.readyState === "live" && !t.muted);
+    if (!live) return null;
+    return {
+      playerId,
+      nickname: nicknameOf(playerId),
+      stream: peer.stream,
+      source: peer.remoteVideoSource === "screen" ? "screen" : "camera",
+    };
   }
 
-  /** 拡大表示を閉じてもらう。共有が止まったら黒い枠だけを残さない（§7.2） */
-  function closeZoom(playerId) {
-    if (typeof config.onZoom !== "function") return;
+  /** 主役に出してほしいと頼む（タイル・「拡大」を押したとき） */
+  function requestSpotlight(playerId) {
+    if (typeof config.onSpotlight !== "function") return;
+    const view = spotlightViewOf(playerId);
+    // 映像の無い人を主役にしても黒い枠しか出ない。押し口は disabled にして
+    // あるが、札の「拡大」など別の道から来ることもあるのでここでも断る
+    if (view === null) return;
     try {
-      config.onZoom(null, playerId);
+      config.onSpotlight(view);
     } catch (e) {
-      console.error("VC onZoom failed:", e);
+      console.error("VC onSpotlight failed:", e);
     }
+  }
+
+  /**
+   * その人の映像の状態を主役エリアへ伝え直す。
+   * 止まっていれば降ろしてもらい、続いていれば中身（source）を合わせてもらう。
+   * その人が主役でなければ app.js 側が黙って無視する。
+   */
+  function syncSpotlightFor(playerId) {
+    if (typeof config.onSpotlight !== "function") return;
+    if (typeof playerId !== "string") return;
+    try {
+      config.onSpotlight(spotlightViewOf(playerId), playerId);
+    } catch (e) {
+      console.error("VC onSpotlight failed:", e);
+    }
+  }
+
+  /** 主役から降ろしてもらう。映像が止まったら黒い枠だけを残さない（§7.2） */
+  function closeSpotlight(playerId) {
+    if (typeof config.onSpotlight !== "function") return;
+    try {
+      config.onSpotlight(null, playerId);
+    } catch (e) {
+      console.error("VC onSpotlight failed:", e);
+    }
+  }
+
+  /**
+   * いま誰が主役かを教えてもらう（app.js から呼ぶ）。
+   * 決めるのは app.js 側で、こちらは押し口の見た目を合わせるだけ。
+   */
+  function setSpotlight(playerId) {
+    state.spotlightId = typeof playerId === "string" ? playerId : null;
+    refreshAllPicks();
   }
 
   // -------------------------------------------------------------------------
@@ -857,6 +1005,9 @@
       peer.stream.getVideoTracks().some((t) => t.readyState === "live" && !t.muted);
     peer.view.video.hidden = !live;
     if (live) tryPlay(peer.view.video);
+    // 映像の有無で押し口の可否が変わる。止まったならその人の主役表示も畳む
+    updatePick(peer.view, peer.id);
+    syncSpotlightFor(peer.id);
   }
 
   /** ピアがあれば返し、無ければ作る */
@@ -896,7 +1047,9 @@
     peer.view.root.remove();
     // 共有者が切断・キックされたら拡大表示も畳む。共有権はピアの状態から
     // 導いているので（§4.4）、ここでピアが消えた時点で自動的に解ける
-    if (peer.remoteVideoSource === "screen") closeZoom(playerId);
+    // 主役に出ていた人が切断・キックされたら主役も降ろす。共有権はピアの
+    // 状態から導いているので（§4.4）、ここでピアが消えた時点で自動的に解ける
+    closeSpotlight(playerId);
   }
 
   /** すべてのピアを閉じる */
@@ -1015,7 +1168,6 @@
           ? `${nicknameOf(from)} さんが画面共有を始めました`
           : `${nicknameOf(from)} さんが画面共有を止めました`,
       );
-      if (!sharing) closeZoom(from);
       // 告知が行き違って2人が同時に共有した場合は、ここで1人に収束させる
       if (sharing) resolveShareConflict();
     }
@@ -1166,6 +1318,8 @@
       connected: player.connected === true,
     });
     if (player.id === state.selfId) refreshLocalLabel();
+    // 押し口の読み上げ名にも名前が入っている（古い名前が読まれないように）
+    refreshPick(player.id);
     const peer = state.peers.get(player.id);
     if (peer !== undefined) {
       peer.view.label.textContent = player.nickname;
@@ -1939,7 +2093,7 @@
     releaseCameraStream();
     renderLocalVideo();
     // 自分の共有を拡大表示していたなら、中身が死んだ枠を残さない
-    if (source === "screen" && state.selfId !== null) closeZoom(state.selfId);
+    if (source === "screen" && state.selfId !== null) closeSpotlight(state.selfId);
     state.quality.autoStopped = true;
     state.quality.reason = reason;
     state.quality.stoppedAt = Date.now();
@@ -2218,7 +2372,7 @@
     config.send = options.send;
     config.container = options.container ?? null;
     config.onStatus = options.onStatus ?? null;
-    config.onZoom = typeof options.onZoom === "function" ? options.onZoom : null;
+    config.onSpotlight = typeof options.onSpotlight === "function" ? options.onSpotlight : null;
     // getStats は省略可。既定は pc.getStats() をそのまま呼ぶ
     if (typeof options.getStats === "function") config.getStats = options.getStats;
     if (Array.isArray(options.iceServers) && options.iceServers.length > 0) {
@@ -2401,7 +2555,8 @@
     state.screen.profile = SCREEN_DEFAULT_KIND;
     state.screen.starting = false;
     state.screen.relay = false;
-    if (state.selfId !== null) closeZoom(state.selfId);
+    if (state.selfId !== null) closeSpotlight(state.selfId);
+    state.spotlightId = null;
     // active を先に倒してから描き直す。renderLocalVideo は「VC に入っているか」だけを
     // 見て枠を出し入れするので、順番が逆だと自分の枠だけ卓上に残る（VC を抜けた後も
     // 黒い枠と自分の名前が並んだままになり、まだ着席しているように見える）
@@ -2757,7 +2912,7 @@
     renderLocalVideo();
     syncQualityMonitor();
     announceVideoState();
-    if (state.selfId !== null) closeZoom(state.selfId);
+    if (state.selfId !== null) closeSpotlight(state.selfId);
     const message = options === undefined || options.message === undefined
       ? "画面共有を止めました"
       : options.message;
@@ -2927,6 +3082,8 @@
       /** 共有の内容の種類。"text" | "motion"（§10） */
       screenKind: state.screen.kind,
       eligible: selfEligible(),
+      /** いま主役に出ている人の playerId（手元の状態。卓には送らない） */
+      spotlight: state.spotlightId,
       peers,
       quality: {
         autoStopped: state.quality.autoStopped,
@@ -2955,6 +3112,7 @@
     startScreenShare,
     stopScreenShare,
     getState,
+    setSpotlight,
     /** テスト用に公開する純粋関数（§3.6 の品質判定） */
     evaluateQuality,
     /** テスト用に公開する純粋関数（画面共有・vc-screenshare.md §11） */
