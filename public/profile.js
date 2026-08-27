@@ -36,11 +36,24 @@ function showError(message) {
   $("status").textContent = "";
 }
 
+/**
+ * API を叩く。entrance.js / create-room.js / login.js と同じ形。
+ *
+ * fetch を try で包まないと、オフライン・サーバー停止のときに init() が
+ * 未処理の Promise 拒否で止まり、タグもあだ名も描かれない真っ白なフォームが
+ * 残る（エラー表示すら出ない）。保存ボタンでも同じで、押しても何も起きない。
+ * 通信できなかったことは status: 0 で伝える。
+ */
 async function callApi(path, options) {
-  const res = await fetch(path, {
-    credentials: "same-origin",
-    ...options,
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      credentials: "same-origin",
+      ...options,
+    });
+  } catch {
+    return { ok: false, status: 0, body: null };
+  }
   let body = null;
   try {
     body = await res.json();
@@ -72,8 +85,11 @@ function renderTags(tags, selectedIds) {
 
 async function init() {
   const tagsRes = await callApi("/api/tags");
-  presetTags = tagsRes.ok && tagsRes.body !== null ? tagsRes.body.tags : [];
-  tagsLoadFailed = !tagsRes.ok || tagsRes.body === null;
+  // 配列であることまで見る。200 でも tags が配列でなければ renderTags の
+  // for-of が TypeError になり、init() の残り（あだ名の流し込み）まで止まる
+  const gotTags = tagsRes.ok && Array.isArray(tagsRes.body?.tags);
+  presetTags = gotTags ? tagsRes.body.tags : [];
+  tagsLoadFailed = !gotTags;
   if (tagsLoadFailed) {
     showError("趣味タグ一覧の取得に失敗しました");
   }
@@ -116,6 +132,10 @@ $("profile-save").addEventListener("click", async () => {
     });
     if (ok) {
       location.href = "/index.html";
+    } else if (status === 0) {
+      // callApi が「通信できなかった」を表すのに使う値。「(0): unknown error」
+      // では何も伝わらない
+      showError("保存に失敗しました。サーバーに繋がりませんでした");
     } else {
       showError(`保存に失敗しました (${status}): ${body?.error ?? "unknown error"}`);
     }

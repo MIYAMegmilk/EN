@@ -248,12 +248,25 @@ function isLoadableGameId(gameId) {
   return typeof gameId === "string" && /^[a-z0-9_-]{1,32}$/.test(gameId);
 }
 
-/** ビューモジュールへ渡す api（設計書 §3.2） */
+/**
+ * ビューモジュールへ渡す api（設計書 §3.2）。
+ *
+ * youId / isHost を**取り出すたびに読む getter** にしてあるのが肝。
+ * ここを素の値にすると mount した瞬間の値で固まってしまい、進行中の卓へ
+ * 途中参加して roomState より先に gameView が届いた場合、`api.youId` が
+ * null のまま二度と更新されない（自分の手番・自分の回答を見分けられなくなる）。
+ * ゲーム側は view から自分を指す手がかりを持たない実装が多く、モジュールの
+ * 中では回避しようがないので、配る側で現在の値を返す形にしておく。
+ */
 function gameModuleApi() {
   return {
     send: (payload) => send({ t: "gameEvent", payload }),
-    youId: state.snapshot === null ? null : state.snapshot.youId,
-    isHost: state.snapshot !== null && state.snapshot.youAreHost === true,
+    get youId() {
+      return state.snapshot === null ? null : state.snapshot.youId;
+    },
+    get isHost() {
+      return state.snapshot !== null && state.snapshot.youAreHost === true;
+    },
     serverNow: () => Date.now() + state.serverOffsetMs,
   };
 }
@@ -449,18 +462,36 @@ function showNotice(text) {
   box.textContent = text ?? "";
 }
 
-/** ログイン状態を確認して表示する（§3.0） */
+/**
+ * ログイン状態を確認して表示する（§3.0）。
+ *
+ * fetch そのものを try で包むのがこの関数の要。ここで throw を外へ出すと
+ * start() の Promise.all ごと転び、その後ろの connect() が呼ばれない。
+ * つまり /api/me が一度こけただけで「卓に一切繋がらない」画面になる。
+ * サーバーの再起動直後はまさに全要求が一瞬こけるので、現実に踏む。
+ *
+ * 繋がらなかったときは「未ログイン」とは言い切らない。ログインしている人に
+ * 「未ログイン」と出すと、本人は落ち度が自分にあると誤解する（§3.0 の表示は
+ * 事実だけを出す）。確認できなかったことをそのまま出し、操作は未ログイン相当で
+ * 続けられるようにしておく。
+ */
 async function refreshAccount() {
-  const res = await fetch("/api/me", { credentials: "same-origin" });
+  let res = null;
   let body = null;
   try {
+    res = await fetch("/api/me", { credentials: "same-origin" });
     body = await res.json();
   } catch {
+    // fetch の失敗（通信断・サーバー停止）と、JSON で返らなかった場合の両方。
+    // res が取れているかどうかで下の文言を出し分ける
     body = null;
   }
-  const loggedIn = res.ok && body !== null && typeof body.userId === "string";
+  const reachable = res !== null;
+  const loggedIn = reachable && res.ok && body !== null && typeof body.userId === "string";
   state.loggedIn = loggedIn;
-  $("account-status").textContent = loggedIn ? `ログイン中: ${body.userId}` : "未ログイン";
+  $("account-status").textContent = loggedIn
+    ? `ログイン中: ${body.userId}`
+    : (reachable ? "未ログイン" : "ログイン状態を確認できませんでした");
   // 名札（profile.html）はログイン中・ゲストどちらも編集できるので常に表示する
   // のれんをくぐる・店内を歩く・卓を建てるの出し分けは renderAccountBar() に任せる
   // （卓に着いている間も隠す必要があり、ログイン状態だけでは決まらないため）
@@ -485,14 +516,27 @@ async function refreshAccount() {
   }
 }
 
-/** サーバーへ送る */
+/**
+ * サーバーへ送る。送れたかどうかを返す。
+ *
+ * 戻り値があるのは、送信できなかったときに打った本文を消させないため
+ * （chat.js の submit 参照）。接続が切れているときに黙って入力欄を空にすると、
+ * 長文を打った直後の切断で書き直しになる。
+ */
 function send(msg) {
   if (state.ws === null || state.ws.readyState !== WebSocket.OPEN) {
     showError("サーバーに接続していません");
-    return;
+    return false;
   }
-  state.ws.send(JSON.stringify(msg));
+  try {
+    state.ws.send(JSON.stringify(msg));
+  } catch {
+    // readyState が OPEN でも、直後に閉じられていれば投げる
+    showError("サーバーに接続していません");
+    return false;
+  }
   log("→", msg);
+  return true;
 }
 
 /** WebSocket を開く */
@@ -541,6 +585,21 @@ function connect() {
       if (nickname.length > 0) msg.nickname = nickname;
       state.rejoinAfterRestart = afterRestart;
       send(msg);
+      // 廊下で扉を選んだ・create-room.html で「建てる」を押した直後だと、その
+      // 明示的な操作を握りつぶして前の卓へ戻したことになる。どちらが優先かは
+      // 卓の再接続の設計（app_reconnect_test.ts が復帰優先を固定している）に
+      // 従うが、黙って別の結果にすると「押しても何も起きなかった」と読まれる
+      //
+      // 行き止まりにしないため、選んだ先へ行く道筋まで書く。「お先に失礼」で
+      // 出ると store.drop() で再接続トークンが消え（resetToEntry）、そこから
+      // もう一度「店内を歩く」で扉を選べば、今度は競合相手がいないので
+      // 選んだ卓に入れる（この2つの導線は卓を出ると出てくる・renderAccountBar）
+      if (pendingCreate !== null || pendingJoin !== null) {
+        showNotice(
+          "前にいた卓へ戻りました。選んだ卓へ移るには、「お先に失礼」で出てから、" +
+            "もう一度「店内を歩く」でお選びください",
+        );
+      }
     } else if (pendingCreate !== null) {
       doCreateRoom(pendingCreate);
     } else if (pendingJoin !== null) {
@@ -1124,15 +1183,56 @@ function currentGame() {
 }
 
 /**
+ * いま並んでいる札の中身を表す文字列。組み直しが要るかの判定だけに使う。
+ * 押せるかどうか（disabled）と選択状態は札を作り直さずに更新できるので入れない。
+ */
+let gamePlatformSignature = null;
+
+function gameListSignature(games) {
+  return JSON.stringify(
+    games.map((g) => [g.choice, g.title, g.meta, g.description, g.badge, g.official, g.hue]),
+  );
+}
+
+/** 既にある札の「押せるか」「選ばれているか」だけを現状に合わせる */
+function syncGameCardStates() {
+  const canStart = canStartGame();
+  for (const card of $("game-list").children) {
+    if (card.dataset === undefined || card.dataset.choice === undefined) continue;
+    const pressed = card.dataset.choice === gameChoiceState.choice;
+    card.setAttribute("aria-pressed", pressed ? "true" : "false");
+    card.disabled = !canStart;
+  }
+}
+
+/**
  * 品書き（ゲーム一覧）を組み直す。
  * 一覧は roomState のたびに届くので、何度も呼ばれる。
+ *
+ * 毎回 clear() して作り直すと、品書きを開いてキーボードで札を選んでいる最中に
+ * 誰かが入室・退室しただけで、フォーカスしていたボタンが DOM から消えて
+ * フォーカスが <body> に落ちる。人の出入りは通常の使い方なので、それだけで
+ * 品書きのキーボード操作が成立しなくなる（マウスでも押す瞬間に札が入れ替わる）。
+ * そこで、並ぶ中身が実際に変わったときだけ組み直し、それ以外は札を残したまま
+ * 状態だけ更新する。
  */
 function renderGamePlatform() {
   const list = $("game-list");
-  clear(list);
-  if (state.snapshot === null) return;
+  if (state.snapshot === null) {
+    clear(list);
+    gamePlatformSignature = null;
+    return;
+  }
 
   const games = listGames(state.snapshot);
+  const signature = gameListSignature(games);
+  if (signature === gamePlatformSignature && list.children.length > 0) {
+    syncGameCardStates();
+    return;
+  }
+  gamePlatformSignature = signature;
+  clear(list);
+
   if (games.length === 0) {
     list.appendChild(el("p", "あそびがまだありません", "platform-empty"));
     return;
@@ -2215,7 +2315,26 @@ function bindVoice() {
 /** 操作の割り当て */
 function bind() {
   $("logout").addEventListener("click", async () => {
-    await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
+    try {
+      await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
+    } catch {
+      // 通信できなくても、このタブに残るものの後始末はやり切って画面は進める。
+      // ここで投げると「お会計を押しても何も起きない」になる
+    }
+    // このタブに残る「前の人の続き」を全部捨ててから離れる。
+    //
+    // 卓の再接続トークン（en-session）は、キックされたときだけ意図的に
+    // 残している（§3.1 のブロック判定のため）。それを持ち越したまま別の
+    // アカウントでログインし直すと、connect() の onopen が拾って追い出された
+    // 卓へ join を送り、身に覚えのない BLOCKED が毎回出る。
+    store.drop();
+    // ゲストの一時プロフィール（あだ名・趣味タグ）。共用端末で前の利用者の
+    // あだ名が次の人の入室欄に自動入力されてしまう
+    GuestProfile.setGuestProfile({ nickname: "", tags: [] });
+    // 受け渡し待ちの「これから建てる卓」「入りたい卓」。consume は読んで捨てる
+    // だけなので、残っていなければ何も起きない（合言葉が平文で残るのも防ぐ）
+    RoomHandoff.consumePendingCreateRoom();
+    RoomHandoff.consumePendingJoinRoom();
     location.href = "/login.html";
   });
   $("queue-join").addEventListener("click", joinQueue);
@@ -2307,8 +2426,19 @@ async function start() {
   // 入室の音は鳴る間が決まっていて、その場で取りに行くと間に合わない
   Sound.preload("decide", "knock", "slidingScreen");
   // 卓に入る前に済ませておく。入室に趣味タグを持ち込む（§3.11）ので、
-  // corridor.html からの自動入室に間に合わせるには connect() より前に要る
-  await Promise.all([refreshAccount(), loadHobbyTagLabels()]);
+  // corridor.html からの自動入室に間に合わせるには connect() より前に要る。
+  //
+  // 並行に取るのは変えない（直列にすると起動が1往復ぶん遅くなる）。ただし
+  // ここで転ぶと connect() まで届かず「アプリが起動しない」形になるので、
+  // 一本ずつ受け止める。どちらも失敗しても卓への接続は独立して進める
+  await Promise.all([
+    refreshAccount().catch(() => {
+      // refreshAccount 自身が通信断を握る。ここへ来るのは想定外の失敗
+      // （DOM の欠けなど）だけだが、それでも接続は止めない
+      $("account-status").textContent = "ログイン状態を確認できませんでした";
+    }),
+    loadHobbyTagLabels(),
+  ]);
   bindVc(await fetchIceServers());
   connect();
 }

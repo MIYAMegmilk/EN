@@ -21,6 +21,15 @@
  */
 const TAGS_MAX = 5;
 
+/**
+ * 合言葉の下限。server/types.ts の PASSPHRASE_MIN と必ず同じにする。
+ *
+ * ここで弾かないと、サーバーの validatePassphrase が INVALID_INPUT を返して
+ * **卓の作成そのものが失敗する**。しかもその頃には index.html へ遷移している
+ * ので、利用者は卓が無いまま、原因の分からないエラーだけを見ることになる
+ */
+const PASSPHRASE_MIN = 4;
+
 function $(id) {
   return document.getElementById(id);
 }
@@ -78,6 +87,12 @@ function syncVisibilityFields() {
   const isPrivate = $("create-room-visibility").value === "private";
   $("create-room-entry-mode-field").classList.toggle("hidden", isPrivate);
   $("create-room-passphrase-field").classList.toggle("hidden", !isPrivate);
+  // 説明文とタグは PATCH /api/rooms/:code で載せるもので、その PATCH は
+  // 一覧に出す卓にしか飛ばない（app.js の doCreateRoom が private のときは
+  // pendingRoomMeta を null にする）。出したままにすると、書いた説明文とタグが
+  // 警告も無しに捨てられるので、合言葉欄と同じく出し入れする
+  $("create-room-description-field").classList.toggle("hidden", isPrivate);
+  $("create-room-tags-field").classList.toggle("hidden", isPrivate);
 }
 
 async function init() {
@@ -105,26 +120,40 @@ $("create-room-submit").addEventListener("click", () => {
     return;
   }
   const visibility = $("create-room-visibility").value === "public" ? "public" : "private";
+  const isPublic = visibility === "public";
   const roomName = $("create-room-name").value;
-  if (visibility === "public" && roomName.trim() === "") {
+  if (isPublic && roomName.trim() === "") {
     showError("お座敷一覧に出す卓には名前が必要です");
     return;
   }
-  const tags = checkedTagIds();
+  // 説明文とタグは一覧に出す卓だけのもの（syncVisibilityFields 参照）。
+  // 一覧に出さない卓では欄ごと隠れているが、public で書いてから private に
+  // 切り替えた場合は値が残る。そのまま積むと送られないものを送ったことになるので、
+  // 積むかどうかはここで決め切る
+  const tags = isPublic ? checkedTagIds() : [];
   // サーバーと同じ上限をここでも見る。遷移してしまうと、弾かれたことに気づける
   // 場所が卓の中の小さなエラー表示だけになり、書いた説明文も戻ってこない
   if (tags.length > TAGS_MAX) {
     showError(`タグは${TAGS_MAX}個以内で選んでください`);
     return;
   }
+  // 合言葉は招待制の卓にだけ付く。空欄なら「付けない」なので通す
+  const passphrase = $("create-room-passphrase").value;
+  if (!isPublic) {
+    const trimmed = passphrase.trim();
+    if (trimmed.length > 0 && [...trimmed].length < PASSPHRASE_MIN) {
+      showError(`合言葉は${PASSPHRASE_MIN}文字以上で入力してください`);
+      return;
+    }
+  }
   RoomHandoff.setPendingCreateRoom({
     nickname,
     visibility,
     roomName,
-    description: $("create-room-description").value,
+    description: isPublic ? $("create-room-description").value : "",
     tags,
     entryMode: $("create-room-entry-mode").value === "knock" ? "knock" : "open",
-    passphrase: $("create-room-passphrase").value,
+    passphrase,
   });
   location.href = "/index.html";
 });

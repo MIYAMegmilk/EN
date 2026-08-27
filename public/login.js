@@ -214,11 +214,27 @@ function showStatus(message) {
   $("register-error").textContent = "";
 }
 
+/**
+ * API を叩く。entrance.js / create-room.js / debug.js と同じ形に揃えてある。
+ *
+ * fetch を try で包むのが要。包まないと、サーバー停止・圏外のときに
+ * 呼び出し側の async 関数がそのまま reject し、画面には何も出ないまま
+ * 未処理の Promise 拒否がコンソールに出るだけになる。押しても無反応だと
+ * 「効いていない」と思ってまた押すので、連打の入り口にもなる。
+ *
+ * 通信できなかったことは status: 0 で伝える（HTTP には無い値なので、
+ * 本物の応答と取り違えない）。
+ */
 async function callApi(path, options) {
-  const res = await fetch(path, {
-    credentials: "same-origin",
-    ...options,
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      credentials: "same-origin",
+      ...options,
+    });
+  } catch {
+    return { ok: false, status: 0, body: null };
+  }
   let body = null;
   try {
     body = await res.json();
@@ -229,13 +245,15 @@ async function callApi(path, options) {
 }
 
 async function refreshMe() {
-  const { ok, body } = await callApi("/api/me");
+  const { ok, status, body } = await callApi("/api/me");
   if (ok && body && typeof body.userId === "string") {
     // ログイン済みならこの画面に留まらず入り口選択画面へ進む
     location.href = "/entrance.html";
     return;
   }
-  $("me-result").textContent = "未ログイン";
+  // 繋がらなかっただけのときに「未ログイン」と言い切らない。ログインしている
+  // 人に落ち度があるように読める（この画面はそのまま操作できる）
+  $("me-result").textContent = status === 0 ? "ログイン状態を確認できませんでした" : "未ログイン";
 }
 
 /**
@@ -269,7 +287,13 @@ async function submitCredentials({ path, userId, password, successText, failLabe
       body: JSON.stringify({ userId, password }),
     });
     if (!ok) {
-      onFail(`${failLabel}に失敗しました (${status}): ${body?.error ?? "unknown error"}`);
+      // status 0 は callApi が「通信できなかった」を表すのに使う値。
+      // 「(0): unknown error」と出しても何も伝わらないので言い換える
+      onFail(
+        status === 0
+          ? `${failLabel}に失敗しました。サーバーに繋がりませんでした`
+          : `${failLabel}に失敗しました (${status}): ${body?.error ?? "unknown error"}`,
+      );
       return;
     }
     showStatus(`${successText}（userId: ${body?.userId}）`);
@@ -285,8 +309,10 @@ async function submitCredentials({ path, userId, password, successText, failLabe
     leaving = true;
     location.href = "/entrance.html";
   } catch {
-    // この callApi は fetch を包んでいないので、サーバー停止・圏外はここへ来る。
-    // 黙って戻すと「押したのに無反応」になり、まさに連打を誘う
+    // 通信断は callApi が status 0 として返すので、通常ここへは来ない。
+    // それでも残すのは、想定外の失敗（演出まわりなど）で塞いだまま
+    // 戻れなくなるのを防ぐため。黙って終わると「押したのに無反応」になり、
+    // まさに連打を誘う
     onFail(`${failLabel}に失敗しました。サーバーに繋がりませんでした`);
   } finally {
     if (!leaving) {
@@ -296,25 +322,57 @@ async function submitCredentials({ path, userId, password, successText, failLabe
   }
 }
 
-$("register").addEventListener("click", () =>
-  submitCredentials({
+function doRegister() {
+  return submitCredentials({
     path: "/api/auth/register",
     userId: $("register-userid").value,
     password: $("register-password").value,
     successText: "登録・ログインしました",
     failLabel: "登録",
     onFail: showRegisterError,
-  }));
+  });
+}
 
-$("login").addEventListener("click", () =>
-  submitCredentials({
+function doLogin() {
+  return submitCredentials({
     path: "/api/auth/login",
     userId: $("login-userid").value,
     password: $("login-password").value,
     successText: "ログインしました",
     failLabel: "ログイン",
     onFail: showLoginError,
-  }));
+  });
+}
+
+/**
+ * 送信の入口を3つとも同じ関数に繋ぐ（room/chat.js の init と同じ形）。
+ *
+ * ID とパスワードを打ち込んで Enter、はログイン画面でいちばん多い操作なのに、
+ * これまではマウスで押すしか手が無かった。二重送信は submitCredentials の
+ * submitting が止めるので、経路が増えても送信は1回に保たれる。
+ *
+ * ボタンは type="button" のまま（暗黙の送信でページが再読み込みされない）。
+ * それでも form の submit を拾うのは、パスワードマネージャの自動入力＋自動送信
+ * のようにブラウザ側から submit が飛んでくる経路があるため。
+ */
+function bindSubmit(formId, inputIds, buttonId, run) {
+  $(formId).addEventListener("submit", (event) => {
+    event.preventDefault();
+    void run();
+  });
+  $(buttonId).addEventListener("click", () => void run());
+  for (const id of inputIds) {
+    $(id).addEventListener("keydown", (event) => {
+      // IME の変換確定の Enter では送らない（chat.js の keydown と同じ判定）
+      if (event.key !== "Enter" || event.isComposing) return;
+      event.preventDefault();
+      void run();
+    });
+  }
+}
+
+bindSubmit("login-form", ["login-userid", "login-password"], "login", doLogin);
+bindSubmit("register-form", ["register-userid", "register-password"], "register", doRegister);
 
 /**
  * ブラウザの「戻る」で bfcache から復元されたときの後始末。
