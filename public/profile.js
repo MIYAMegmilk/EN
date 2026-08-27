@@ -23,11 +23,6 @@ function showError(message) {
   $("status").textContent = "";
 }
 
-function showStatus(message) {
-  $("status").textContent = message;
-  $("error").textContent = "";
-}
-
 async function callApi(path, options) {
   const res = await fetch(path, {
     credentials: "same-origin",
@@ -93,14 +88,7 @@ $("profile-save").addEventListener("click", async () => {
     body: JSON.stringify({ nickname, tags }),
   });
   if (ok) {
-    // サーバー側でトリム・重複除去された正本の値（body.nickname/tags）を画面に反映する
-    if (typeof body?.nickname === "string") {
-      $("profile-nickname").value = body.nickname;
-    }
-    if (Array.isArray(body?.tags)) {
-      renderTags(presetTags, body.tags);
-    }
-    showStatus("プロフィールを保存しました");
+    location.href = "/index.html";
   } else {
     showError(`保存に失敗しました (${status}): ${body?.error ?? "unknown error"}`);
   }
