@@ -102,7 +102,7 @@ async function refreshAccount() {
     ? `ログイン中: ${body.userId}`
     : "未ログイン";
   document.getElementById("login-link").classList.toggle("hidden", loggedIn);
-  document.getElementById("profile-link").classList.toggle("hidden", !loggedIn);
+  // 名札（profile.html）はログイン中・ゲストどちらも編集できるので常に表示する
   document.getElementById("create-room-link").classList.toggle("hidden", !loggedIn);
   document.getElementById("logout").classList.toggle("hidden", !loggedIn);
 }
