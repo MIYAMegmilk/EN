@@ -617,6 +617,8 @@ const BROKEN_COOKIES = ["", "   ", "; ;", "=abc"];
 const LOGIN_HTML_MARKER = 'id="guest-link"';
 /** index.html だけが持つ目印 */
 const INDEX_HTML_MARKER = 'id="login-link"';
+/** entrance.html だけが持つ目印 */
+const ENTRANCE_HTML_MARKER = 'id="entrance-index"';
 
 // どのCookieでどこが落ちたか取り違えないよう、値ごとに1件ずつ立てる
 for (const cookie of BROKEN_COOKIES) {
@@ -678,7 +680,7 @@ for (const cookie of BROKEN_COOKIES) {
   );
 }
 
-Deno.test("GET / は正しいCookieでログイン済みなら従来どおり index.html を返す", async () => {
+Deno.test("GET / は正しいCookieでログイン済みなら entrance.html を返す", async () => {
   const kv = await Deno.openKv(":memory:");
   const handle = startServer(0, "127.0.0.1", kv);
   try {
@@ -698,7 +700,21 @@ Deno.test("GET / は正しいCookieでログイン済みなら従来どおり in
     const res = await fetch(`${base}/`, { headers: { cookie } });
     assertEquals(res.status, 200);
     const html = await res.text();
-    assert(html.includes(INDEX_HTML_MARKER), "ログイン済みなら index.html が返ること");
+    assert(html.includes(ENTRANCE_HTML_MARKER), "ログイン済みなら entrance.html が返ること");
+    assert(!html.includes(INDEX_HTML_MARKER), "index.html は返らないこと");
+  } finally {
+    await handle.shutdown();
+    kv.close();
+  }
+});
+
+Deno.test("GET / は Cache-Control: no-store を返す（ログイン状態でブラウザにキャッシュさせない）", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const handle = startServer(0, "127.0.0.1", kv);
+  try {
+    const res = await fetch(`http://127.0.0.1:${handle.port}/`);
+    await res.body?.cancel();
+    assertEquals(res.headers.get("cache-control"), "no-store");
   } finally {
     await handle.shutdown();
     kv.close();

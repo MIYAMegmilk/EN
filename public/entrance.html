@@ -268,110 +268,12 @@
         border-color: var(--line-soft);
       }
 
-      .entrance-profile {
-        margin-bottom: 18px;
-        padding: 14px 18px;
-      }
-
-      .entrance-profile-row {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        font-size: 13px;
-        color: var(--text);
-      }
-
-      #entrance-profile-toggle {
-        background: none;
-        border: none;
-        padding: 0;
-        color: var(--muted);
-        font-size: 13px;
-        cursor: pointer;
-      }
-
-      #entrance-profile-toggle:hover {
-        color: var(--cream);
-      }
-
-      .entrance-profile-form {
-        margin-top: 14px;
-        padding-top: 14px;
-        border-top: 1px solid var(--line-soft);
-      }
-
-      #entrance-tags {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-      }
-
-      #entrance-tags label {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 6px 14px;
-        border: 1px solid var(--line);
-        border-radius: var(--r-pill);
-        background: var(--panel-3);
-        color: var(--muted);
-        font-size: 12.5px;
-        cursor: pointer;
-        transition: border-color 0.15s, color 0.15s, background 0.15s;
-      }
-
-      #entrance-tags label:hover {
-        border-color: var(--gold-3);
-      }
-
-      #entrance-tags input[type="checkbox"] {
-        accent-color: var(--gold);
-      }
-
-      #entrance-tags label:has(input:checked) {
-        border-color: var(--gold-3);
-        background: linear-gradient(180deg, rgba(230, 166, 63, 0.16), rgba(200, 134, 42, 0.1));
-        color: var(--gold-2);
-      }
-
-      #entrance-profile-status {
-        margin: 10px 0 0;
-        color: #a8c58a;
-        font-size: 12.5px;
-      }
-
-      #entrance-profile-status:empty {
-        margin: 0;
-      }
     </style>
   </head>
   <body class="wood">
     <main>
       <h1>今夜はどちらから入りますか</h1>
       <p class="lead">卓の見つけ方をえらんでください。</p>
-
-      <div class="entrance-profile card">
-        <div class="entrance-profile-row">
-          <span id="entrance-profile-summary">あだ名: 未設定</span>
-          <span class="spacer"></span>
-          <button id="entrance-profile-toggle" type="button" aria-expanded="false">
-            名札を整える ▾
-          </button>
-        </div>
-        <section id="entrance-profile-form" class="entrance-profile-form" hidden>
-          <div class="field">
-            <label for="entrance-nickname">あだ名（20文字以内）</label>
-            <input class="input" id="entrance-nickname" maxlength="20" autocomplete="off" />
-          </div>
-          <div class="field">
-            <label>趣味タグ（最大5個・プリセットから選択）</label>
-            <div id="entrance-tags"></div>
-          </div>
-          <p id="entrance-profile-error" class="alert" role="alert"></p>
-          <p id="entrance-profile-status" role="status"></p>
-          <button id="entrance-profile-save" class="btn btn-gold" type="button">保存</button>
-        </section>
-      </div>
 
       <div class="entrance-choices">
         <a id="entrance-index" class="entrance-card card" href="/index.html">
@@ -430,7 +332,6 @@
         </a>
       </div>
     </main>
-    <script src="./guest-profile.js"></script>
     <script src="./entrance.js"></script>
   </body>
 </html>

@@ -602,7 +602,7 @@ async function handleWebSocket(
 
 /**
  * public/ を配信する。serveDir が fsRoot の外へ出ないためパストラバーサルは起きない。
- * トップページはログイン済みなら index.html、未ログインなら login.html を返す。
+ * トップページはログイン済みなら entrance.html、未ログインなら login.html を返す。
  */
 async function handleStatic(
   req: Request,
@@ -622,19 +622,24 @@ async function handleStatic(
     return new Response("not found", { status: 404 });
   }
   let path = url.pathname;
+  // "/" の中身はログイン状態（Cookie）で変わるため、ブラウザにキャッシュさせない。
+  // これが無いと、ログアウト後に "/" を開いてもキャッシュされた entrance.html が
+  // そのまま返ってしまう（ログイン状態が変わったことにブラウザは気づけない）
+  const isSessionDependent = url.pathname === "/";
   if (/^\/r\/[0-9]{6}\/?$/.test(url.pathname)) {
     // 招待 URL（/r/{code}）は同じ画面を返す（§2）
     path = "/index.html";
-  } else if (url.pathname === "/") {
+  } else if (isSessionDependent) {
     // 壊れた Cookie ヘッダーでトップページが 500 にならないよう、取り出しは sessionToken に任せる
     const token = sessionToken(req);
     const userId = kv !== null ? await verifySession(kv, token) : null;
-    path = userId !== null ? "/index.html" : "/login.html";
+    path = userId !== null ? "/entrance.html" : "/login.html";
   }
   const rewritten = new Request(new URL(path + url.search, url.origin), req);
   const res = await serveDir(rewritten, { fsRoot: PUBLIC_DIR, quiet: true });
   const headers = new Headers(res.headers);
   for (const [key, value] of SECURITY_HEADERS) headers.set(key, value);
+  if (isSessionDependent) headers.set("cache-control", "no-store");
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
 }
 

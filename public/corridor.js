@@ -83,6 +83,39 @@ if (Sound !== null && detectPage(document) === "standalone") {
 }
 
 /**
+ * ログイン状態の出し入れ（index.html の app.js `refreshAccount` と同じ理屈）。
+ *
+ * 卓を建てるにはログインが必要（§3.1）。ゲストのまま押すと create-room.js に
+ * login.html へ弾かれてしまうので、押せないよう見せるのではなくボタンごと隠す。
+ * 「名札」「のれんをくぐる」「お会計」も index.html と同じ出し分けにする。
+ */
+async function refreshAccount() {
+  const res = await fetch("/api/me", { credentials: "same-origin" });
+  let body = null;
+  try {
+    body = await res.json();
+  } catch {
+    body = null;
+  }
+  const loggedIn = res.ok && body !== null && typeof body.userId === "string";
+  document.getElementById("account-status").textContent = loggedIn
+    ? `ログイン中: ${body.userId}`
+    : "未ログイン";
+  document.getElementById("login-link").classList.toggle("hidden", loggedIn);
+  // 名札（profile.html）はログイン中・ゲストどちらも編集できるので常に表示する
+  document.getElementById("create-room-link").classList.toggle("hidden", !loggedIn);
+  document.getElementById("logout").classList.toggle("hidden", !loggedIn);
+}
+
+if (detectPage(document) === "standalone") {
+  refreshAccount();
+  document.getElementById("logout").addEventListener("click", async () => {
+    await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
+    location.href = "/login.html";
+  });
+}
+
+/**
  * 扉が選ばれたときの入店経路。
  *
  * index.html（home）はもう corridor.js を読まない（3D をホームに埋め込むのをやめた）ため、
