@@ -291,6 +291,94 @@ Deno.test("reflex: ラウンドが進み、押すと1件だけ中継され、二
   });
 });
 
+Deno.test("reflex: 締め切りを過ぎて届いたタップも点に入る（順位表が人ごとに食い違わない）", () => {
+  // 監査 M-6: 中継の遅れが猶予（SETTLE_GRACE_MS = 800ms）を超えると、そのラウンドの点は
+  // 送った本人の画面にだけ入り、他人の画面には入らなかった。全員が同じ盤を見る前提が崩れる
+  return exercise("reflex", ({ handle, container, now, frames }) => {
+    handle.update(makeView(), null);
+    // 第1ラウンドを、合図 + 締め切り + 猶予をすべて過ぎた時刻まで飛ばして締める
+    now.value = T0 + 3 * 10_500;
+    frames.forEach((f) => f());
+    const settled = container.findAll("li").map((li) => li.text());
+    assert(
+      settled.every((t) => t.includes("0点")),
+      `締める前から点が入っている: ${settled}`,
+    );
+
+    // 猶予を超えて遅れて届いた他人のタップ
+    handle.update(makeView([{ n: 1, from: OTHER, payload: { k: "t", r: 0, rt: 500 } }]), null);
+    const after = container.findAll("li").map((li) => li.text());
+    assert(
+      after.some((t) => t.includes(OTHER_NAME) && t.includes("3点")),
+      `締め切り後に届いたタップが捨てられている: ${after}`,
+    );
+  });
+});
+
+Deno.test("reflex: 締め切り後の速いタップで順位が入れ替わり、二重加点にならない", () => {
+  return exercise("reflex", ({ handle, container, now, frames }) => {
+    handle.update(makeView(), null);
+    // 第1ラウンドの合図の後に、間に合った1件が届く
+    now.value = T0 + 7000;
+    handle.update(makeView([{ n: 1, from: OTHER, payload: { k: "t", r: 0, rt: 500 } }]), null);
+    // ラウンドを締める（この時点では OTHER が1位で3点）
+    now.value = T0 + 3 * 10_500;
+    frames.forEach((f) => f());
+    const settled = container.findAll("li").map((li) => li.text());
+    assert(
+      settled.some((t) => t.includes(OTHER_NAME) && t.includes("3点")),
+      `締めた時点の点が違う: ${settled}`,
+    );
+
+    // 締めたあとに、もっと速いタップが遅れて届く
+    handle.update(
+      makeView([
+        { n: 1, from: OTHER, payload: { k: "t", r: 0, rt: 500 } },
+        { n: 2, from: "late-1", payload: { k: "t", r: 0, rt: 100 } },
+      ]),
+      null,
+    );
+    const rows = container.findAll("li").map((li) => li.text());
+    // 遅れて届いたほうが1位（3点）、先に届いていたほうは2位（2点）へ引き直される
+    assert(
+      rows.some((t) => t.includes("誰か") && t.includes("3点")),
+      `遅れて届いた1位に点が入っていない: ${rows}`,
+    );
+    assert(
+      rows.some((t) => t.includes(OTHER_NAME) && t.includes("2点")),
+      `順位の引き直しで加点がやり直されていない: ${rows}`,
+    );
+    // 同じ view をもう一度流しても点は動かない（連番で処理済みを弾く）
+    handle.update(
+      makeView([
+        { n: 1, from: OTHER, payload: { k: "t", r: 0, rt: 500 } },
+        { n: 2, from: "late-1", payload: { k: "t", r: 0, rt: 100 } },
+      ]),
+      null,
+    );
+    assertEquals(container.findAll("li").map((li) => li.text()), rows, "二重加点している");
+  });
+});
+
+Deno.test("reflex: 締め切り後に届いた同じ人の2件目は無視する（最初の1件だけ有効）", () => {
+  return exercise("reflex", ({ handle, container, now, frames }) => {
+    handle.update(makeView(), null);
+    now.value = T0 + 3 * 10_500;
+    frames.forEach((f) => f());
+    handle.update(makeView([{ n: 1, from: OTHER, payload: { k: "t", r: 0, rt: 500 } }]), null);
+    const once = container.findAll("li").map((li) => li.text());
+    // 同じ人・同じラウンドの2件目（連番は新しい）は、点を動かさない
+    handle.update(
+      makeView([
+        { n: 1, from: OTHER, payload: { k: "t", r: 0, rt: 500 } },
+        { n: 2, from: OTHER, payload: { k: "t", r: 0, rt: 10 } },
+      ]),
+      null,
+    );
+    assertEquals(container.findAll("li").map((li) => li.text()), once, "2件目を受け付けている");
+  });
+});
+
 Deno.test("reflex: 範囲外・型違いのタップは捨てる", async () => {
   await exercise("reflex", ({ handle, container, now, frames }) => {
     handle.update(makeView(), null);

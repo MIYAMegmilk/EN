@@ -7,6 +7,10 @@
  *   - draw.js     … サーバーの view 間引きで pointCount が遅れて届いても、
  *                   点数の上限ちょうどまで描け、超えては送らないこと
  *
+ * あわせて draw.js の「描き続けられなくなる」2件（監査 M-5 / M-7）も見る。
+ *   - ポインタ捕捉に失敗した環境で、canvas の外で離しても線が終わること
+ *   - 「全部消す」を繰り返してもストロークIDがサーバーの受理範囲を超えないこと
+ *
  * ガードは「押せなくして終わり」では困る。次の2つも必ず確かめる。
  *   - **持ち越さない**: ラウンド・フェーズ・ターンが変われば送り直せる
  *   - **詰まない**: サーバーに弾かれて（＝view が「まだ提出していない」と言って）きたら送り直せる
@@ -267,6 +271,19 @@ function buttonByText(container: FakeElement, text: string): FakeElement {
 /** 送られた payload のうち k が一致するものを数える */
 function countKind(sent: unknown[], kind: string): number {
   return sent.filter((p) => (p as { k?: string }).k === kind).length;
+}
+
+/**
+ * canvas の外でポインタを離したときの再現。
+ *
+ * ポインタ捕捉（setPointerCapture）が効かない環境では、canvas の外で離した
+ * pointerup / pointercancel は canvas に届かず window にだけ届く。
+ * 偽 DOM は canvas しか持たないので、window ぶんは本物の EventTarget で起こす
+ */
+function firePointerOnWindow(type: "pointerup" | "pointercancel", pointerId: number): void {
+  const event = new Event(type);
+  Object.assign(event, { pointerId, preventDefault: () => {} });
+  globalThis.dispatchEvent(event);
 }
 
 // ---------------------------------------------------------------------------
@@ -762,6 +779,180 @@ Deno.test("draw: 残量表示は、まだ view に返ってきていない送信
       container.text().includes("描ける量の上限に達しました"),
       `上限に達したことが出ていない: ${container.text()}`,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// draw（M-5）: ポインタ捕捉に失敗しても、そのターン描けなくならないこと
+// ---------------------------------------------------------------------------
+
+/** 送られた draw チャンクのストロークIDを、送られた順に並べる（同じIDの連続はまとめる） */
+function sentStrokeIds(sent: unknown[]): number[] {
+  const ids: number[] = [];
+  for (const payload of sent) {
+    const p = payload as { k?: string; s?: number };
+    if (p.k !== "draw" || typeof p.s !== "number") continue;
+    if (ids[ids.length - 1] !== p.s) ids.push(p.s);
+  }
+  return ids;
+}
+
+Deno.test("draw: 捕捉が効かない環境で canvas の外で離しても線が終わり、次の線を引ける", async () => {
+  await withGame("draw", ({ handle, container, sent }) => {
+    const canvas = container.findAll("canvas")[0];
+    // 偽 canvas は setPointerCapture を持たない＝捕捉できない環境そのもの
+    assertEquals(
+      typeof (canvas as unknown as { setPointerCapture?: unknown }).setPointerCapture,
+      "undefined",
+      "この偽 canvas は捕捉できてしまう（再現条件が崩れている）",
+    );
+    canvas.setRect(DRAW_SIZE, DRAW_SIZE);
+    handle.update(drawView({ pointMax: 100 }), null);
+
+    canvas.fire("pointerdown", { clientX: 0, clientY: 10, pointerId: 1 });
+    canvas.fire("pointermove", { clientX: 10, clientY: 10, pointerId: 1 });
+    // canvas の外で離す（canvas には届かず window にだけ届く）
+    firePointerOnWindow("pointerup", 1);
+    assertEquals(countKind(sent, "end"), 1, "線が終わっていない");
+
+    // 2本目が引ける（以前はここで掴んだままのポインタに弾かれ、ターン中ずっと描けなかった）
+    canvas.fire("pointerdown", { clientX: 100, clientY: 10, pointerId: 2 });
+    canvas.fire("pointermove", { clientX: 110, clientY: 10, pointerId: 2 });
+    firePointerOnWindow("pointerup", 2);
+    assertEquals(countKind(sent, "end"), 2, "2本目が引けていない");
+    assertEquals(sentStrokeIds(sent), [0, 1], "2本目が別のストロークになっていない");
+  });
+});
+
+Deno.test("draw: window の pointercancel でも線が終わる（OS に取り上げられた場合）", async () => {
+  await withGame("draw", ({ handle, container, sent }) => {
+    const canvas = container.findAll("canvas")[0];
+    canvas.setRect(DRAW_SIZE, DRAW_SIZE);
+    handle.update(drawView({ pointMax: 100 }), null);
+    canvas.fire("pointerdown", { clientX: 0, clientY: 10, pointerId: 3 });
+    canvas.fire("pointermove", { clientX: 10, clientY: 10, pointerId: 3 });
+    firePointerOnWindow("pointercancel", 3);
+    assertEquals(countKind(sent, "end"), 1, "取り上げられた線が終わっていない");
+    canvas.fire("pointerdown", { clientX: 100, clientY: 10, pointerId: 4 });
+    canvas.fire("pointermove", { clientX: 110, clientY: 10, pointerId: 4 });
+    canvas.fire("pointerup", { clientX: 110, clientY: 10, pointerId: 4 });
+    assertEquals(countKind(sent, "end"), 2, "次の線が引けていない");
+  });
+});
+
+Deno.test("draw: 別のポインタの pointerup では線を終わらせない（異常系）", async () => {
+  await withGame("draw", ({ handle, container, sent }) => {
+    const canvas = container.findAll("canvas")[0];
+    canvas.setRect(DRAW_SIZE, DRAW_SIZE);
+    handle.update(drawView({ pointMax: 100 }), null);
+    canvas.fire("pointerdown", { clientX: 0, clientY: 10, pointerId: 1 });
+    canvas.fire("pointermove", { clientX: 10, clientY: 10, pointerId: 1 });
+    // 別の指（別ポインタ）が離れただけでは終わらない
+    firePointerOnWindow("pointerup", 99);
+    assertEquals(countKind(sent, "end"), 0, "他のポインタで線が終わってしまった");
+    firePointerOnWindow("pointerup", 1);
+    assertEquals(countKind(sent, "end"), 1);
+  });
+});
+
+Deno.test("draw: unmount すると window のポインタ監視も外れる（後始末）", async () => {
+  const dom = installDom();
+  try {
+    const module = await loadGame("draw");
+    const container = new FakeElement("div");
+    const sent: unknown[] = [];
+    const handle = module.mount(container, makeApi(sent)) as GameHandle;
+    const canvas = container.findAll("canvas")[0];
+    canvas.setRect(DRAW_SIZE, DRAW_SIZE);
+    handle.update(drawView({ pointMax: 100 }), null);
+    canvas.fire("pointerdown", { clientX: 0, clientY: 10, pointerId: 1 });
+    canvas.fire("pointermove", { clientX: 10, clientY: 10, pointerId: 1 });
+    handle.unmount();
+    const before = sent.length;
+    firePointerOnWindow("pointerup", 1);
+    assertEquals(sent.length, before, "unmount 後も window のハンドラが生きている");
+  } finally {
+    dom.restore();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// draw（M-7）: 「全部消す」を繰り返してもストロークIDが受理範囲を超えないこと
+// ---------------------------------------------------------------------------
+
+/** サーバーが受理するストロークIDの上限（server/games/draw.ts: DRAW_MAX_STROKES * 4） */
+const MAX_STROKE_ID = 400 * 4;
+
+Deno.test("draw: 全部消すとストロークIDが 0 から振り直される", async () => {
+  await withGame("draw", ({ handle, container, sent }) => {
+    const canvas = container.findAll("canvas")[0];
+    canvas.setRect(DRAW_SIZE, DRAW_SIZE);
+    handle.update(drawView({ pointMax: 1000 }), null);
+    drawStroke(canvas, 3);
+    drawStroke(canvas, 3, 100);
+    assertEquals(sentStrokeIds(sent), [0, 1]);
+
+    buttonByText(container, "全部消す").fire("click");
+    sent.length = 0;
+    // clear の返事（履歴が空の view）が届く前でも、IDは振り直されている
+    drawStroke(canvas, 3, 200);
+    assertEquals(sentStrokeIds(sent), [0], "全部消したのにIDが増え続けている");
+  });
+});
+
+Deno.test("draw: 全部消すを繰り返してもIDが受理範囲（0..1600）を超えない", async () => {
+  await withGame("draw", ({ handle, container, sent }) => {
+    const canvas = container.findAll("canvas")[0];
+    canvas.setRect(DRAW_SIZE, DRAW_SIZE);
+    let rev = 1;
+    for (let round = 0; round < 30; round++) {
+      handle.update(drawView({ rev: rev++, pointCount: 0, pointMax: 1000 }), null);
+      // 1回の「消すまで」に10本引く
+      for (let i = 0; i < 10; i++) drawStroke(canvas, 2, i * 10);
+      buttonByText(container, "全部消す").fire("click");
+    }
+    const ids = sentStrokeIds(sent);
+    assertEquals(Math.max(...ids), 9, "消すたびにIDが持ち越されている");
+    assert(
+      ids.every((id) => id >= 0 && id <= MAX_STROKE_ID),
+      `サーバーが受理しないIDを送っている: ${Math.max(...ids)}`,
+    );
+  });
+});
+
+Deno.test("draw: 引きかけの線がある状態で全部消しても、古いIDのチャンクを後から送らない", async () => {
+  await withGame("draw", ({ handle, container, sent }) => {
+    const canvas = container.findAll("canvas")[0];
+    canvas.setRect(DRAW_SIZE, DRAW_SIZE);
+    handle.update(drawView({ pointMax: 1000 }), null);
+    drawStroke(canvas, 3); // 1本目（s=0）を引き終える
+    // 2本目を引いている途中で「全部消す」
+    canvas.fire("pointerdown", { clientX: 200, clientY: 10, pointerId: 5 });
+    canvas.fire("pointermove", { clientX: 210, clientY: 10, pointerId: 5 });
+    buttonByText(container, "全部消す").fire("click");
+    sent.length = 0;
+    // 離すイベントが遅れて届いても、消えた線のぶんは送らない
+    canvas.fire("pointerup", { clientX: 210, clientY: 10, pointerId: 5 });
+    assertEquals(countKind(sent, "draw"), 0, "消したはずの線のチャンクを送っている");
+    assertEquals(countKind(sent, "end"), 0);
+    // そのあとは 0 番から引き直せる（掴んだままのポインタで詰まない）
+    drawStroke(canvas, 3, 300);
+    assertEquals(sentStrokeIds(sent), [0], "全部消した後に描き始められない");
+  });
+});
+
+Deno.test("draw: ひとつ戻したあとはIDを振り直さない（履歴が残るので増やし続ける）", async () => {
+  await withGame("draw", ({ handle, container, sent }) => {
+    const canvas = container.findAll("canvas")[0];
+    canvas.setRect(DRAW_SIZE, DRAW_SIZE);
+    handle.update(drawView({ pointMax: 1000 }), null);
+    drawStroke(canvas, 3);
+    drawStroke(canvas, 3, 100);
+    buttonByText(container, "ひとつ戻す").fire("click");
+    sent.length = 0;
+    drawStroke(canvas, 3, 200);
+    // undo は履歴を1本残すので、サーバーは「直近より大きいID」しか受理しない
+    assertEquals(sentStrokeIds(sent), [2], "undo でIDを巻き戻してしまっている");
   });
 });
 

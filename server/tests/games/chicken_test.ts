@@ -364,6 +364,46 @@ Deno.test("切断した人は待たない。残り全員が出せばその場で
   assertEquals(state.lastResult?.winnerId, "b");
 });
 
+Deno.test("全員が切断している間は開票しない（0提出のままラウンドを消化しない）", () => {
+  // 監査 M-3: 「待っている人が0人」を「全員出し終わった」と取り違えていた。
+  // 一斉に回線が切れただけで、誰も提出していないラウンドが消化されてしまう
+  let state = start(["a", "b"]);
+  state = step(state, { t: "playerLeft", playerId: "a", now: T0 });
+  assertEquals(state.phase, "submit");
+  // ここで接続者が0人になる。以前はこの瞬間に開票していた
+  state = step(state, { t: "playerLeft", playerId: "b", now: T0 + 1 });
+  assertEquals(state.phase, "submit", "全員切断で開票してしまっている");
+  assertEquals(state.round, 1);
+  assertEquals(state.lastResult, null);
+  // 期限（60秒の猶予ぶん）はそのまま。切断者の猶予が無効にならない
+  assertEquals(state.deadline, start(["a", "b"]).deadline);
+});
+
+Deno.test("全員が切断したあとに1人戻れば、その人の提出で開票できる（詰まない）", () => {
+  let state = start(["a", "b", "c"]);
+  state = submit(state, "a", 30);
+  state = step(state, { t: "playerLeft", playerId: "a", now: T0 });
+  state = step(state, { t: "playerLeft", playerId: "b", now: T0 });
+  state = step(state, { t: "playerLeft", playerId: "c", now: T0 });
+  assertEquals(state.phase, "submit");
+  state = step(state, { t: "playerRejoined", playerId: "b", now: T0 + 100 });
+  // 戻ってきた b が出せば、接続者は全員提出済みなのでその場で公開する
+  state = submit(state, "b", 20, T0 + 200);
+  assertEquals(state.phase, "reveal");
+  assertEquals(state.lastResult?.winnerId, "a");
+});
+
+Deno.test("全員が切断したままでも、期限が来れば開票してラウンドは進む（境界値）", () => {
+  let state = start(["a", "b"]);
+  state = step(state, { t: "playerLeft", playerId: "a", now: T0 });
+  state = step(state, { t: "playerLeft", playerId: "b", now: T0 });
+  assertEquals(state.phase, "submit");
+  // 期限ちょうど（deadline）の timeout で開票する。誰も出していないので勝者なし
+  state = timeout(state);
+  assertEquals(state.phase, "reveal");
+  assertEquals(state.lastResult?.winnerId, null);
+});
+
 Deno.test("再接続すると提出の待ち対象へ戻る", () => {
   let state = start(["a", "b"]);
   state = step(state, { t: "playerLeft", playerId: "b", now: T0 });

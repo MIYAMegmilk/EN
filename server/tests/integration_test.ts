@@ -285,12 +285,16 @@ Deno.test("結合: 3人で雑学クイズを最終結果まで完走する", asy
     await skipTo("prompt");
     const inputMsg = await skipTo("input");
 
-    const prompt = QUIZ.prompts[(round - 1) % QUIZ.prompts.length];
+    // お題そのものもゲーム開始ごとに抽選される（28問から rounds 本を無作為に取る）ので、
+    // 「第Nラウンド＝定義のN番目」とは限らない。実際に表示された本文から定義を引き直す
+    const inputView = inputMsg.view;
+    assert(inputView.phase === "input");
+    const prompt = QUIZ.prompts.find((p) => p.text === inputView.promptText);
+    assertExists(prompt, `表示されたお題が定義に無い: ${inputView.promptText}`);
     assert(prompt.kind === "choice" && prompt.answer !== undefined);
-    // 選択肢はゲーム開始ごとにシャッフルされるので、正解の添字は
+    // 選択肢もゲーム開始ごとにシャッフルされるので、正解の添字は
     // 定義の answer ではなく「実際に表示された並び」から引く
-    assert(inputMsg.view.phase === "input");
-    const options = inputMsg.view.options;
+    const options = inputView.options;
     assertExists(options);
     const correct = options.indexOf(prompt.options[prompt.answer]);
     assert(correct >= 0, "表示された選択肢に正解が含まれていない");

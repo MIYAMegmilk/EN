@@ -55,7 +55,12 @@ const GO_TIMEOUT_MS = 4000;
  * ラウンドを締めるまでの猶予（ms）。
  * 締め切りは各自の api.serverNow() で判定するので、時計のずれと中継の遅れで
  * 「締切ぎわのタップが、送った本人には入って他人には入らない」ズレが起きる。
- * 猶予を挟むぶんだけ、そのズレを吸収する
+ * 猶予を挟むぶんだけ、そのズレを吸収する。
+ *
+ * **猶予を超えて届いたタップも捨てない。** 相手の回線が詰まればこの 800ms は簡単に
+ * 超えるが、そこで無視すると「本人の画面にだけ点が入り、他人の画面には入らない」
+ * 状態が残り、全員が同じ盤を見ている前提が崩れる。締めたあとに届いたぶんは
+ * そのラウンドの加点をやり直して取り込む（scoreRound を参照）
  */
 const SETTLE_GRACE_MS = 800;
 
@@ -103,8 +108,18 @@ export function mount(container, api) {
     scores: new Map(),
     /** 集計済みのラウンド番号 */
     settled: new Set(),
-    /** 集計待ちのラウンド: r -> Map(id -> rt) */
+    /**
+     * ラウンドごとのタップ: r -> Map(id -> rt)。
+     * **締めたあとも捨てない。** 遅れて届いたタップを足して加点をやり直すために持ち続ける
+     * （全5ラウンド × 卓の人数ぶんしか無いので、増え続ける心配は無い）
+     */
     taps: new Map(),
+    /**
+     * ラウンドごとに実際に配った点: r -> Map(id -> gain)。
+     * 加点をやり直すとき、まずここに記録した前回ぶんを戻してから配り直す。
+     * こうしておくと何度やり直しても二重加点にならない
+     */
+    awarded: new Map(),
     /** 自分が押したラウンド */
     myTapped: new Set(),
     /** 直近ラウンドの並び（表示用）[{ id, rt }] */
@@ -153,9 +168,11 @@ export function mount(container, api) {
   pad.addEventListener("pointerdown", onPress);
   pad.addEventListener("keydown", onKey);
 
-  /** 1件の反応時間を積む。同じ人の2件目は無視（最初の1件だけ有効） */
+  /**
+   * 1件の反応時間を積む。同じ人の2件目は無視（最初の1件だけ有効）。
+   * **締めたあとに届いても捨てない。** その場合はそのラウンドの加点をやり直して取り込む
+   */
   function recordTap(r, id, rt) {
-    if (g.settled.has(r)) return;
     let row = g.taps.get(r);
     if (row === undefined) {
       row = new Map();
@@ -163,15 +180,12 @@ export function mount(container, api) {
     }
     if (row.has(id)) return;
     row.set(id, rt);
+    if (g.settled.has(r)) scoreRound(r);
   }
 
-  /** ラウンド r を締めて加点する。1ラウンドにつき1回だけ */
-  function settle(r) {
-    if (g.settled.has(r)) return;
-    g.settled.add(r);
-    const row = g.taps.get(r) ?? new Map();
-    g.taps.delete(r);
-    const rows = [...row.entries()]
+  /** ラウンド r の並び（速い順。フライングは最後尾） */
+  function rankRows(r) {
+    return [...(g.taps.get(r) ?? new Map()).entries()]
       .map(([id, rt]) => ({ id, rt }))
       .sort((a, b) => {
         // フライング（rt < 0）は最後尾へ
@@ -180,15 +194,42 @@ export function mount(container, api) {
         if (b.rt < 0) return -1;
         return a.rt - b.rt;
       });
+  }
+
+  /**
+   * ラウンド r の加点を計算し直す。
+   *
+   * 前回このラウンドで配った点をいったん戻してから、いまの顔ぶれで配り直す。
+   * 遅れて届いたタップが1位を塗り替えても順位表が正しくなり、何度呼んでも二重加点しない
+   */
+  function scoreRound(r) {
+    const previous = g.awarded.get(r);
+    if (previous !== undefined) {
+      for (const [id, gain] of previous) g.scores.set(id, (g.scores.get(id) ?? 0) - gain);
+    }
+    const rows = rankRows(r);
+    const gains = new Map();
     let rank = 0;
     for (const entry of rows) {
       if (entry.rt < 0) continue; // フライングは0点
       const gain = rank === 0 ? 3 : rank === 1 ? 2 : 1;
+      gains.set(entry.id, gain);
       g.scores.set(entry.id, (g.scores.get(entry.id) ?? 0) + gain);
       rank += 1;
     }
-    g.lastRows = rows;
-    g.lastRound = r;
+    g.awarded.set(r, gains);
+    // 「前回の1位」の表示は、いちばん新しく締めたラウンドのもの
+    if (r >= g.lastRound) {
+      g.lastRows = rows;
+      g.lastRound = r;
+    }
+  }
+
+  /** ラウンド r を締めて加点する。締めるのは1回だけ（加点は遅れて届けばやり直す） */
+  function settle(r) {
+    if (g.settled.has(r)) return;
+    g.settled.add(r);
+    scoreRound(r);
   }
 
   /** 順位表を描き直す。名前はユーザー由来なので textContent */

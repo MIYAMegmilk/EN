@@ -23,7 +23,15 @@ import { promptModule, toEngineEvent } from "../../games/prompt.ts";
 const T0 = 1_700_000_000_000;
 const SEED = 20260826;
 
-/** テスト用のゲーム定義を作る（engine_test.ts と同じ形） */
+/**
+ * テスト用のゲーム定義を作る。
+ *
+ * **お題は1件だけにしてある。** startGame は出題の並びを毎回シャッフルするので
+ * （M-1「毎回同じお題」対策）、お題が2件以上あるとモジュール経由と engine 直呼びで
+ * runtimePrompts の並びが食い違い、「写像が一致するか」を見たいこのファイルの
+ * 突き合わせが乱数に左右されてしまう。1件なら並べ替えの結果は必ず1通りに定まる。
+ * 抽選そのものの検証は server/tests/prompt_selection_test.ts が行う。
+ */
 function makeDef(over: Partial<GameDefinition> = {}): GameDefinition {
   return {
     id: "def-1",
@@ -34,7 +42,7 @@ function makeDef(over: Partial<GameDefinition> = {}): GameDefinition {
     inputTimeSec: 30,
     reveal: "anonymous",
     scoring: "vote",
-    prompts: [{ kind: "open", text: "お題1" }, { kind: "open", text: "お題2" }],
+    prompts: [{ kind: "open", text: "お題1" }],
     ...over,
   };
 }

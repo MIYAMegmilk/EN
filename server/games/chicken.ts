@@ -333,16 +333,21 @@ function handleSubmit(
 /**
  * 接続中の参加者が全員提出していれば公開へ進める。まだなら null。
  * 切断中の人を待たないのは、60秒の猶予いっぱい卓が止まるのを避けるため
- * （engine.ts の advanceIfComplete と同じ考え方）
+ * （engine.ts の advanceIfComplete と同じ考え方）。
+ * ただし**接続者が0人のときだけは期限まで待つ**（下のコメントを参照。
+ * wordwolf.ts の advanceIfAllVoted / engine.ts の advanceIfComplete と揃えてある）
  */
 function advanceIfAllSubmitted(
   state: ChickenState,
   now: number,
 ): ModuleResult<ChickenState> | null {
   if (state.phase !== "submit") return null;
-  const waiting = state.order.filter((id) =>
-    state.players[id]?.connected === true && state.submissions[id] === undefined
-  );
+  const connected = state.order.filter((id) => state.players[id]?.connected === true);
+  // 全員が切断している間は「待っている人が0人」になってしまうので、期限まで待つ。
+  // ここで開票すると、通信が一斉に切れただけで 0 提出のままラウンドが消化される
+  // （切断には60秒の猶予がある。§3.2）
+  if (connected.length === 0) return null;
+  const waiting = connected.filter((id) => state.submissions[id] === undefined);
   if (waiting.length > 0) return null;
   return advance(state, now);
 }

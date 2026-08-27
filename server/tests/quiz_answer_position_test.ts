@@ -9,6 +9,11 @@
  * choice のお題は options をシャッフルして answer を新しい位置へ振り直す。
  * ここではその不変条件（正解位置が散る / 正解の中身は変わらない / 原本を壊さない）と、
  * 採点・reveal がシャッフル後の空間で整合していることを検証する。
+ *
+ * なお **runtimePrompts はお題の並び自体もシャッフルされる**（M-1「毎回同じお題」対策）。
+ * そのため「runtimePrompts[i] の原本は prompts[i]」とは限らない。このファイルでは
+ * お題本文（text）で原本を引き直すか、決定的なシャッフルを注入して並びを確定させている。
+ * お題の抽選そのものの検証は server/tests/prompt_selection_test.ts が行う。
  */
 
 import { assert, assertEquals, assertNotEquals } from "@std/assert";
@@ -79,6 +84,16 @@ function asChoice(prompt: Prompt): Extract<Prompt, { kind: "choice" }> {
   return prompt;
 }
 
+/**
+ * 実行時のお題に対応する原本を、お題本文で引き当てる。
+ * お題の並びはシャッフルされるので添字では引けない（KAKUZUKE の本文は全問異なる）
+ */
+function originalOf(prompt: Prompt): Extract<Prompt, { kind: "choice" }> {
+  const found = KAKUZUKE.prompts.find((p) => p.text === prompt.text);
+  assert(found !== undefined, `原本に無いお題: ${prompt.text}`);
+  return asChoice(found);
+}
+
 /** 4択クイズの定義（scoring=correct） */
 function quizDef(over: Partial<GameDefinition> = {}): GameDefinition {
   return {
@@ -129,14 +144,14 @@ Deno.test("格付けクイズ: 何度開始しても正解が index 0 に固定�
 Deno.test("シャッフルしても正解の選択肢テキストは変わらない", () => {
   for (let i = 0; i < 50; i++) {
     const state = start(KAKUZUKE, ["a", "b"]);
-    state.runtimePrompts.forEach((runtime, index) => {
-      const original = asChoice(KAKUZUKE.prompts[index]);
+    state.runtimePrompts.forEach((runtime) => {
+      const original = originalOf(runtime);
       const shuffled = asChoice(runtime);
       assertEquals(typeof shuffled.answer, "number");
       assertEquals(
         shuffled.options[shuffled.answer as number],
         original.options[original.answer as number],
-        `お題${index}の正解テキストが変わっている`,
+        `お題「${runtime.text}」の正解テキストが変わっている`,
       );
     });
   }
@@ -145,8 +160,14 @@ Deno.test("シャッフルしても正解の選択肢テキストは変わらな
 Deno.test("シャッフルしても選択肢の集合は原本と一致する（増減・欠落・重複なし）", () => {
   for (let i = 0; i < 50; i++) {
     const state = start(KAKUZUKE, ["a", "b"]);
-    state.runtimePrompts.forEach((runtime, index) => {
-      const original = asChoice(KAKUZUKE.prompts[index]);
+    // 並びは変わっても、出題されるお題の集合は原本と1対1のまま（間引きも重複も無い）
+    assertEquals(state.runtimePrompts.length, KAKUZUKE.prompts.length);
+    assertEquals(
+      state.runtimePrompts.map((p) => p.text).sort(),
+      KAKUZUKE.prompts.map((p) => p.text).sort(),
+    );
+    state.runtimePrompts.forEach((runtime) => {
+      const original = originalOf(runtime);
       const shuffled = asChoice(runtime);
       assertEquals(shuffled.options.length, original.options.length);
       assertEquals([...shuffled.options].sort(), [...original.options].sort());
@@ -293,12 +314,21 @@ Deno.test("choice 以外（open）のお題はそのまま素通しされる", (
     prompts: [{ kind: "open", text: "お題1" }, { kind: "open", text: "お題2" }],
   });
   const state = start(def, ["a", "b"], reverseShuffle);
-  assertEquals(state.runtimePrompts, def.prompts);
+  // 中身は素通し（選択肢が無いので並べ替える対象も無い）。
+  // ただし **お題の並びはシャッフルされる**ので、逆順シャッフルなら定義の逆順になる
+  assertEquals(state.runtimePrompts, [...def.prompts].reverse());
   assertEquals(state.runtimePrompts.map((p) => p.kind), ["open", "open"]);
 
-  // 出題も定義どおりの順で進む
+  // 出題は runtimePrompts の順に進む（逆順シャッフルなので「お題2」から）
   const promptView = buildPhaseView(skip(state), "a");
   assert(promptView.phase === "prompt");
-  assertEquals(promptView.promptText, "お題1");
+  assertEquals(promptView.promptText, "お題2");
   assertEquals(promptView.options, undefined);
+
+  // 恒等シャッフルなら定義どおりの順で出る（お題の抽選以外は挙動不変）
+  const same = start(def, ["a", "b"], identityShuffle);
+  assertEquals(same.runtimePrompts, def.prompts);
+  const sameView = buildPhaseView(skip(same), "a");
+  assert(sameView.phase === "prompt");
+  assertEquals(sameView.promptText, "お題1");
 });

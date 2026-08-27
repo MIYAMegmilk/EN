@@ -34,6 +34,12 @@
  * 7. **schedule の後始末**: 終了時に `{ t: "schedule", at: null }` を出して予約を解除する。
  *    解除し忘れても timeout で壊れないように reduce を書く（終了後の timeout は無視する）。
  * 8. **score は1ゲーム1回**: 公式スコアへの加算はゲーム終了時にまとめて1回だけ出す。
+ *    そのために **`playerKicked` は終了後にも届く**ことを忘れないこと（reduce 冒頭の
+ *    早期 return は playerKicked だけ通す）。名簿から抜いたあとの minPlayers 判定へ
+ *    そのまま落とすと、終了済みのゲームで `finish()` がもう一度走り、`{ t: "score" }` が
+ *    2回出て `Player.score` が二重に加算される。**minPlayers を見る前に
+ *    `if (!next.running) return moduleOk(next, [{ t: "viewChanged" }]);` を必ず置く**
+ *    （実装済みの4本 chicken / wordwolf / hayaoshi / draw はいずれもこの形）。
  */
 
 import {
@@ -166,6 +172,9 @@ export const templateModule: GameModule<TemplateState> = {
         next.order = next.order.filter((id) => id !== event.playerId);
         delete next.nicknames[event.playerId];
         delete next.scores[event.playerId];
+        // 終了後のキックは名簿を直すだけ（規約8）。ここを抜けて minPlayers 判定へ落とすと
+        // finish() が二度走り、score が二重に加算される
+        if (!next.running) return moduleOk(next, [{ t: "viewChanged" }]);
         // minPlayers を割ったら終了する（§5）
         if (next.order.length < templateModule.meta.minPlayers) {
           return finish(next, "tooFewPlayers");
