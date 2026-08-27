@@ -2120,8 +2120,11 @@
       <span class="brand">宴 -EN-</span>
       <span class="spacer"></span>
       <span id="account-status">確認中…</span>
-      <a id="login-link" href="/login.html" class="hidden">のれんをくぐる</a>
+      <!-- 名札は常に表示するので固定位置に置き、のれんをくぐる／お会計はその後ろで
+           入れ替える（順序を逆にすると、ログイン状態が切り替わるたびに名札の位置が
+           ずれて見える） -->
       <a id="profile-link" href="/profile.html">名札</a>
+      <a id="login-link" href="/login.html" class="hidden">のれんをくぐる</a>
       <!-- お会計はお座敷一覧にいるときだけ出す（卓に着いている間は app.js が畳む） -->
       <button id="logout" type="button" class="hidden">お会計</button>
     </header>
