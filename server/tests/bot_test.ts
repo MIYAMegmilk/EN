@@ -44,6 +44,15 @@ import { createKanaProvider, detectSenryu, SENRYU_TOLERANCE } from "../senryu.ts
 import { NICKNAME_MAX } from "../types.ts";
 
 const T0 = 1_700_000_000_000;
+/**
+ * tick を1回ぶん進めるときの刻み。「沈黙が確定するだけの間隔」という意味で使う。
+ *
+ * SILENCE_MS を直接掛け算に使うと、しきい値を縮めたときにテストの時間軸まで
+ * 一緒に縮んでしまう（30秒 × 20回では BOT_RATE_WINDOW_MS の10分窓も
+ * END_POLL_MIN_AGE_MS の45分も跨げず、なべがそもそも動かない）。
+ * しきい値の境界そのものを見るテストだけが SILENCE_MS を使う。
+ */
+const SILENT_STEP = 3 * 60_000;
 const kana = createKanaProvider();
 
 /** 常に先頭候補を選ぶ乱数。テストを決定的にする */
@@ -92,7 +101,7 @@ function advanceToPoll(overrides: Partial<BotContext> = {}): { state: BotState; 
   let pollId: string | null = null;
   // 話題カード2回 → ゲーム提案3本 → それでも沈黙、の順に進む
   for (let i = 1; i <= 20 && pollId === null; i++) {
-    const result = reduce(state, { t: "tick" }, ctx(T0 + SILENCE_MS * i, overrides));
+    const result = reduce(state, { t: "tick" }, ctx(T0 + SILENT_STEP * i, overrides));
     state = result.state;
     for (const utterance of result.utterances) {
       if (utterance.card?.c === "endPoll") pollId = utterance.card.pollId;
@@ -379,7 +388,7 @@ Deno.test("ぐっちー: 声で会話が続いている部屋を沈黙と判定�
   }
   assertEquals(state.gucchi.silenceStreak, 0);
 
-  // 声も止まって3分経てば、これまでどおり話題カードを投げる
+  // 声も止まって SILENCE_MS 経てば、これまでどおり話題カードを投げる
   const silent = reduce(state, { t: "tick" }, ctx(state.lastActivityAt + SILENCE_MS));
   assertEquals(silent.utterances.length, 1);
   assertEquals(silent.utterances[0].kind, "topic");
@@ -389,9 +398,9 @@ Deno.test("ぐっちー: 声で会話が続いている部屋を沈黙と判定�
 // ぐっちー（場を温めるbot）: 沈黙検知
 // ---------------------------------------------------------------------------
 
-Deno.test("ぐっちー: 沈黙3分で話題カードを投げる", () => {
+Deno.test("ぐっちー: 沈黙30秒で話題カードを投げる", () => {
   const before = reduce(createBotState(T0), { t: "tick" }, ctx(T0 + SILENCE_MS - 1));
-  assertEquals(before.utterances.length, 0, "3分未満では投げない");
+  assertEquals(before.utterances.length, 0, "30秒未満では投げない");
 
   const after = reduce(createBotState(T0), { t: "tick" }, ctx(T0 + SILENCE_MS));
   assertEquals(after.utterances.length, 1);
@@ -456,11 +465,22 @@ Deno.test("なべ: 静かなロビーが5分続くとゲームを提案する", 
     "会話が続いているロビーに割り込んでいる",
   );
 
-  // 会話が一段落したところで提案する（沈黙判定より先に到達させるため
-  // ゲーム操作で沈黙タイマーだけリセットしておく）
-  let quiet = createBotState(T0);
+  // 会話が一段落したところで提案する。
+  //
+  // ここでぐっちーの発話枠を埋めておくのは、SILENCE_MS（30秒）が
+  // LOBBY_QUIET_MS（60秒）より短いため。「直近60秒は無言」を満たす時点で
+  // 沈黙判定（30秒）はとっくに成立していて、ふつうは tickBots が
+  // ぐっちーの話題カードで早期 return してしまい、なべまで届かない。
+  // 枠を使い切ったぐっちーは黙るが silenceStreak は 0 のままなので、
+  // stuck が false のまま lobbyStale だけが真になる経路をここで確かめられる。
+  const base = createBotState(T0);
+  let quiet: BotState = {
+    ...base,
+    gucchi: { ...base.gucchi, utteranceTimes: Array(GUCCHI_RATE_MAX).fill(T0) },
+  };
   quiet = reduce(quiet, { t: "gameAction" }, ctx(T0 + LOBBY_SUGGEST_MS - LOBBY_QUIET_MS)).state;
   const result = reduce(quiet, { t: "tick" }, ctx(T0 + LOBBY_SUGGEST_MS));
+  assertEquals(result.state.gucchi.silenceStreak, 0, "stuck 経由になっている");
   const suggest = result.utterances.find((u) => u.kind === "gameSuggest");
   assert(suggest !== undefined, "会話が一段落したロビーで提案が出ない");
   assert(suggest.card?.c === "gameSuggest");
@@ -471,7 +491,9 @@ Deno.test("なべ: 静かなロビーが5分続くとゲームを提案する", 
 Deno.test("なべ: ゲームを1本遊び終えたら提案の弾を補充する", () => {
   let state = createBotState(T0);
   // 3本すべて提案して弾切れにする
-  for (let i = 1; i <= 8; i++) state = reduce(state, { t: "tick" }, ctx(T0 + SILENCE_MS * i)).state;
+  for (let i = 1; i <= 8; i++) {
+    state = reduce(state, { t: "tick" }, ctx(T0 + SILENT_STEP * i)).state;
+  }
   assertEquals(state.nabe.suggestedGameIds.length, 3);
   // ゲームを始めて終える
   state = reduce(state, { t: "phaseChanged", phase: "input" }, ctx(T0 + 60 * 60_000)).state;
@@ -487,7 +509,7 @@ Deno.test("なべ: 同じゲームを二度提案しない", () => {
   let state = createBotState(T0);
   const suggested: string[] = [];
   for (let i = 1; i <= 8; i++) {
-    const result = reduce(state, { t: "tick" }, ctx(T0 + SILENCE_MS * i));
+    const result = reduce(state, { t: "tick" }, ctx(T0 + SILENT_STEP * i));
     state = result.state;
     for (const utterance of result.utterances) {
       if (utterance.card?.c === "gameSuggest") suggested.push(utterance.card.gameId);
@@ -822,7 +844,7 @@ Deno.test("BOTS: 4体の表示名と役割が定義されている", () => {
 // ---------------------------------------------------------------------------
 
 Deno.test("§3.10 の数値が仕様どおりであること", () => {
-  assertEquals(SILENCE_MS, 3 * 60_000, "沈黙検知は3分");
+  assertEquals(SILENCE_MS, 30_000, "沈黙検知は30秒");
   assertEquals(SILENCE_MAX_STREAK, 2, "話題カードの連続投下は2回まで");
   assertEquals(GUCCHI_RATE_MAX, 5, "ぐっちーは10分あたり5発話まで");
   assertEquals(NABE_RATE_MAX, 2, "なべは10分あたり2発話まで");
@@ -859,7 +881,7 @@ Deno.test("回帰: 全員切断中のルームでは何も喋らない", () => {
     const result = reduce(
       state,
       { t: "tick" },
-      ctx(T0 + SILENCE_MS * i, { connectedPlayerIds: [] }),
+      ctx(T0 + SILENT_STEP * i, { connectedPlayerIds: [] }),
     );
     state = result.state;
     for (const utterance of result.utterances) spoken.push(utterance.kind);
@@ -871,7 +893,7 @@ Deno.test("回帰: ゲーム中はロビー起点のゲーム提案が発火し�
   let state = reduce(createBotState(T0), { t: "phaseChanged", phase: "input" }, ctx(T0)).state;
   assertEquals(state.lobbySince, null);
   for (let i = 1; i <= 8; i++) {
-    const result = reduce(state, { t: "tick" }, ctx(T0 + SILENCE_MS * i));
+    const result = reduce(state, { t: "tick" }, ctx(T0 + SILENT_STEP * i));
     state = result.state;
     assertEquals(state.lobbySince, null, "ゲーム中に lobbySince が復活している");
   }
@@ -1108,9 +1130,9 @@ Deno.test("シナリオ: 入室 → 川柳 → 沈黙2回 → ゲーム提案ま
         source: "chat",
       },
     },
-    { at: T0 + 10_000 + SILENCE_MS, event: { t: "tick" } },
-    { at: T0 + 10_000 + SILENCE_MS * 2, event: { t: "tick" } },
-    { at: T0 + 10_000 + SILENCE_MS * 3, event: { t: "tick" } },
+    { at: T0 + 10_000 + SILENT_STEP, event: { t: "tick" } },
+    { at: T0 + 10_000 + SILENT_STEP * 2, event: { t: "tick" } },
+    { at: T0 + 10_000 + SILENT_STEP * 3, event: { t: "tick" } },
   ]);
   const kinds = all.map((u) => `${u.botId}:${u.kind}`);
   assertEquals(kinds, [
@@ -1131,11 +1153,12 @@ Deno.test("gameAction: 沈黙タイマーをリセットする", () => {
   let state = createBotState(T0);
   state = reduce(state, { t: "tick" }, ctx(T0 + SILENCE_MS)).state;
   assertEquals(state.gucchi.silenceStreak, 1);
-  const acted = reduce(state, { t: "gameAction" }, ctx(T0 + SILENCE_MS + 30_000));
+  const at = T0 + SILENCE_MS + 10_000;
+  const acted = reduce(state, { t: "gameAction" }, ctx(at));
   assertEquals(acted.state.gucchi.silenceStreak, 0);
-  assertEquals(acted.state.lastActivityAt, T0 + SILENCE_MS + 30_000);
+  assertEquals(acted.state.lastActivityAt, at);
   // 直後は沈黙判定にならない
-  assertEquals(reduce(acted.state, { t: "tick" }, ctx(T0 + SILENCE_MS + 60_000)).utterances, []);
+  assertEquals(reduce(acted.state, { t: "tick" }, ctx(at + SILENCE_MS - 1)).utterances, []);
 });
 
 Deno.test("finalResult: 最終結果には専用の文面で反応する", () => {
@@ -1328,7 +1351,9 @@ Deno.test("回帰: OFF 中でも過半数の賛成を握りつぶさない", () 
 
 Deno.test("回帰: 遊び終えても直前のゲームはすぐ再提案しない", () => {
   let state = createBotState(T0);
-  for (let i = 1; i <= 8; i++) state = reduce(state, { t: "tick" }, ctx(T0 + SILENCE_MS * i)).state;
+  for (let i = 1; i <= 8; i++) {
+    state = reduce(state, { t: "tick" }, ctx(T0 + SILENT_STEP * i)).state;
+  }
   const last = state.nabe.suggestedGameIds.at(-1);
   assert(last !== undefined);
   state = reduce(state, { t: "phaseChanged", phase: "input" }, ctx(T0 + 60 * 60_000)).state;
@@ -1351,7 +1376,9 @@ Deno.test("回帰: 誰も反応しない部屋ではなべがゲーム提案を�
 Deno.test("回帰: 人が反応していればゲーム提案の候補は戻る", () => {
   let state = createBotState(T0);
   // 3本出し切る
-  for (let i = 1; i <= 8; i++) state = reduce(state, { t: "tick" }, ctx(T0 + SILENCE_MS * i)).state;
+  for (let i = 1; i <= 8; i++) {
+    state = reduce(state, { t: "tick" }, ctx(T0 + SILENT_STEP * i)).state;
+  }
   assertEquals(state.nabe.suggestedGameIds.length, 3);
   // 誰かが喋る
   const at = T0 + 40 * 60_000;
