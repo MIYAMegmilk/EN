@@ -13,8 +13,10 @@
  *   - 「bot はルームに1体まで」→ 役割の違う4体にする
  *     （しゅんぴ=命名 / せり=川柳 / ぐっちー=場を温める / なべ=進行を仕切る）
  *   - 「10分あたり最大5発話」→ 発話枠は bot ごとに独立して数える。
- *     ぐっちー 10分5発話・なべ 10分2発話。しゅんぴとせりは枠を持たない
- *     （どちらも人の行動に1対1で応じる発話で、自発的に喋らないため）
+ *     ぐっちー 10分5発話・なべ 10分2発話。しゅんぴは枠を持たない
+ *     （入室1回につき1発話で、入室そのものが上限になっているため）。
+ *     せりは「枠」ではなく連投の抑制を持つ（SERI_CHAT_COOLDOWN_MS /
+ *     SERI_BURST_MAX。理由はそれぞれの定数のコメントを参照）
  *   - 「チャット・ゲーム操作が3分ない場合に沈黙」→ VC の文字起こしも活動に数える
  *   - 沈黙とみなすまでの時間を3分→30秒に詰める（SILENCE_MS）。3分の間は
  *     呑み会には長すぎて、場が冷えきってから話題が飛んでくる
@@ -57,7 +59,7 @@ import {
 import { type HobbyTagId, hobbyTagLabel } from "./hobby_tags.ts";
 import { SENRYU_PATTERN, type SenryuMatch } from "./senryu.ts";
 import type { BotCard, BotKind, ErrorCode, Phase } from "./types.ts";
-import { NICKNAME_MAX } from "./types.ts";
+import { NICKNAME_MAX, ROOM_CAPACITY } from "./types.ts";
 
 export { BOT_IDS, type BotId, BOTS } from "./bot_templates.ts";
 
@@ -127,6 +129,38 @@ export const SENRYU_MEMORY = 5;
  * 偶然の 5-7-5 を全部拾うと、せりが会話に割り込み続けることになる。
  */
 export const SERI_VOICE_COOLDOWN_MS = 90_000;
+/**
+ * せりが「同じ人の」チャットの句に続けて反応するまで空ける間隔（ミリ秒）。
+ *
+ * せりに枠（10分あたりN発話）を持たせなかったのは、枠だと**人数が増えるほど
+ * 無視される人が出る**ためである。10人が1句ずつ詠んだだけで6人目以降が
+ * 数分間まるごと黙殺されるのは、洪水対策ではなく機能の欠落になる。
+ *
+ * いっぽう洪水は「1人が短時間に何十回も投稿する」形でしか作れない（実測: 24発言
+ * →24返事、抑制ゼロ）。そこで人ごとに間隔をあけることにした。同じ人は
+ * この間隔に1回しか反応してもらえず、ほかの人はいっさい影響を受けない。
+ *
+ * 「詠んだのにせりが気づかない」を残さないための性質:
+ *   - 抑制した句は recentYomi に覚えない。間隔が明けてから同じ句を出し直せば
+ *     せりはちゃんと反応する（黙殺ではなく「あとで拾える」）
+ *   - 間隔は15秒。最長でも15秒待てば次の句には必ず反応する
+ */
+export const SERI_CHAT_COOLDOWN_MS = 15_000;
+/** せり全体の連投を数える窓（ミリ秒）。チャットと声の両方を数える */
+export const SERI_BURST_WINDOW_MS = 60_000;
+/**
+ * 窓のなかで許すせりの発話数（ルーム全体）。
+ *
+ * 人ごとの間隔（SERI_CHAT_COOLDOWN_MS）だけでは、人数ぶんの掛け算が残る。
+ * ルーム定員に合わせてあるのは「その場の全員が一斉に1句ずつ詠んでも、
+ * 誰ひとり黙殺されない」を成り立たせるためである。それを超える連投
+ * （＝1人が何度も投げている状態）だけが頭打ちになる。
+ *
+ * 窓を10分ではなく1分にしてあるのは、**せりが長時間黙り込まないようにする**ため。
+ * 10分窓で使い切ると、そのあと最大10分は誰が詠んでも無反応になる。
+ * 1分窓なら、抑制がかかっても最長1分で戻る。
+ */
+export const SERI_BURST_MAX = ROOM_CAPACITY;
 /** チャットに引用する1句の最大文字数。ユーザー入力を流し戻すための保険（§3.8） */
 export const QUOTE_LINE_MAX = 40;
 
@@ -167,8 +201,8 @@ export type BotUtterance = {
  * なべ側は optional を持たないため、この表は実質ぐっちー用である。
  */
 const PRIORITY: Readonly<Record<BotKind, "essential" | "normal" | "optional">> = {
-  naming: "essential", // しゅんぴの発話。枠の対象外
-  senryu: "essential", // せりの発話。枠の対象外
+  naming: "essential", // しゅんぴの発話。ぐっちー・なべの枠の対象外
+  senryu: "essential", // せりの発話。ぐっちー・なべの枠の対象外（せり自身の抑制で押さえる）
   greeting: "normal", // 入室者を無視するのは場回しとして最悪なので枠を使ってでも出す
   topic: "normal",
   gameSuggest: "normal", // ここから下の4種類はなべの発話
@@ -228,6 +262,19 @@ export type BotState = {
      * チャットの句では進めない（打った句と喋った句で別枠に数える）。
      */
     lastVoiceAt: number | null;
+    /**
+     * playerId → 最後にその人の「チャットの句」に反応した時刻。
+     * SERI_CHAT_COOLDOWN_MS の起点で、人ごとに独立している。
+     *
+     * 退室者のIDが残り続けないよう、書き込むたびに窓から外れた分を捨てる
+     * （ルームは立ちっぱなしになりうるので、ここが伸び続けると素の漏れになる）。
+     */
+    lastChatAt: Record<string, number>;
+    /**
+     * 直近の発話時刻（SERI_BURST_WINDOW_MS の窓）。チャットと声の両方を数える。
+     * ぐっちー・なべの utteranceTimes とは別枠で、窓の長さも違う。
+     */
+    utteranceTimes: number[];
   };
   /** ぐっちー（場を温める）の状態 */
   gucchi: {
@@ -269,7 +316,7 @@ export function createBotState(now: number): BotState {
     lastHumanAt: now,
     lastActivityAt: now,
     lobbySince: now,
-    seri: { recentYomi: [], lastVoiceAt: null },
+    seri: { recentYomi: [], lastVoiceAt: null, lastChatAt: {}, utteranceTimes: [] },
     gucchi: {
       utteranceTimes: [],
       silenceStreak: 0,
@@ -379,9 +426,13 @@ export type BotResult = {
 // ---------------------------------------------------------------------------
 
 /**
- * 発話枠を持つ bot。
- * しゅんぴ（命名）とせり（川柳）は人の行動に1対1で応じるだけで自発的に
- * 喋らないので、枠を持たない（§3.10 の頻度上限は自発的な発話への制限）。
+ * ここでいう「発話枠」（10分の窓でN発話）を持つ bot。
+ *
+ * しゅんぴ（命名）は入室1回につき1発話なので枠を持たない。
+ * せり（川柳）も枠は持たないが、無制限ではない。人ごとの間隔
+ * （SERI_CHAT_COOLDOWN_MS）とルーム全体の連投上限（SERI_BURST_MAX）で押さえる。
+ * 枠にしなかったのは、枠だと人数が増えるほど「詠んだのに黙殺される人」が
+ * 出るためである（SERI_CHAT_COOLDOWN_MS のコメント参照）。
  */
 type RateLimitedBotId = "gucchi" | "nabe";
 
@@ -535,6 +586,26 @@ function clamp(text: string, max: number): string {
   return chars.length <= max ? text : `${chars.slice(0, max - 1).join("")}…`;
 }
 
+/** 窓から外れたせりの発話時刻を捨てる */
+function recentSeriTimes(times: readonly number[], now: number): number[] {
+  return times.filter((at) => now - at < SERI_BURST_WINDOW_MS);
+}
+
+/**
+ * 間隔の判定に使わなくなった playerId を捨てる。
+ * ルームは何時間も立ちっぱなしになりうるので、退室者のIDを溜め続けない。
+ */
+function prunedChatAt(
+  lastChatAt: Readonly<Record<string, number>>,
+  now: number,
+): Record<string, number> {
+  const kept: Record<string, number> = {};
+  for (const [playerId, at] of Object.entries(lastChatAt)) {
+    if (now - at < SERI_CHAT_COOLDOWN_MS) kept[playerId] = at;
+  }
+  return kept;
+}
+
 /**
  * 川柳を拾ったときの発話を作る。拾わないときは null。
  *
@@ -546,8 +617,13 @@ function clamp(text: string, max: number): string {
  *   2. 会話は止まらない。1件ずつは正しくても、拾うたびに割り込まれると
  *      場が壊れる。SERI_VOICE_COOLDOWN_MS のあいだは声の句を見送る。
  *
+ * チャットも無制限ではない。1人が短時間に何十回も投稿すると、せりがそのまま
+ * 同じ回数だけ返してチャットが流れ切る（実測: 24発言→24返事）。人ごとの間隔
+ * （SERI_CHAT_COOLDOWN_MS）とルーム全体の連投上限（SERI_BURST_MAX）で頭を押さえる。
+ *
  * クールダウンは川柳判定より先に見る。判定（形態素解析）が解析コストの大半で、
- * 文字起こしは1人あたり数秒に1件のペースで流れ込むためである。
+ * 文字起こしは1人あたり数秒に1件のペースで流れ込むためである。連投を仕掛けられた
+ * ときも、2件目以降は判定にすら入らない（server/senryu.ts の探索上限と対になる）。
  */
 function senryuUtterance(
   state: BotState,
@@ -555,12 +631,20 @@ function senryuUtterance(
   ctx: BotContext,
 ): { utterance: BotUtterance; yomi: string; voice: boolean } | null {
   if (!state.enabled.seri) return null;
+  // ルーム全体の連投上限。チャット・声のどちらの句もここで頭打ちになる
+  if (recentSeriTimes(state.seri.utteranceTimes, ctx.now).length >= SERI_BURST_MAX) return null;
   const voice = event.source === "voice";
   if (
     voice && state.seri.lastVoiceAt !== null &&
     ctx.now - state.seri.lastVoiceAt < SERI_VOICE_COOLDOWN_MS
   ) {
     return null;
+  }
+  if (!voice) {
+    const last = state.seri.lastChatAt[event.playerId];
+    // 同じ人のチャットの句には、間隔をあけてからでないと反応しない。
+    // ほかの人はこの制限をいっさい受けない（詠んだ人が黙殺されないため）
+    if (last !== undefined && ctx.now - last < SERI_CHAT_COOLDOWN_MS) return null;
   }
   const match = ctx.senryu(event.text);
   if (match === null) return null;
@@ -948,6 +1032,15 @@ export function reduce(state: BotState, event: BotEvent, ctx: BotContext): BotRe
       // 声のクールダウンは「声で拾えたとき」だけ進める。チャットの句や
       // 見送った声で進めると、実際には黙っているのに次の句まで待たせてしまう
       const lastVoiceAt = senryu !== null && senryu.voice ? ctx.now : state.seri.lastVoiceAt;
+      // 人ごとの間隔も「チャットで拾えたとき」だけ進める。見送った発言で進めると
+      // 連投しているあいだ間隔が延び続け、いつまでも反応しなくなる
+      const lastChatAt = senryu !== null && !senryu.voice
+        ? { ...prunedChatAt(state.seri.lastChatAt, ctx.now), [event.playerId]: ctx.now }
+        : state.seri.lastChatAt;
+      // 連投の窓はチャット・声のどちらでも進める（せり全体の上限なので）
+      const utteranceTimes = senryu === null
+        ? state.seri.utteranceTimes
+        : [...recentSeriTimes(state.seri.utteranceTimes, ctx.now), ctx.now];
       const next: BotState = {
         ...state,
         // 文字起こしの発言も人間の活動として数える。ここが voice 対応の要で、
@@ -955,10 +1048,10 @@ export function reduce(state: BotState, event: BotEvent, ctx: BotContext): BotRe
         // 誤判定し、話題カード→ゲーム提案→お開きの打診まで進んでしまう（§3.10）
         lastActivityAt: ctx.now,
         lastHumanAt: ctx.now,
-        seri: { recentYomi, lastVoiceAt },
+        seri: { recentYomi, lastVoiceAt, lastChatAt, utteranceTimes },
         gucchi: { ...state.gucchi, silenceStreak: 0 },
       };
-      // せりは発話枠を消費しない（回数無制限）
+      // せりはぐっちー・なべの発話枠を消費しない（せり自身の抑制だけで頭を押さえる）
       return { state: next, utterances: senryu === null ? [] : [senryu.utterance], effects: [] };
     }
 

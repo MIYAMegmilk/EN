@@ -14,8 +14,11 @@ import {
   detectSenryu,
   detectSenryuAny,
   findSenryu,
+  findSenryuWithStats,
   normalizeForSenryu,
   SENRYU_LINE_MAX,
+  SENRYU_SEARCH_MAX_STEPS,
+  SENRYU_TEXT_MAX,
   SENRYU_TOLERANCE,
   toKatakana,
   type YomiProvider,
@@ -441,6 +444,126 @@ Deno.test("回帰: 同じ音の繰り返しだけの文字列は川柳にしな�
   }
   // 音の種類が足りていれば拾う
   assert(detectSenryu("ふるいけやかわずとびこむみずのおと", kana) !== null);
+});
+
+// ---------------------------------------------------------------------------
+// 探索の上限（H-9: 1発言の判定が単一スレッドを占有できる問題）
+// ---------------------------------------------------------------------------
+
+/**
+ * 「あ・あ・…」の敵対的トークン列。hostileTokens と同じ形だが、
+ * separator の参照回数ではなく findSenryuWithStats の steps で測る。
+ */
+function hostilePairs(pairs: number): YomiToken[] {
+  const tokens: YomiToken[] = [];
+  for (let i = 0; i < pairs; i++) {
+    tokens.push({ surface: "あ", yomi: "ア" });
+    tokens.push({ surface: "・", yomi: null, separator: true });
+  }
+  return tokens;
+}
+
+/** かなプロバイダでトークン化して、許容幅を明示して探索する */
+function searchStats(text: string, tolerance: number) {
+  const normalized = normalizeForSenryu(text);
+  assert(normalized !== null, `判定対象外になった: ${text}`);
+  const tokens = kana.analyze(normalized);
+  assert(tokens.length > 0, `トークン化できなかった: ${text}`);
+  return findSenryuWithStats(tokens, { tolerance });
+}
+
+Deno.test("探索の上限: 実在の句は上限に遠く届かない（精度の番人）", () => {
+  // 許容幅つきの探索は「候補の3重ループ」なので、上限を入れると精度を削りかねない。
+  // 実在の句が使う検査回数は1桁〜十数回で、上限（1,000）とは2桁ぶんの開きがある。
+  const cases: Array<[string, [string, string, string]]> = [
+    ["ふるいけやかわずとびこむみずのおと", ["ふるいけや", "かわずとびこむ", "みずのおと"]],
+    ["せみのこえいわにしみいるしずけさや", ["せみのこえ", "いわにしみいる", "しずけさや"]],
+    ["あいうえおかきくけこさしすせそた", ["あいうえお", "かきくけこさし", "すせそた"]],
+  ];
+  for (const [text, lines] of cases) {
+    const { match, stats } = searchStats(text, SENRYU_TOLERANCE);
+    assert(match !== null, `拾えなくなった: ${text}`);
+    assertEquals(match.lines, lines, `切り方が変わった: ${text}`);
+    assertEquals(stats.truncated, false, `実在の句で打ち切られた: ${text}`);
+    assert(
+      stats.steps <= 50,
+      `実在の句が ${stats.steps} 回も検査している（上限 ${SENRYU_SEARCH_MAX_STEPS} に近づきすぎ）`,
+    );
+  }
+});
+
+Deno.test("探索の上限: 境界値（上限に届かない入力は打ち切らない / 超える入力は打ち切る）", () => {
+  // 40対（80トークン）… 上限内。最後まで探索しきる
+  const under = findSenryuWithStats(hostilePairs(40), { tolerance: 1 });
+  assertEquals(under.stats.truncated, false, "上限に届いていないのに打ち切った");
+  assert(
+    under.stats.steps < SENRYU_SEARCH_MAX_STEPS,
+    `上限内のはずが ${under.stats.steps} 回検査している`,
+  );
+  // 60対（120トークン）… 上限を超える。打ち切って best-so-far を返す
+  const over = findSenryuWithStats(hostilePairs(60), { tolerance: 1 });
+  assertEquals(over.stats.truncated, true, "上限を超えたのに打ち切っていない");
+  assertEquals(
+    over.stats.steps,
+    SENRYU_SEARCH_MAX_STEPS,
+    "打ち切ったのに上限ちょうどで止まっていない",
+  );
+});
+
+Deno.test("探索の上限: 上限いっぱいの敵対的入力でも検査回数は上限を超えない", () => {
+  // SENRYU_TEXT_MAX（200字）ちょうどの、5-7-5 の切れ目を大量に含む入力を並べる。
+  // どれも検査回数が上限で頭打ちになり、3重ループが伸びきらないこと。
+  for (
+    const text of [
+      "あ・".repeat(100),
+      "あ、い、う、え、お、".repeat(20),
+      "あいう".repeat(66) + "あい",
+      "あいうえおかきくけこさしすせそたちつてと".repeat(10),
+      "あ い ".repeat(50),
+    ]
+  ) {
+    assertEquals(text.length, SENRYU_TEXT_MAX, `入力が200字ちょうどでない: ${text.length}字`);
+    const { stats } = searchStats(text, 1);
+    assert(
+      stats.steps <= SENRYU_SEARCH_MAX_STEPS,
+      `検査回数が上限を超えた: ${stats.steps} > ${SENRYU_SEARCH_MAX_STEPS}`,
+    );
+  }
+});
+
+Deno.test("探索の上限: 打ち切っても、先頭にある句はこれまでどおり拾う", () => {
+  // 探索は発言の先頭から進むので、句のうしろにゴミを詰めても best は先に立つ。
+  // 「上限を入れたせいで句を落とす」ことが起きていないことの番人。
+  const text = "ふるいけやかわずとびこむみずのおと" + "あ・".repeat(91);
+  assertEquals(text.length, 199);
+  const { match, stats } = searchStats(text, SENRYU_TOLERANCE);
+  assertEquals(stats.truncated, true, "この入力は打ち切られる前提のテスト");
+  assert(match !== null, "打ち切りのせいで句を落とした");
+  assertEquals(match.lines, ["ふるいけや", "かわずとびこむ", "みずのおと"]);
+});
+
+Deno.test("探索の上限: 異常な入力でも落ちない（空・記号だけ・長さの境界）", () => {
+  // 空文字・空白だけ → 前処理の時点で対象外
+  for (const text of ["", "   ", "\n\n"]) {
+    assertEquals(normalizeForSenryu(text), null, `対象外にならなかった: ${JSON.stringify(text)}`);
+    assertEquals(detectSenryu(text, kana, { tolerance: SENRYU_TOLERANCE }), null);
+  }
+  // 記号だけ → トークンは全部 separator。モーラが1つも無いので拾わない
+  for (const text of ["。。。。。", "・・・・・・・・・・", "!?!?!?", "、。・「」（）"]) {
+    assertEquals(
+      detectSenryu(text, kana, { tolerance: SENRYU_TOLERANCE }),
+      null,
+      `誤検出: ${text}`,
+    );
+  }
+  // 長さの境界: 200字ちょうどは判定する / 201字は前処理で捨てる
+  const at = "あ".repeat(SENRYU_TEXT_MAX);
+  const over = "あ".repeat(SENRYU_TEXT_MAX + 1);
+  assert(normalizeForSenryu(at) !== null, "200字ちょうどが対象外になった");
+  assertEquals(normalizeForSenryu(over), null, "201字が対象になっている");
+  assertEquals(detectSenryu(over, kana, { tolerance: SENRYU_TOLERANCE }), null);
+  // トークンが空でも例外にならない
+  assertEquals(findSenryuWithStats([], { tolerance: 1 }).match, null);
 });
 
 // ---------------------------------------------------------------------------

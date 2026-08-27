@@ -23,6 +23,9 @@ import {
   QUOTE_LINE_MAX,
   reduce,
   SENRYU_MEMORY,
+  SERI_BURST_MAX,
+  SERI_BURST_WINDOW_MS,
+  SERI_CHAT_COOLDOWN_MS,
   SERI_VOICE_COOLDOWN_MS,
   SILENCE_MAX_STREAK,
   SILENCE_MS,
@@ -335,7 +338,11 @@ Deno.test("せり: 字余り・字足らずは別の文面で反応する", () =
 });
 
 Deno.test("せり: 発話回数の上限に縛られない（10分5発話を超えて反応する）", () => {
-  // 末尾1文字だけ違う句を並べ、すべて別の川柳として扱わせる
+  // 末尾1文字だけ違う句を並べ、すべて別の川柳として扱わせる。
+  // 同じ人が続けて詠むので SERI_CHAT_COOLDOWN_MS ぶんの間隔をあける
+  // （見たいのは「せりがぐっちーの10分5発話に縛られないこと」なので、
+  //  人ごとの間隔のほうに引っかからない置き方にする）。
+  // 12発話 × 15秒 = 180秒。BOT_RATE_WINDOW_MS（10分）の窓には収まっている
   const tails = [..."あいうえおかきくけこさし"];
   let state = createBotState(T0);
   let count = 0;
@@ -349,7 +356,7 @@ Deno.test("せり: 発話回数の上限に縛られない（10分5発話を超�
         text: `あいうえおかきくけこさしすせそた${tail}`,
         source: "chat",
       },
-      ctx(T0 + i * 1_000),
+      ctx(T0 + i * SERI_CHAT_COOLDOWN_MS),
     );
     state = result.state;
     count += result.utterances.filter((u) => u.botId === "seri").length;
@@ -357,6 +364,204 @@ Deno.test("せり: 発話回数の上限に縛られない（10分5発話を超�
   assertEquals(count, tails.length);
   assert(count > GUCCHI_RATE_MAX, "ぐっちーの発話枠を超えて反応できていない");
   assertEquals(state.gucchi.utteranceTimes.length, 0, "せりはぐっちーの発話枠を消費しない");
+});
+
+// ---------------------------------------------------------------------------
+// せり: 連投の抑制（H-8: 1人でチャットを洪水にできる問題）
+// ---------------------------------------------------------------------------
+
+/** 全部読みの違う川柳を n 句つくる。recentYomi の重複よけに引っかからないようにする */
+function distinctSenryu(n: number): string[] {
+  const table = [
+    ..."あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわ",
+  ];
+  const out: string[] = [];
+  for (let i = 0; i < n; i++) {
+    let line = "";
+    for (let j = 0; j < 17; j++) line += table[(i * 7 + j * 3) % table.length];
+    out.push(line);
+  }
+  return out;
+}
+
+/** 同じ人が interval ミリ秒おきに texts を投稿したときの、せりの返事の数 */
+function floodByOne(
+  texts: readonly string[],
+  interval: number,
+  overrides: Partial<BotContext> = {},
+): { replies: number; state: BotState } {
+  let state = createBotState(T0);
+  let replies = 0;
+  for (const [i, text] of texts.entries()) {
+    const result = reduce(
+      state,
+      { t: "message", playerId: "p1", nickname: "たろう", text, source: "chat" },
+      ctx(T0 + i * interval, overrides),
+    );
+    state = result.state;
+    replies += result.utterances.filter((u) => u.botId === "seri").length;
+  }
+  return { replies, state };
+}
+
+Deno.test("せり: 1人の連投は抑制する（24発言 → 2返事）", () => {
+  // 修正前は 24発言 → 24返事（抑制ゼロ）で、これだけでチャット履歴100件を
+  // 20秒ほどで流し切れた。1秒間隔の24発言は23秒ぶんなので、
+  // SERI_CHAT_COOLDOWN_MS（15秒）では T0 と T0+15秒 の2回しか通らない。
+  const texts = distinctSenryu(24);
+  assertEquals(texts.length, 24);
+  const { replies } = floodByOne(texts, 1_000);
+  assertEquals(replies, 2, "1人の連投が抑制されていない");
+});
+
+Deno.test("せり: 連投を抑制しても、判定そのものを走らせない（H-9 と対）", () => {
+  // 抑制は川柳判定（形態素解析）より先に見る。見送る発言で重い経路に
+  // 入らないこと。修正前は24回とも判定を呼んでいた。
+  let calls = 0;
+  const texts = distinctSenryu(24);
+  floodByOne(texts, 1_000, {
+    senryu: (text) => {
+      calls++;
+      return detectSenryu(text, kana, { tolerance: SENRYU_TOLERANCE });
+    },
+  });
+  assertEquals(calls, 2, `抑制中も判定を ${calls} 回呼んでいる`);
+});
+
+Deno.test("せり: 抑制は人ごと。ほかの人の句は黙殺しない（過剰抑制の番人）", () => {
+  // p1 が連投しているあいだに p2 が1句詠む。p2 は必ず拾われること。
+  const texts = distinctSenryu(6);
+  let state = createBotState(T0);
+  const byPlayer: Record<string, number> = { p1: 0, p2: 0 };
+  for (const [i, text] of texts.entries()) {
+    // p1 は毎秒連投、p2 は3秒目に1回だけ
+    const playerId = i === 3 ? "p2" : "p1";
+    const result = reduce(
+      state,
+      { t: "message", playerId, nickname: playerId, text, source: "chat" },
+      ctx(T0 + i * 1_000),
+    );
+    state = result.state;
+    byPlayer[playerId] += result.utterances.filter((u) => u.botId === "seri").length;
+  }
+  assertEquals(byPlayer.p2, 1, "連投していない人の句まで黙殺している");
+  assertEquals(byPlayer.p1, 1, "連投した人が抑制されていない");
+});
+
+Deno.test("せり: 通常の頻度なら今までどおり反応する（過剰抑制の番人）", () => {
+  // 同じ人でも、間隔をあけて詠めば毎回拾う。
+  // ぐっちーの枠（10分5発話）と違い、6句目以降も止まらないこと。
+  const texts = distinctSenryu(8);
+  const { replies } = floodByOne(texts, SERI_CHAT_COOLDOWN_MS * 2);
+  assertEquals(replies, 8, "通常の頻度で反応しなくなっている");
+  assert(replies > GUCCHI_RATE_MAX, "せりがぐっちーの発話枠に縛られてしまっている");
+});
+
+Deno.test("せり: 人ごとの間隔の境界値（直前は見送り、ちょうどなら拾う）", () => {
+  const [a, b, c] = distinctSenryu(3);
+  const first = reduce(
+    createBotState(T0),
+    { t: "message", playerId: "p1", nickname: "たろう", text: a, source: "chat" },
+    ctx(T0),
+  );
+  assertEquals(first.utterances.length, 1);
+  const justBefore = reduce(
+    first.state,
+    { t: "message", playerId: "p1", nickname: "たろう", text: b, source: "chat" },
+    ctx(T0 + SERI_CHAT_COOLDOWN_MS - 1),
+  );
+  assertEquals(justBefore.utterances.length, 0, "間隔が明ける1ms前なのに反応した");
+  const justAfter = reduce(
+    justBefore.state,
+    { t: "message", playerId: "p1", nickname: "たろう", text: c, source: "chat" },
+    ctx(T0 + SERI_CHAT_COOLDOWN_MS),
+  );
+  assertEquals(justAfter.utterances.length, 1, "間隔ちょうどで反応していない");
+});
+
+Deno.test("せり: 見送った句は覚えないので、間隔が明けてから出し直せば拾う", () => {
+  // 「詠んだのにせりが気づかない」を残さないための性質。
+  // 見送った句を recentYomi に入れてしまうと、出し直しても二度と拾われなくなる。
+  const [a, b] = distinctSenryu(2);
+  let state = reduce(
+    createBotState(T0),
+    { t: "message", playerId: "p1", nickname: "たろう", text: a, source: "chat" },
+    ctx(T0),
+  ).state;
+  const skipped = reduce(
+    state,
+    { t: "message", playerId: "p1", nickname: "たろう", text: b, source: "chat" },
+    ctx(T0 + 1_000),
+  );
+  assertEquals(skipped.utterances.length, 0, "抑制されていない");
+  state = skipped.state;
+  assertEquals(state.seri.recentYomi.length, 1, "見送った句まで覚えてしまっている");
+  const retry = reduce(
+    state,
+    { t: "message", playerId: "p1", nickname: "たろう", text: b, source: "chat" },
+    ctx(T0 + SERI_CHAT_COOLDOWN_MS),
+  );
+  assertEquals(retry.utterances.length, 1, "見送った句を出し直しても拾ってくれない");
+});
+
+Deno.test("せり: ルーム全体の連投上限（一斉に詠んだ SERI_BURST_MAX 人は全員拾う）", () => {
+  const texts = distinctSenryu(SERI_BURST_MAX + 2);
+  let state = createBotState(T0);
+  const replies: number[] = [];
+  for (const [i, text] of texts.entries()) {
+    // 全員ちがう人。人ごとの間隔には引っかからない
+    const result = reduce(
+      state,
+      { t: "message", playerId: `p${i}`, nickname: `p${i}`, text, source: "chat" },
+      ctx(T0 + i),
+    );
+    state = result.state;
+    replies.push(result.utterances.filter((u) => u.botId === "seri").length);
+  }
+  assertEquals(
+    replies.slice(0, SERI_BURST_MAX),
+    new Array(SERI_BURST_MAX).fill(1),
+    "一斉に詠んだ人が黙殺されている",
+  );
+  assertEquals(
+    replies.slice(SERI_BURST_MAX),
+    [0, 0],
+    "ルーム全体の連投上限が効いていない",
+  );
+  // 窓が明ければ戻る（長く黙り込まないこと）
+  const after = reduce(
+    state,
+    {
+      t: "message",
+      playerId: "pX",
+      nickname: "pX",
+      text: distinctSenryu(30)[29],
+      source: "chat",
+    },
+    ctx(T0 + SERI_BURST_WINDOW_MS),
+  );
+  assertEquals(after.utterances.length, 1, "窓が明けても黙ったまま");
+});
+
+Deno.test("せり: 退室者の間隔メモを溜め込まない（lastChatAt の掃除）", () => {
+  // ルームは何時間も立ちっぱなしになりうる。人ごとの間隔を覚える器が
+  // 参加者IDぶん伸び続けると素の漏れになる。
+  let state = createBotState(T0);
+  const texts = distinctSenryu(40);
+  for (let i = 0; i < 40; i++) {
+    // 毎回ちがう人が、間隔をまたぐ距離をあけて詠む
+    const result = reduce(
+      state,
+      { t: "message", playerId: `p${i}`, nickname: `p${i}`, text: texts[i], source: "chat" },
+      ctx(T0 + i * SERI_CHAT_COOLDOWN_MS),
+    );
+    state = result.state;
+  }
+  assertEquals(
+    Object.keys(state.seri.lastChatAt).length,
+    1,
+    "間隔の判定に使わない playerId が残り続けている",
+  );
 });
 
 Deno.test("せり: 直前とまったく同じ川柳は黙る（コピペ連投対策）", () => {
@@ -1044,6 +1249,8 @@ Deno.test("回帰: A/B 交互のコピペ連投は弾く", () => {
   let state = createBotState(T0);
   let count = 0;
   for (let i = 0; i < 10; i++) {
+    // 見たいのは recentYomi による重複よけなので、人ごとの間隔
+    // （SERI_CHAT_COOLDOWN_MS）には引っかからない置き方にする
     const result = reduce(
       state,
       {
@@ -1053,7 +1260,7 @@ Deno.test("回帰: A/B 交互のコピペ連投は弾く", () => {
         text: i % 2 === 0 ? a : b,
         source: "chat",
       },
-      ctx(T0 + i * 1_000),
+      ctx(T0 + i * SERI_CHAT_COOLDOWN_MS),
     );
     state = result.state;
     count += result.utterances.length;
@@ -1212,10 +1419,12 @@ Deno.test("回帰: せりは直近5件を超えた川柳なら再び反応する
   let state = createBotState(T0);
   let count = 0;
   for (const [i, text] of senryu.entries()) {
+    // 見たいのは recentYomi の記憶件数なので、人ごとの間隔
+    // （SERI_CHAT_COOLDOWN_MS）には引っかからない置き方にする
     const result = reduce(
       state,
       { t: "message", playerId: "p1", nickname: "たろう", text, source: "chat" },
-      ctx(T0 + i * 1_000),
+      ctx(T0 + i * SERI_CHAT_COOLDOWN_MS),
     );
     state = result.state;
     count += result.utterances.length;
