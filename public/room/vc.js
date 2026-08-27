@@ -2029,8 +2029,11 @@
     state.screen.starting = false;
     state.screen.relay = false;
     if (state.selfId !== null) closeZoom(state.selfId);
-    renderLocalVideo();
+    // active を先に倒してから描き直す。renderLocalVideo は「VC に入っているか」だけを
+    // 見て枠を出し入れするので、順番が逆だと自分の枠だけ卓上に残る（VC を抜けた後も
+    // 黒い枠と自分の名前が並んだままになり、まだ着席しているように見える）
     state.active = false;
+    renderLocalVideo();
     state.muted = false;
     state.session = null;
     if (options.message !== null) notify("vcState", options.message);
