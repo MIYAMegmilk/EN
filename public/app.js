@@ -149,8 +149,17 @@ const state = {
   view: null,
   phase: "lobby",
   deadline: null,
-  // 自分から退室した直後の切断かどうか（true の間は onclose のエラー表示を抑制する）
+  // 「こちらが分かっている正常な切断」の直後かどうか（自分からの退室と、
+  // ホストによるキック）。true の間は onclose のエラー表示を抑制し、代わりに
+  // ソケットを張り直す。サーバーはどちらも 1000 で閉じるのでコードでは見分けられない
   leaving: false,
+  // 直前の切断がキックだったかどうか（張り直しの onopen まで持ち越す）。
+  // キックされた卓のトークンは §3.1 のブロック判定のために残すので、何もしないと
+  // 繋ぎ直した先で「追い出された卓」へ自動で join し直してしまう。その抑止に使う
+  kickedOut: false,
+  // 張り直したあとにも出しておきたい文言（キックの理由など）。onopen は
+  // showError("") で表示を消すので、消させないためにここで持ち越す
+  messageAfterReopen: null,
   // サーバー再起動による自動再接続の途中かどうか（onopen で false に戻す）
   reconnecting: false,
   // 次に繋がったら「再起動からの復帰」であることを onopen へ伝える受け渡し用
@@ -492,9 +501,16 @@ function connect() {
   const ws = new WebSocket(`${scheme}//${location.host}/ws`);
   state.ws = ws;
   ws.onopen = () => {
-    showError("");
+    // 繋ぎ直しの理由を伝える文言（キックなど）は消さずに出し直す。
+    // ここで一律に空にすると、切断の直前に出した説明が一瞬で消えてしまう
+    const carried = state.messageAfterReopen;
+    state.messageAfterReopen = null;
+    showError(carried ?? "");
     // ここまで来たら接続済みなので、直前の退室フラグが残っていても持ち越さない
     state.leaving = false;
+    // 「直前の切断はキックだったか」もここで受け取って捨てる
+    const afterKick = state.kickedOut;
+    state.kickedOut = false;
     // 繋がったので待ち時間はリセットする（次の再起動もまた1秒から始められる）
     state.reconnecting = false;
     state.reconnectAttempts = 0;
@@ -510,7 +526,10 @@ function connect() {
     // 意図せず自動作成・自動入室が発火してしまう
     const pendingCreate = RoomHandoff.consumePendingCreateRoom();
     const pendingJoin = RoomHandoff.consumePendingJoinRoom();
-    if (saved !== null) {
+    // キック直後の張り直しでは、保存済みトークンがあっても自動では入り直さない。
+    // そのトークンは §3.1 のブロック判定のために残しているだけで、追い出された卓へ
+    // 戻る意思の表明ではない（自分でコードを打ち直したときだけ join に積む）
+    if (saved !== null && !afterKick) {
       // 再接続を試す（60秒以内なら復帰できる）。session が生きていればサーバーは
       // あだ名を見ない（doJoin が reconnect で早期 return する）ので、あだ名を省略して
       // 入室した人も復帰できるよう空欄でも送る。猶予を過ぎていた場合は新規入室に
@@ -758,6 +777,10 @@ function resetToEntry() {
   Voice.reset();
   Bot.reset();
   unmountGameModule();
+  // 順位表も卓のものなので、卓を出たら片付ける。#result は #room / #phase の
+  // 子ではなく renderAll() が畳む対象にも入っていないため、ここで消さないと
+  // 一覧の画面にも次の卓にも、前の卓のあだ名と得点が出たまま残る
+  clearResult();
   // 主役は見ている人ごとの手元の状態。次に入った卓へ持ち越さない
   resetStage();
   renderAll();
@@ -874,7 +897,20 @@ function receive(msg) {
       const kickedFrom = store.load();
       resetToEntry();
       if (kickedFrom !== null) store.save(kickedFrom.code, kickedFrom.session);
-      showError("ルームから退出しました");
+      // サーバーはこの直後にソケットを閉じる（server/rooms.ts の kick 経路。
+      // 閉じるコードは退室と同じ 1000 なので、onclose 側からは見分けられない）。
+      // 印を立てておかないと onclose が「異常な切断」として扱い、張り直さないまま
+      // 「再読み込みしてください」で終わる。一覧の画面には戻れているのに WS だけが
+      // 死んでいる状態になり、以降どの卓にも入れなくなる
+      state.leaving = true;
+      // 上で保存し直したトークンを onopen が拾って、追い出された卓へ自動で
+      // join し直してしまうのを止める（トークン自体はブロック判定のために残す）
+      state.kickedOut = true;
+      const kickedMessage = "ホストにお引き取りいただきました";
+      showError(kickedMessage);
+      // 張り直した先の onopen で消されないよう持ち越す。理由が消えると、
+      // 利用者には「勝手に一覧へ戻された」ようにしか見えない
+      state.messageAfterReopen = kickedMessage;
       break;
     }
     case "error":
