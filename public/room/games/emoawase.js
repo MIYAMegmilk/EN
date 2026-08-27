@@ -70,10 +70,12 @@ export function mount(container, api) {
   grid.style.flex = "0 1 auto";
   shell.body.appendChild(grid);
 
+  // 順位表は副次的な文字。盤面の高さを奪わないよう shell.side へ入れる
+  // （狭い器ではここが縮んで自前でスクロールする）
   const board = el("ol");
-  board.style.margin = "8px 0 0";
+  board.style.margin = "0";
   board.style.paddingLeft = "1.4em";
-  shell.root.appendChild(board);
+  shell.side.appendChild(board);
 
   const relay = createRelayReader();
 

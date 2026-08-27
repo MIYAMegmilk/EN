@@ -727,3 +727,465 @@ Deno.test("ビューモジュールに固定の px 上限が残っていない�
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// 10. 狭い器で「主役」が真っ先に潰れないこと（CSS の指定の番人）
+//
+// 縦の flex では、min-height が auto のままの文字の兄弟は縮まないのに、
+// min-height: 0 の canvas だけがいくらでも縮む。器に高さが通ると不足分が
+// ほぼ全部 canvas に割り当たり、実ブラウザで 2px まで潰れて操作不能になった。
+// 偽 DOM には実測レイアウトが無いので、ここでは **CSS の指定そのもの** を見る。
+// ---------------------------------------------------------------------------
+
+/**
+ * 「潰れきらない」と言える下限（CSS px）。
+ * これ未満だと絵も盤面も読めないので、指定として意味を成さない。
+ *
+ * 64px は論理 480 の 1/7.5 にあたり、太い線（論理 18px）が 2.4 CSS px、
+ * もぐらたたきなら 3×3 の的が 1マス 21px 相当。小さいが「絵」「盤面」として形が分かる。
+ * かつては 100px にしていたが、下限は **道具箱やお題を画面外へ押し出さない** 大きさで
+ * なければならず（§11 参照）、上限側の制約のほうがきつい。下げてある
+ */
+const MIN_MEANINGFUL_PX = 64;
+
+/** style.flex の指定から flex-grow / flex-shrink を読む。未指定は既定の 0 1 auto 相当 */
+function parseFlex(value: unknown): { grow: number; shrink: number } {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (text === "none") return { grow: 0, shrink: 0 };
+  const parts = text.split(/\s+/);
+  const grow = Number(parts[0]);
+  const shrink = parts.length > 1 ? Number(parts[1]) : 1;
+  return {
+    grow: Number.isFinite(grow) ? grow : 0,
+    shrink: Number.isFinite(shrink) ? shrink : 1,
+  };
+}
+
+/** "120px" のような指定を数値で読む。px 以外・未指定は 0（下限なし） */
+function pxOf(value: unknown): number {
+  const matched = /^(\d+(?:\.\d+)?)px$/.exec(typeof value === "string" ? value.trim() : "");
+  return matched === null ? 0 : Number(matched[1]);
+}
+
+Deno.test("draw: canvas は残りの高さを受け取る側で、下限まで潰れきらない", async () => {
+  const dom = installDom(2);
+  try {
+    const module = await loadGame("draw");
+    const container = new FakeElement("div");
+    const handle = module.mount(container, makeApi([]));
+    const canvas = container.findAll("canvas")[0];
+    assert(canvas !== undefined, "canvas が無い");
+
+    const flex = parseFlex(canvas.style.flex);
+    assert(
+      flex.grow > 0,
+      `canvas が余った高さを受け取らない（flex: ${canvas.style.flex}）`,
+    );
+    assert(
+      pxOf(canvas.style.minHeight) >= MIN_MEANINGFUL_PX,
+      `canvas に実用的な下限が無い（min-height: ${canvas.style.minHeight}）`,
+    );
+
+    handle.unmount();
+  } finally {
+    dom.restore();
+  }
+});
+
+Deno.test("draw: 道具箱は潰れない（0px になると描く操作そのものが死ぬ）", async () => {
+  const dom = installDom(2);
+  try {
+    const module = await loadGame("draw");
+    const container = new FakeElement("div");
+    const handle = module.mount(container, makeApi([]));
+    const root = container.children[0];
+    assert(root !== undefined, "root が無い");
+    // 道具箱は「ボタンを抱えた div」。色・太さ・ひとつ戻す・全部消すが入っている
+    const tools = root.children.find(
+      (child) => child.tagName === "div" && child.findAll("button").length > 0,
+    );
+    assert(tools !== undefined, "道具箱が見つからない");
+    assertEquals(
+      parseFlex(tools.style.flex).shrink,
+      0,
+      `道具箱が縮む指定になっている（flex: ${tools.style.flex}）`,
+    );
+
+    handle.unmount();
+  } finally {
+    dom.restore();
+  }
+});
+
+Deno.test("_client.js: 遊ぶ面と canvas が残りの高さを受け取る側で、下限まで潰れきらない", async () => {
+  const dom = installDom(2);
+  try {
+    const helpers = await loadGame("_client");
+
+    // createShell の body（もぐらたたき・絵合わせ・反射神経が遊ぶところ）
+    const container = new FakeElement("div");
+    const shell = helpers.createShell(container, "テスト");
+    assert(
+      parseFlex(shell.body.style.flex).grow > 0,
+      `遊ぶ面が余った高さを受け取らない（flex: ${shell.body.style.flex}）`,
+    );
+    assert(
+      pxOf(shell.body.style.minHeight) >= MIN_MEANINGFUL_PX,
+      `遊ぶ面に実用的な下限が無い（min-height: ${shell.body.style.minHeight}）`,
+    );
+
+    // createCanvas の canvas（もぐらたたきの盤面）
+    const made = helpers.createCanvas(MOGURA_W, MOGURA_H);
+    assert(
+      parseFlex(made.canvas.style.flex).grow > 0,
+      `canvas が余った高さを受け取らない（flex: ${made.canvas.style.flex}）`,
+    );
+    assert(
+      pxOf(made.canvas.style.minHeight) >= MIN_MEANINGFUL_PX,
+      `canvas に実用的な下限が無い（min-height: ${made.canvas.style.minHeight}）`,
+    );
+    // 遊ぶ面の下限が canvas の下限より低いと、canvas が遊ぶ面からはみ出す
+    assert(
+      pxOf(shell.body.style.minHeight) >= pxOf(made.canvas.style.minHeight),
+      "遊ぶ面の下限が canvas の下限より低い（canvas がはみ出して下の文字に重なる）",
+    );
+  } finally {
+    dom.restore();
+  }
+});
+
+Deno.test("mogura: 盤面が残りの高さを受け取る側になっている（_client.js 経由）", async () => {
+  const dom = installDom(2);
+  try {
+    const module = await loadGame("mogura");
+    const container = new FakeElement("div");
+    const handle = module.mount(container, makeApi([]));
+    handle.update(clientView(), null);
+    const canvas = container.findAll("canvas")[0];
+    assert(canvas !== undefined, "canvas が無い");
+
+    assert(
+      parseFlex(canvas.style.flex).grow > 0,
+      `canvas が余った高さを受け取らない（flex: ${canvas.style.flex}）`,
+    );
+    assert(
+      pxOf(canvas.style.minHeight) >= MIN_MEANINGFUL_PX,
+      `canvas に実用的な下限が無い（min-height: ${canvas.style.minHeight}）`,
+    );
+    // canvas を抱えている遊ぶ面（createShell の body）も、縮みきらないこと
+    const root = container.children[0];
+    const body = root.children.find(
+      (child) => child.tagName === "div" && child.contains(canvas),
+    );
+    assert(body !== undefined, "遊ぶ面が見つからない");
+    assert(
+      pxOf(body.style.minHeight) >= pxOf(canvas.style.minHeight),
+      `遊ぶ面が canvas より先に潰れる（min-height: ${body.style.minHeight}）`,
+    );
+
+    handle.unmount();
+  } finally {
+    dom.restore();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 11. 主役表示で「まず絵に高さを配る」こと（CSS の指定の番人）
+//
+// 10 の下限（潰れない最低線）を満たしていても、文字の兄弟が縮まない設定で
+// 高さを先に取ってしまうと、canvas は下限へ張り付いたままになる。
+// 実ブラウザ（Chrome・窓の高さ 698px・卓に3人・お絵かき当てを主役・出題者の画面）で
+// canvas が 120×120px、左右 558px が空白という状態が実測された。
+//
+// そこで配り方そのものを検査する。
+//   - 副次的な文字（答え合わせ・正解した人・得点表）＝ **真っ先に** 畳まれる
+//   - 遊ぶのに要る1行情報（ターン・残り秒・お題・道具箱・残量）＝ 縮まない
+//   - 遊ぶ面＝ 余りを受け取り、縮むのは最後。下限は「潰れ防止」だけの最低線
+//   - 道具箱とお題は canvas より前に並ぶ（あふれても押し出されない）
+// 偽 DOM には実測レイアウトが無いので、ここでも **CSS の指定そのもの** を見る。
+// ---------------------------------------------------------------------------
+
+/**
+ * 下限（min-height）として置いてよい上限（CSS px）。
+ *
+ * 下限は「潰れ防止の最低線」であって、遊びやすい大きさの目標ではない。
+ * 実ブラウザ（Chrome・窓の高さ 698px・卓に3人・お絵かき当てを主役・出題者の画面）で
+ * 主役表示の器（#phase-body）は 241px しかなく、縮まない兄弟
+ * （見出し 28 + お題 36 + 道具箱 42 + 隙間 24 ＝ 130px）を引いた残りは 111px。
+ * 下限をこれより高く置くと、下限を満たすために器からあふれ、あふれたぶんが
+ * **道具箱を外側スクロールの向こうへ押し出す**（実測: 道具箱 563〜604px に対し
+ * 表示領域の下端は 494px）。絵を描くゲームで道具箱に届かないのは、
+ * 絵が少し小さいことより悪い。
+ *
+ * かつてここは「遊べる大きさ」として 240px 以上を要求していたが、それがまさに
+ * 上の押し出しを起こしていた。240px は **器に余裕があるときの目標** に格下げし、
+ * 下限としては 111px を超えないこと——余裕をみて 120px を上限——を要求する
+ */
+const MAX_FLOOR_PX = 120;
+
+/** min-height が「0」と言えるか（"0" でも "0px" でも可） */
+function isZeroMinHeight(value: unknown): boolean {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text === "0" || text === "0px";
+}
+
+/** 「縮められて・自前でスクロールする」指定になっているか調べる */
+function assertShrinkableScroller(box: FakeElement, label: string): void {
+  assert(
+    box.style.overflowY === "auto",
+    `${label}: 自前でスクロールしない（overflow-y: ${box.style.overflowY}）`,
+  );
+  assert(
+    isZeroMinHeight(box.style.minHeight),
+    `${label}: min-height が 0 でない（${box.style.minHeight}）。` +
+      "flex 既定の min-height: auto のままだと中身の高さぶんを先に確保してしまう",
+  );
+  const flex = parseFlex(box.style.flex);
+  assert(flex.shrink > 0, `${label}: 縮まない指定になっている（flex: ${box.style.flex}）`);
+  assertEquals(
+    flex.grow,
+    0,
+    `${label}: 余った高さを受け取る側になっている（主役から高さを奪う）`,
+  );
+}
+
+Deno.test("draw: 副次的な文字は縮んで自前でスクロールする（絵の取り分を奪わない）", async () => {
+  const dom = installDom(2);
+  try {
+    const module = await loadGame("draw");
+    const container = new FakeElement("div");
+    const handle = module.mount(container, makeApi([]));
+    handle.update(drawView(1), T0 + 30_000);
+    const root = container.children[0];
+    assert(root !== undefined, "root が無い");
+
+    // 「正解した人」「答え合わせ」「得点」は1つのスクロール領域にまとまっていること。
+    // root 直下で h4（正解した人 / 得点）を抱えている div がそれ
+    const side = root.children.find(
+      (child) => child.tagName === "div" && child.findAll("h4").length >= 2,
+    );
+    assert(
+      side !== undefined,
+      "副次的な文字がひとまとめになっていない（別々に並んでいると隙間もその数だけ要る）",
+    );
+    assertShrinkableScroller(side, "副次的な文字の領域");
+
+    // canvas はその領域の中に入っていないこと（入れると一緒にスクロールしてしまう）
+    const canvas = container.findAll("canvas")[0];
+    assert(!side.contains(canvas), "canvas が副次的な文字の領域に入っている");
+
+    handle.unmount();
+  } finally {
+    dom.restore();
+  }
+});
+
+Deno.test("draw: 遊ぶのに要る1行情報は縮まない（canvas と副次領域だけが縮む）", async () => {
+  const dom = installDom(2);
+  try {
+    const module = await loadGame("draw");
+    const container = new FakeElement("div");
+    const handle = module.mount(container, makeApi([]));
+    handle.update(drawView(1), T0 + 30_000);
+    const root = container.children[0];
+    const canvas = container.findAll("canvas")[0];
+    const side = root.children.find(
+      (child) => child.tagName === "div" && child.findAll("h4").length >= 2,
+    );
+    assert(side !== undefined, "副次的な文字の領域が無い");
+
+    // 題名・ターン・残り秒は1行に畳んであること（縦に積むと行の数だけ隙間も要る）
+    const headRow = root.children.find(
+      (child) => child.tagName === "div" && child.findAll("h3").length === 1,
+    );
+    assert(headRow !== undefined, "見出し行（題名＋ターン＋残り秒）がまとまっていない");
+    assert(
+      headRow.findAll("p").length >= 2,
+      "ターン表示と残り秒が見出し行に入っていない",
+    );
+
+    for (const child of root.children) {
+      if (child === canvas || child === side) continue;
+      assertEquals(
+        parseFlex(child.style.flex).shrink,
+        0,
+        `遊ぶのに要る情報が縮む指定になっている（${child.tagName}: flex ${child.style.flex}）`,
+      );
+    }
+
+    handle.unmount();
+  } finally {
+    dom.restore();
+  }
+});
+
+Deno.test("draw: canvas の下限は潰れ防止の最低線で、道具箱を追い出す高さではない", async () => {
+  const dom = installDom(2);
+  try {
+    const module = await loadGame("draw");
+    const container = new FakeElement("div");
+    const handle = module.mount(container, makeApi([]));
+    const canvas = container.findAll("canvas")[0];
+    const floor = pxOf(canvas.style.minHeight);
+    assert(
+      floor >= MIN_MEANINGFUL_PX,
+      `絵を描ける面の下限が低すぎる（min-height: ${canvas.style.minHeight}）。` +
+        "数 px まで潰れると絵ではなく帯になる",
+    );
+    assert(
+      floor <= MAX_FLOOR_PX,
+      `絵を描ける面の下限が ${MAX_FLOOR_PX}px を超えている（min-height: ${canvas.style.minHeight}）。` +
+        "241px の器では下限を満たすために器からあふれ、道具箱が表示領域の外へ押し出される",
+    );
+    handle.unmount();
+  } finally {
+    dom.restore();
+  }
+});
+
+Deno.test("draw: 道具箱とお題は canvas より前に並ぶ（あふれても押し出されない）", async () => {
+  const dom = installDom(2);
+  try {
+    const module = await loadGame("draw");
+    const container = new FakeElement("div");
+    const handle = module.mount(container, makeApi([]));
+    handle.update(drawView(1), T0 + 30_000);
+    const root = container.children[0];
+    const kids = root.children;
+    const canvasIndex = kids.findIndex((child: FakeElement) => child.tagName === "canvas");
+    assert(canvasIndex >= 0, "canvas が root 直下に無い");
+
+    // 道具箱（ボタンを抱えた div）
+    const toolsIndex = kids.findIndex(
+      (child: FakeElement) => child.tagName === "div" && child.findAll("button").length > 0,
+    );
+    assert(toolsIndex >= 0, "道具箱が見つからない");
+    assert(
+      toolsIndex < canvasIndex,
+      "道具箱が canvas より後ろに並んでいる。" +
+        "器からあふれると、あふれたぶんが道具箱を表示領域の外へ押し流す",
+    );
+
+    // お題（背景色の付いた案内の段落）
+    const roleIndex = kids.findIndex(
+      (child: FakeElement) =>
+        child.tagName === "p" && child.style.background !== undefined &&
+        String(child.style.background).length > 0,
+    );
+    assert(roleIndex >= 0, "お題の案内が見つからない");
+    assert(roleIndex < canvasIndex, "お題が canvas より後ろに並んでいる");
+
+    // 残量表示は道具箱の中（別行にすると 1行ぶん＋隙間で canvas の取り分を削る）
+    const tools = kids[toolsIndex];
+    assert(
+      tools.findAll("p").length > 0,
+      "描ける残量が道具箱の中に入っていない",
+    );
+
+    handle.unmount();
+  } finally {
+    dom.restore();
+  }
+});
+
+Deno.test("draw: 副次領域は canvas より先に縮む（縮み係数が桁違いに大きい）", async () => {
+  const dom = installDom(2);
+  try {
+    const module = await loadGame("draw");
+    const container = new FakeElement("div");
+    const handle = module.mount(container, makeApi([]));
+    const root = container.children[0];
+    const canvas = container.findAll("canvas")[0];
+    const side = root.children.find(
+      (child: FakeElement) => child.tagName === "div" && child.findAll("h4").length >= 2,
+    );
+    assert(side !== undefined, "副次的な文字の領域が無い");
+
+    const canvasShrink = parseFlex(canvas.style.flex).shrink;
+    const sideShrink = parseFlex(side.style.flex).shrink;
+    assert(canvasShrink > 0, "canvas が縮まない指定になっている（器からあふれる）");
+    assert(
+      sideShrink >= canvasShrink * 100,
+      `副次領域の縮み係数が canvas と同程度（side: ${side.style.flex} / canvas: ${canvas.style.flex}）。` +
+        "同じ係数だと両方がいっしょに縮み、canvas が下限へ張り付いて器を広げても育たない",
+    );
+
+    handle.unmount();
+  } finally {
+    dom.restore();
+  }
+});
+
+Deno.test("_client.js: 盤面の下限は潰れ防止の最低線で、side が真っ先に縮む", async () => {
+  const dom = installDom(2);
+  try {
+    const helpers = await loadGame("_client");
+    const container = new FakeElement("div");
+    const shell = helpers.createShell(container, "テスト");
+
+    // 盤面の下限は「潰れ防止」の範囲に収まっていること
+    const bodyFloor = pxOf(shell.body.style.minHeight);
+    assert(
+      bodyFloor >= MIN_MEANINGFUL_PX && bodyFloor <= MAX_FLOOR_PX,
+      `遊ぶ面の下限が潰れ防止の範囲（${MIN_MEANINGFUL_PX}〜${MAX_FLOOR_PX}px）の外` +
+        `（min-height: ${shell.body.style.minHeight}）`,
+    );
+    const made = helpers.createCanvas(MOGURA_W, MOGURA_H);
+    const canvasFloor = pxOf(made.canvas.style.minHeight);
+    assert(
+      canvasFloor >= MIN_MEANINGFUL_PX && canvasFloor <= MAX_FLOOR_PX,
+      `盤面 canvas の下限が潰れ防止の範囲の外（min-height: ${made.canvas.style.minHeight}）`,
+    );
+
+    // side は盤面より桁違いに縮みやすいこと（真っ先に畳まれる側）
+    const bodyShrink = parseFlex(shell.body.style.flex).shrink;
+    const sideShrink = parseFlex(shell.side.style.flex).shrink;
+    assert(bodyShrink > 0, "遊ぶ面が縮まない指定になっている（器からあふれる）");
+    assert(
+      sideShrink >= bodyShrink * 100,
+      `side の縮み係数が盤面と同程度（side: ${shell.side.style.flex} / body: ${shell.body.style.flex}）`,
+    );
+
+    // 副次的な文字を入れる場所があり、縮んで自前でスクロールすること
+    assert(shell.side !== undefined, "createShell が副次的な文字の置き場（side）を返さない");
+    assertShrinkableScroller(shell.side, "createShell の side");
+
+    // 見出しと断り書きは1行に畳んであり、縮まないこと
+    const headRow = shell.root.children.find(
+      (child: FakeElement) => child.tagName === "div" && child.findAll("h3").length === 1,
+    );
+    assert(headRow !== undefined, "見出し行がまとまっていない");
+    assertEquals(parseFlex(headRow.style.flex).shrink, 0, "見出し行が縮む指定になっている");
+    assertEquals(parseFlex(shell.status.style.flex).shrink, 0, "状態行が縮む指定になっている");
+  } finally {
+    dom.restore();
+  }
+});
+
+Deno.test("もぐらたたき・絵合わせ・反射神経: 副次的な文字を side に入れている", async () => {
+  for (const id of ["mogura", "emoawase", "reflex"]) {
+    const dom = installDom(2);
+    try {
+      const module = await loadGame(id);
+      const container = new FakeElement("div");
+      const handle = module.mount(container, makeApi([]));
+      handle.update(clientView(), null);
+      const root = container.children[0];
+      // createShell の並びは [見出し行, 遊ぶ面, 状態行, side]
+      const side = root.children[root.children.length - 1];
+      assertShrinkableScroller(side, `${id}: side`);
+      assert(
+        side.children.length > 0,
+        `${id}: 得点・順位の一覧が side に入っていない（root 直下だと盤面の高さを奪う）`,
+      );
+      // 一覧（ul / ol）が root 直下に residual していないこと
+      const strayList = root.children.some(
+        (child: FakeElement) => child.tagName === "ul" || child.tagName === "ol",
+      );
+      assert(!strayList, `${id}: 一覧が root 直下に残っている`);
+      handle.unmount();
+    } finally {
+      dom.restore();
+    }
+  }
+});

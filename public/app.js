@@ -828,6 +828,9 @@ function receive(msg) {
       renderAll();
       break;
     case "phase":
+      // 新しいあそびが始まったら、前のあそびの順位表は片付ける。残しておくと
+      // あそびの面に居座って主役エリアの高さを奪い続ける（読めるのはロビーの間）
+      if (state.phase === "lobby" && msg.phase !== "lobby") clearResult();
       state.phase = msg.phase;
       state.deadline = msg.deadline ?? null;
       state.view = msg.view;
@@ -1361,6 +1364,13 @@ function renderEntries(view, canVote) {
   return list;
 }
 
+/** 順位表を片付ける（前のあそびの結果を次のあそびへ持ち越さない） */
+function clearResult() {
+  $("result").classList.add("hidden");
+  $("result-title").textContent = "";
+  clear($("result-list"));
+}
+
 /** 順位表を描画する */
 function renderScores(title, scores) {
   $("result").classList.remove("hidden");
@@ -1795,11 +1805,15 @@ let vcScreenCooldownUntil = 0;
 
 /**
  * いま主役に出ているもの。
- *   kind … "none"（誰も出ていない）| "peer"（人の映像）| "game"（あそびの面）
+ *   kind … "none"（誰も出ていない）| "peer"（人）| "game"（あそびの面）
  *   playerId … kind が "peer" のときの相手。それ以外は null
- *   source … kind が "peer" のときの映像の出どころ（"camera" | "screen"）
+ *   source … kind が "peer" のときの映像の出どころ。
+ *            "camera" | "screen" | "none"（映像が来ていない＝名前だけを出す）
  */
 const vcStage = { kind: "none", playerId: null, source: "camera" };
+
+/** この端末が端末の全画面に対応しているか（bindVc で1回だけ調べる） */
+let stageCanFullscreen = false;
 
 /** いまあそびが動いているか（＝あそびの面を主役にしてよいか） */
 function gameIsRunning() {
@@ -1822,13 +1836,21 @@ function movePhaseTo(target) {
   const phase = $("phase");
   phase.remove();
   target.appendChild(phase);
+  // あそびが主役に上がっているあいだ、順位表は畳んでおく。開いたままだと
+  // .stage-board に居座って、主役エリアが受け取るはずの高さを奪う（canvas を
+  // 持つあそびは、そのぶん枠からはみ出して内部スクロールになる）。
+  // 消すのではなく <details> を閉じるだけなので、見出しを押せばその場で読める。
+  $("result").open = target !== $("vc-stage-body");
 }
 
 /** 主役エリアの中身を、いまの vcStage のとおりに描く */
 function renderStage() {
   const stage = $("vc-stage");
   const video = $("vc-stage-video");
+  const blank = $("vc-stage-blank");
   const title = $("vc-stage-title");
+  // 人が主役でも映像が来ていないことがある（カメラ切のままでも主役にできる）
+  const hasVideo = vcStage.kind === "peer" && vcStage.source !== "none";
   // CSS はここだけを見て、卓上の高さの配り方と呑み手の面の並べ方を変える
   document.body.dataset.vcStage = vcStage.kind;
   stage.hidden = vcStage.kind === "none";
@@ -1836,14 +1858,15 @@ function renderStage() {
   if (typeof VC.setSpotlight === "function") {
     VC.setSpotlight(vcStage.kind === "peer" ? vcStage.playerId : null);
   }
-  if (vcStage.kind === "peer") {
-    video.hidden = false;
+  video.hidden = !hasVideo;
+  // 映像が来ていない人は、名前の下敷きで出す（真っ黒な箱だけにしない）
+  blank.hidden = vcStage.kind !== "peer" || hasVideo;
+  if (hasVideo) {
     // 共有画面は端を切らない。人の顔は枠に合わせて切ってよい（§7.3 と同じ判断）
     video.classList.toggle("vc-stage-video-screen", vcStage.source === "screen");
     const played = video.play();
     if (played !== undefined && typeof played.catch === "function") played.catch(() => {});
   } else {
-    video.hidden = true;
     video.srcObject = null;
   }
   if (vcStage.kind === "game") {
@@ -1853,6 +1876,24 @@ function renderStage() {
     title.textContent = "あそび";
   } else {
     $("vc-stage-close").classList.remove("hidden");
+  }
+  syncStageFullscreenAvailability();
+}
+
+/**
+ * 「端末の全画面」の押し口を出してよいかを引き直す。
+ *
+ * 名前しか出ていない主役を全画面にしても得るものが無い（真っ黒な画面に名前が
+ * 一つ浮くだけで、卓の他の面はぜんぶ見えなくなる）ので、映像の無い人が主役の
+ * あいだは押し口を引っ込める。見ている最中に映像が消えた場合も、そのまま
+ * 全画面に閉じ込めず自分から出る。
+ */
+function syncStageFullscreenAvailability() {
+  const usable = vcStage.kind === "game" ||
+    (vcStage.kind === "peer" && vcStage.source !== "none");
+  $("vc-stage-full").classList.toggle("hidden", !(stageCanFullscreen && usable));
+  if (!usable && stageIsFullscreen() && typeof document.exitFullscreen === "function") {
+    document.exitFullscreen().catch(() => {});
   }
 }
 
@@ -1868,17 +1909,23 @@ function renderStage() {
 function spotlightPeer(view) {
   // あそびが出ていたなら定位置へ帰す。主役はひとつだけ
   if (vcStage.kind === "game") movePhaseTo($("phase-slot"));
+  const stream = view.stream === undefined ? null : view.stream;
   vcStage.kind = "peer";
   vcStage.playerId = view.playerId;
-  vcStage.source = view.source === "screen" ? "screen" : "camera";
-  // ニックネームはユーザー由来なので textContent で入れる（§3.8）
-  $("vc-stage-title").textContent = vcStage.source === "screen"
+  vcStage.source = stream === null ? "none" : view.source === "screen" ? "screen" : "camera";
+  // ニックネームはユーザー由来なので textContent で入れる（§3.8）。
+  // 名前を出すのは「映像があれば見出し・無ければ下敷き」のどちらか一方だけ。
+  // 両方に出すと、細い見出しと大きな下敷きに同じ名前が二度並んで不格好になる
+  $("vc-stage-blank-name").textContent = `${view.nickname} さん`;
+  $("vc-stage-title").textContent = vcStage.source === "none"
+    ? "映像なし"
+    : vcStage.source === "screen"
     ? `${view.nickname} さんの共有画面`
     : `${view.nickname} さん`;
   // 同じストリームを張り直さない。共有⇔カメラの告知は何度も届くので、
   // そのたびに付け替えると再生が止まってちらつく
   const video = $("vc-stage-video");
-  if (video.srcObject !== view.stream) video.srcObject = view.stream;
+  if (video.srcObject !== stream) video.srcObject = stream;
   renderStage();
 }
 
@@ -1923,8 +1970,11 @@ function requestStagePeer(view) {
 /**
  * vc.js から届く、ある人の映像の状態の知らせ。
  * その人がいま主役でなければ何もしない（勝手に主役を奪わない）。
- *   view が null … 映像が止まった・退室した。主役を降ろす
- *   view がある  … カメラ⇔画面が入れ替わった。中身を差し替える
+ *   view が null … その人が卓から居なくなった（退出・キック）。主役を降ろす
+ *   view がある  … 映像の出入り・カメラ⇔画面の入れ替え。中身を差し替える
+ *
+ * **映像が消えただけでは主役を降ろさない**（名前の下敷きに戻るだけ）。
+ * カメラを切るたびに主役が解けると、入れ直すたびに選び直しになるため。
  */
 function updateStagePeer(view, playerId) {
   if (vcStage.kind !== "peer" || vcStage.playerId !== playerId) return;
@@ -1956,6 +2006,7 @@ function resetStage() {
   vcStage.playerId = null;
   vcStage.source = "camera";
   $("vc-stage-title").textContent = "";
+  $("vc-stage-blank-name").textContent = "";
   renderStage();
 }
 
@@ -2058,10 +2109,11 @@ function bindVc(iceServers) {
   $("vc-stage-full").addEventListener("click", toggleStageFullscreen);
   // 映像の二度押しでも全画面に入れる（動画の作法に合わせる）
   $("vc-stage-video").addEventListener("dblclick", toggleStageFullscreen);
-  // 端末の全画面に対応していなければ、その押し口は出さない（§7.2）
-  const canFullscreen = typeof $("vc-stage-body").requestFullscreen === "function" ||
+  // 端末の全画面に対応していなければ、その押し口は出さない（§7.2）。
+  // 対応していても、出すものが映像でなければ引っ込める（renderStage が引き直す）
+  stageCanFullscreen = typeof $("vc-stage-body").requestFullscreen === "function" ||
     typeof $("vc-stage-video").webkitEnterFullscreen === "function";
-  $("vc-stage-full").classList.toggle("hidden", !canFullscreen);
+  syncStageFullscreenAvailability();
   // 文言は状態から引き直す。F11 やブラウザの UI で外れることがあるため。
   // bindVc は起動時に1回しか呼ばれないので、ここで登録して二重にならない
   document.addEventListener("fullscreenchange", syncStageFullscreenLabel);

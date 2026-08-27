@@ -520,7 +520,11 @@
 
   /**
    * 押し口の名前・押し下げ状態・枠の見た目を、いまの状態に合わせて描く。
-   * 映像が出ていない人は主役にしても黒い枠しか出ないので、押せなくする。
+   *
+   * 映像の有無で押せる／押せないを変えない。カメラ切が既定の卓では、
+   * 押せない口ばかりが並んで「人を主役にする」操作そのものが使えなくなる
+   * （Discord も映像の無い人を大きく出せる）。映像が来ていない人を選んだ
+   * ときは、主役エリア側が名前の下敷きを出す（app.js の renderStage）。
    */
   function updatePick(view, playerId) {
     if (view === null || view === undefined) return;
@@ -532,7 +536,6 @@
       "aria-label",
       onStage ? `${name} の主役表示をやめる` : `${name} を主役にする`,
     );
-    view.pick.disabled = spotlightViewOf(playerId) === null;
     view.root.classList.toggle("vc-peer-onstage", onStage);
   }
 
@@ -746,7 +749,7 @@
       video.hidden = true;
       video.srcObject = null;
       refreshPick(state.selfId);
-      // 自分が主役に出ていたなら降ろしてもらう（黒い枠だけを残さない）
+      // 自分が主役に出ていたなら、名前の下敷きへ切り替えてもらう（降ろさない）
       syncSpotlightFor(state.selfId);
       return;
     }
@@ -799,28 +802,35 @@
    * 共有中に限らずカメラの映像も返す。主役は「拡大」だけの仕組みではなく、
    * 誰の顔を大きく見るかを選ぶ仕組みでもあるため。共有かカメラかは source で
    * 伝え、主役側の object-fit の出し分けに使ってもらう。
+   *
+   * **映像が来ていなくても view を返す**（stream: null / source: "none"）。
+   * 主役にできるかどうかは「その人が卓に居るか」だけで決まり、映像の有無は
+   * 主役エリアの見せ方の違いにすぎない。null を返すのは、その人がもう卓に
+   * 居ない（＝退出・キック・自分が VC を抜けた）ときだけで、この null が
+   * app.js 側の「主役を降ろす」合図になる。
    */
   function spotlightViewOf(playerId) {
     if (typeof playerId !== "string") return null;
     if (playerId === state.selfId) {
+      // VC に入っていなければ自分の枠も無い（＝卓に居ない扱い）
+      if (!state.active) return null;
       const stream = activeVideoStream();
-      if (stream === null) return null;
       return {
         playerId,
         nickname: nicknameOf(playerId),
         stream,
-        source: currentVideoSource() === "screen" ? "screen" : "camera",
+        source: stream === null ? "none" : currentVideoSource() === "screen" ? "screen" : "camera",
       };
     }
     const peer = state.peers.get(playerId);
-    if (peer === undefined || peer.remoteVideoOff) return null;
-    const live = peer.stream.getVideoTracks().some((t) => t.readyState === "live" && !t.muted);
-    if (!live) return null;
+    if (peer === undefined) return null;
+    const live = !peer.remoteVideoOff &&
+      peer.stream.getVideoTracks().some((t) => t.readyState === "live" && !t.muted);
     return {
       playerId,
       nickname: nicknameOf(playerId),
-      stream: peer.stream,
-      source: peer.remoteVideoSource === "screen" ? "screen" : "camera",
+      stream: live ? peer.stream : null,
+      source: live ? (peer.remoteVideoSource === "screen" ? "screen" : "camera") : "none",
     };
   }
 
@@ -828,8 +838,7 @@
   function requestSpotlight(playerId) {
     if (typeof config.onSpotlight !== "function") return;
     const view = spotlightViewOf(playerId);
-    // 映像の無い人を主役にしても黒い枠しか出ない。押し口は disabled にして
-    // あるが、札の「拡大」など別の道から来ることもあるのでここでも断る
+    // 卓に居ない人は主役にしようがない（映像の有無ではもう断らない）
     if (view === null) return;
     try {
       config.onSpotlight(view);
@@ -840,7 +849,7 @@
 
   /**
    * その人の映像の状態を主役エリアへ伝え直す。
-   * 止まっていれば降ろしてもらい、続いていれば中身（source）を合わせてもらう。
+   * 映像が入っても消えても主役から降ろさない（消えたら名前の下敷きに戻る）。
    * その人が主役でなければ app.js 側が黙って無視する。
    */
   function syncSpotlightFor(playerId) {
@@ -853,7 +862,11 @@
     }
   }
 
-  /** 主役から降ろしてもらう。映像が止まったら黒い枠だけを残さない（§7.2） */
+  /**
+   * 主役から降ろしてもらう。
+   * 呼ぶのは**その人が卓から居なくなったとき**だけ（退出・キック・自分が
+   * VC を抜けた）。映像が止まっただけでは呼ばない（§7.2 の判断を改訂）。
+   */
   function closeSpotlight(playerId) {
     if (typeof config.onSpotlight !== "function") return;
     try {
@@ -1005,7 +1018,8 @@
       peer.stream.getVideoTracks().some((t) => t.readyState === "live" && !t.muted);
     peer.view.video.hidden = !live;
     if (live) tryPlay(peer.view.video);
-    // 映像の有無で押し口の可否が変わる。止まったならその人の主役表示も畳む
+    // 主役に出ている人なら、映像の出入りをそのまま主役エリアへ伝える
+    // （映像が消えても降ろさない。名前の下敷きに戻るだけ）
     updatePick(peer.view, peer.id);
     syncSpotlightFor(peer.id);
   }
@@ -2091,9 +2105,9 @@
     // ここで両方を落として映像ソースを "none" にそろえる
     if (source === "screen") releaseScreenStream();
     releaseCameraStream();
+    // renderLocalVideo() が主役エリアへ伝え直すので、ここで降ろす必要はない
+    // （映像が止まっただけでは主役から降ろさない。名前の下敷きに戻る）
     renderLocalVideo();
-    // 自分の共有を拡大表示していたなら、中身が死んだ枠を残さない
-    if (source === "screen" && state.selfId !== null) closeSpotlight(state.selfId);
     state.quality.autoStopped = true;
     state.quality.reason = reason;
     state.quality.stoppedAt = Date.now();
@@ -2909,10 +2923,11 @@
     const next = activeVideoTrack();
     await applyVideoTrackAll(next);
     markVideoSourceChanged(next);
+    // renderLocalVideo() が主役エリアへ伝え直す。共有をやめただけでは
+    // 主役から降ろさない（カメラへ戻ればその映像、戻らなければ名前の下敷き）
     renderLocalVideo();
     syncQualityMonitor();
     announceVideoState();
-    if (state.selfId !== null) closeSpotlight(state.selfId);
     const message = options === undefined || options.message === undefined
       ? "画面共有を止めました"
       : options.message;

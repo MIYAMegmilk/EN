@@ -1,14 +1,18 @@
 /**
  * 卓上の主役エリア（#vc-stage）のテスト。
  *
- * 本題は次の4つ。
+ * 本題は次の5つ。
  *   1. タイルを押すとその人が主役になり、もう一度押すと降りること。押し口は
  *      ネイティブの <button> で、マウスでもキーボードでも同じように動くこと
- *   2. あそびが動き出したら、あそびの面（#phase）が自動で主役に上がり、
+ *   2. **映像の有無で押せる／押せないを変えないこと。** カメラ切が既定の卓では
+ *      押せない口ばかりが並んで、人を主役にする操作そのものが使えなくなる。
+ *      映像が無い人は名前の下敷き（#vc-stage-blank）で出し、映像が来たら
+ *      そのまま映像へ切り替わる。映像が消えても主役からは降ろさない
+ *   3. あそびが動き出したら、あそびの面（#phase）が自動で主役に上がり、
  *      降りるときは .stage-board の定位置（#phase-slot）へ必ず戻ること
- *   3. 主役の人が消えたら（退室・カメラ切・共有停止）、黒い枠を残さず
- *      自動で降りること
- *   4. #phase を行き来させても、あそびのビューモジュールの器が作り直されない
+ *   4. 主役の人が**卓から居なくなったら**（退室・キック）自動で降りること。
+ *      降ろすのはここだけで、映像が止まっただけでは降ろさない
+ *   5. #phase を行き来させても、あそびのビューモジュールの器が作り直されない
  *      こと（作り直すと中身とリスナが毎回消える）
  *
  * 手口は vc_presence_test.ts / app_reconnect_test.ts と同じだが、この機能は
@@ -208,6 +212,8 @@ function buildDom(document: { getElementById(id: string): FakeElement }): void {
   at("vc-stage").appendChild(at("vc-stage-close"));
   at("vc-stage").appendChild(at("vc-stage-body"));
   at("vc-stage-body").appendChild(at("vc-stage-video"));
+  at("vc-stage-body").appendChild(at("vc-stage-blank"));
+  at("vc-stage-blank").appendChild(at("vc-stage-blank-name"));
   at("vc-frames").appendChild(at("vc-people"));
   at("stage-board").appendChild(at("phase-slot"));
   at("phase-slot").appendChild(at("phase"));
@@ -215,6 +221,16 @@ function buildDom(document: { getElementById(id: string): FakeElement }): void {
   at("phase").appendChild(at("phase-deadline"));
   at("phase").appendChild(at("phase-body"));
   at("stage-board").appendChild(at("result"));
+  at("result").appendChild(at("result-title"));
+  at("result").appendChild(at("result-list"));
+  // index.html の <details id="result" ... open> と同じ初期状態にする。
+  // 偽 DOM は属性をプロパティに写さないので、ここで手で合わせる
+  (at("result") as unknown as { open: boolean }).open = true;
+}
+
+/** 順位表（<details>）が開いているか。偽 DOM には open の型が無いので噛ませる */
+function resultIsOpen(el: FakeElement): boolean {
+  return (el as unknown as { open?: boolean }).open === true;
 }
 
 async function load(): Promise<Harness> {
@@ -581,17 +597,138 @@ Deno.test("主役の人が退出すると主役が自動で解ける", async () 
   assertEquals(h.element("vc-stage-video").srcObject, null);
 });
 
-Deno.test("主役の人がカメラを切ると主役が自動で解ける", async () => {
+Deno.test("映像が無いまま主役だった人が退出しても、主役が自動で解ける", async () => {
+  const h = await load();
+  await enterRoom(h, ["a"]);
+  pickOf(tileOf(h, "a")).click();
+  assertEquals(h.app.vcStage.source, "none", "映像なしの主役になっていない");
+
+  h.socket().receive({
+    t: "playerLeft",
+    player: { id: "a", nickname: "aすけ", vcEligible: true, connected: false },
+  });
+
+  assertEquals(h.app.vcStage.kind, "none", "退出したのに名前だけの主役が残っている");
+  assert(h.element("vc-stage").hidden, "中身の無い主役エリアが残っている");
+  assert(h.element("vc-stage-blank").hidden, "名前の下敷きが残っている");
+});
+
+// 以前は「主役の人がカメラを切ったら自動で降ろす」ことを見張っていたが、
+// 映像が無くても主役にできる仕様へ変えたので、期待値そのものが反転した。
+// 降ろすのは「卓から居なくなったとき」だけ（次のテストが番人）。
+Deno.test("主役の人がカメラを切っても主役から降りず、名前の表示に戻る", async () => {
   const h = await load();
   await enterRoom(h, ["a"]);
   receiveVideo(h, 0, "camera");
   pickOf(tileOf(h, "a")).click();
+  assertFalse(h.element("vc-stage-video").hidden, "映像が出ていない");
 
   h.vc.handleServerMessage({ t: "rtcSignal", from: "a", payload: { kind: "video", on: false } });
 
-  assertEquals(h.app.vcStage.kind, "none", "カメラを切ったのに主役が残っている");
-  // 映像の無い人は押しても主役にできない
-  assert(pickOf(tileOf(h, "a")).disabled, "映像が無いのに押し口が開いている");
+  assertEquals(h.app.vcStage.kind, "peer", "カメラを切っただけで主役が降りている");
+  assertEquals(h.app.vcStage.playerId, "a");
+  assertEquals(h.app.vcStage.source, "none");
+  assertFalse(h.element("vc-stage").hidden, "主役エリアが畳まれている");
+  // 映像は畳み、名前の下敷きへ戻る（黒い箱だけにしない）
+  assert(h.element("vc-stage-video").hidden, "映像が残っている");
+  assertEquals(h.element("vc-stage-video").srcObject, null, "ストリームが残っている");
+  assertFalse(h.element("vc-stage-blank").hidden, "名前の下敷きが出ていない");
+  assertEquals(h.element("vc-stage-blank-name").textContent, "aすけ さん");
+  // 押し口は開いたまま（もう一度押せば降りられる）
+  assertFalse(pickOf(tileOf(h, "a")).disabled, "押し口が閉じている");
+  assertEquals(pickOf(tileOf(h, "a")).attributes.get("aria-pressed"), "true");
+});
+
+Deno.test("映像が無い人の押し口は disabled にならない", async () => {
+  const h = await load();
+  await enterRoom(h, ["a"]);
+
+  // 相手のタイル（映像はまだ1フレームも来ていない）
+  const pick = pickOf(tileOf(h, "a"));
+  assertFalse(pick.disabled, "映像が無いだけで押し口が閉じている");
+  // 自分の枠（カメラは切）も同じ
+  const self = h.people().children.find((c) => c.className.includes("vc-self"));
+  assertExists(self, "自分の枠が無い");
+  assertFalse(pickOf(self).disabled, "自分の押し口が閉じている");
+  // 読み上げ名は「主役にする」のまま（押せないことを匂わせない）
+  const label = pick.attributes.get("aria-label");
+  assertExists(label);
+  assert(label.includes("主役にする"), `読み上げ名が変: ${label}`);
+});
+
+Deno.test("映像が無い人を主役にすると、名前が大きく出る", async () => {
+  const h = await load();
+  await enterRoom(h, ["a"]);
+
+  pickOf(tileOf(h, "a")).click();
+
+  assertEquals(h.app.vcStage.kind, "peer", "映像が無い人を主役にできない");
+  assertEquals(h.app.vcStage.playerId, "a");
+  assertEquals(h.app.vcStage.source, "none");
+  assertFalse(h.element("vc-stage").hidden, "主役エリアが畳まれたまま");
+  assertEquals(h.document.body.dataset.vcStage, "peer");
+  // 真っ黒な箱にしない。名前の下敷きを出す
+  assertFalse(h.element("vc-stage-blank").hidden, "名前の下敷きが出ていない");
+  assertEquals(h.element("vc-stage-blank-name").textContent, "aすけ さん");
+  // 中身の無い video は畳んでおく
+  assert(h.element("vc-stage-video").hidden, "映像の枠が出たままになっている");
+  assertEquals(h.element("vc-stage-video").srcObject, null);
+  // 名前は下敷きにだけ出す。見出しにも同じ名前を並べない（二重表示を避ける）
+  assertEquals(h.element("vc-stage-title").textContent, "映像なし");
+  // タイル側にも主役の印が付く
+  assert(tileOf(h, "a").className.includes("vc-peer-onstage"), "主役の印が付いていない");
+});
+
+Deno.test("映像が無い人を主役にしたあと、もう一度押すと主役から降りる", async () => {
+  const h = await load();
+  await enterRoom(h, ["a"]);
+  const pick = pickOf(tileOf(h, "a"));
+
+  pick.click();
+  assertEquals(h.app.vcStage.kind, "peer");
+  pick.click();
+
+  assertEquals(h.app.vcStage.kind, "none", "主役を降りていない");
+  assert(h.element("vc-stage").hidden, "主役エリアが畳まれていない");
+  assertEquals(h.document.body.dataset.vcStage, "none");
+  // 下敷きも一緒に畳む（主役が居ないのに名前だけが残らない）
+  assert(h.element("vc-stage-blank").hidden, "名前の下敷きが残っている");
+  assertEquals(pickOf(tileOf(h, "a")).attributes.get("aria-pressed"), "false");
+});
+
+Deno.test("主役中にカメラが入ると、名前の表示から映像へ切り替わる", async () => {
+  const h = await load();
+  await enterRoom(h, ["a"]);
+  pickOf(tileOf(h, "a")).click();
+  assertEquals(h.app.vcStage.source, "none");
+
+  // 主役に出したまま、あとからカメラを入れてもらう
+  receiveVideo(h, 0, "camera");
+
+  assertEquals(h.app.vcStage.kind, "peer", "主役から落ちている");
+  assertEquals(h.app.vcStage.source, "camera", "映像へ切り替わっていない");
+  assertFalse(h.element("vc-stage-video").hidden, "映像が出ていない");
+  assert(h.element("vc-stage-blank").hidden, "名前の下敷きが残っている");
+  const tileVideo = tileOf(h, "a").querySelector(".vc-video");
+  assertExists(tileVideo);
+  assertEquals(h.element("vc-stage-video").srcObject, tileVideo.srcObject);
+  assertEquals(h.element("vc-stage-title").textContent, "aすけ さん");
+});
+
+Deno.test("主役中に画面共有が始まると、そのまま共有画面へ切り替わる（contain）", async () => {
+  const h = await load();
+  await enterRoom(h, ["a"]);
+  pickOf(tileOf(h, "a")).click();
+
+  receiveVideo(h, 0, "screen");
+
+  assertEquals(h.app.vcStage.kind, "peer");
+  assertEquals(h.app.vcStage.source, "screen");
+  assert(
+    h.element("vc-stage-video").className.includes("vc-stage-video-screen"),
+    "共有画面が contain になっていない",
+  );
+  assertEquals(h.element("vc-stage-title").textContent, "aすけ さんの共有画面");
 });
 
 // ---------------------------------------------------------------------------
@@ -716,16 +853,39 @@ Deno.test("境界値: 相手が1人でも、押すまでは主役エリアを出
   assertFalse(pickOf(tileOf(h, "a")).disabled);
 });
 
-Deno.test("境界値: 映像が来ていない相手は主役にできない", async () => {
+// 以前は「映像が来ていない相手は主役にできない」ことを見張っていた。
+// カメラ切が既定の卓では押せない口ばかりが並ぶので、期待値を反転させた。
+Deno.test("境界値: 映像が来ていない相手でも主役にできる（押して必ず何かが起きる）", async () => {
   const h = await load();
   await enterRoom(h, ["a"]);
 
   const pick = pickOf(tileOf(h, "a"));
-  assert(pick.disabled, "映像が無いのに押し口が開いている");
-  // 押しても何も起きない（黒い枠だけの主役を作らない）
+  assertFalse(pick.disabled, "映像が無いだけで押し口が閉じている");
+  // 押したら必ず主役になる（押せるのに何も起きない、を作らない）
   pick.click();
-  assertEquals(h.app.vcStage.kind, "none");
-  assert(h.element("vc-stage").hidden);
+  assertEquals(h.app.vcStage.kind, "peer");
+  assertFalse(h.element("vc-stage").hidden);
+  assertFalse(h.element("vc-stage-blank").hidden);
+});
+
+Deno.test("境界値: 卓に居ない相手は主役にできない（押し口ごと消えている）", async () => {
+  const h = await load();
+  await enterRoom(h, ["a"]);
+  pickOf(tileOf(h, "a")).click();
+  assertEquals(h.app.vcStage.kind, "peer");
+
+  // 退出するとタイルごと消える。以後この人を主役にする道は無い
+  h.socket().receive({
+    t: "playerLeft",
+    player: { id: "a", nickname: "aすけ", vcEligible: true, connected: false },
+  });
+
+  assertEquals(h.app.vcStage.kind, "none", "居なくなったのに主役が残っている");
+  assertEquals(
+    h.people().children.find((c) => c.dataset.playerId === "a"),
+    undefined,
+    "退出した人のタイルが残っている",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -803,6 +963,56 @@ Deno.test("主役エリアからあそびの root まで、高さの鎖をつく
   for (const rule of rules) {
     assert(rule.test(css), `高さの鎖が切れている: ${rule}`);
   }
+});
+
+Deno.test("ビューモジュールの器（.game-module）にも高さが通っている", async () => {
+  const css = await Deno.readTextFile(INDEX_HTML);
+  // #phase-body までは高さが届いていても、この器が auto 高さだと鎖が切れる。
+  // 切れるとゲームの root の height: 100% が解決できず、canvas の
+  // max-height: 100% も効かなくなって主役エリアからはみ出す
+  assert(
+    /\.game-module \{[^}]*height: 100%;[^}]*min-height: 0;[^}]*flex-direction: column;/s
+      .test(css),
+    "器（.game-module）で高さの鎖が切れている",
+  );
+});
+
+Deno.test("あそびが主役のあいだ、順位表は畳まれて高さを奪わない", async () => {
+  const css = await Deno.readTextFile(INDEX_HTML);
+  // 消すのではなく畳む。畳んでも見出しを押せば読める（<details> / <summary>）
+  assert(css.includes('<details id="result"'), "順位表が畳めるようになっていない");
+  assert(
+    /<summary class="result-summary"><h2 id="result-title">/.test(css),
+    "順位表の見出しが押せない（見出しは <h2> のまま残すこと）",
+  );
+
+  const h = await load();
+  await enterRoom(h, ["a"]);
+  // 前のあそびの最終結果が出ている状態を作る
+  h.socket().receive({
+    t: "finalResult",
+    scores: [{ rank: 1, nickname: "aすけ", roundScore: 3, totalScore: 9 }],
+  });
+  const result = h.element("result");
+  assertFalse(result.className.includes("hidden"), "順位表が出ていない");
+  assert(resultIsOpen(result), "ロビーでは順位表が開いていること");
+
+  // 新しいあそびが始まったら、前のあそびの結果は片付ける
+  startGame(h);
+  assertEquals(h.app.vcStage.kind, "game");
+  assert(result.className.includes("hidden"), "前のあそびの順位表が残っている");
+  assertEquals(h.element("result-list").children.length, 0, "前の順位が残っている");
+  // 今のあそびの途中経過が出ても、主役に出ているあいだは畳んだまま
+  h.socket().receive({
+    t: "roundResult",
+    scores: [{ rank: 1, nickname: "aすけ", roundScore: 1, totalScore: 1 }],
+  });
+  assertFalse(resultIsOpen(result), "あそびが主役なのに順位表が開いている");
+
+  // あそびが終われば開き直す（結果を読むのはここ）
+  endGame(h);
+  assertEquals(h.app.vcStage.kind, "none");
+  assert(resultIsOpen(result), "あそびが終わっても順位表が畳まれたまま");
 });
 
 Deno.test("主役が居るあいだは呑み手の面を横一列の帯にする指定がある", async () => {

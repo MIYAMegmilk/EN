@@ -1134,10 +1134,16 @@ Deno.test("共有中のタイルには札と拡大の口が出る（§7 / §9-3�
   const opened = h.zooms.filter((z) => z.view !== null && z.playerId === undefined);
   assertEquals(opened.length, 1, "主役表示が頼まれていない");
 
-  // 共有が止まったら札も畳み、拡大表示も閉じてもらう
+  // 共有が止まったら札は畳む。主役表示は**降ろさず**、映像の無い状態を伝える
+  // （映像が消えただけで主役を降ろすのはやめた。名前の下敷きに戻るだけ）
   h.vc.handleServerMessage({ t: "rtcSignal", from: "a", payload: { kind: "video", on: false } });
   assert(badge.hidden, "共有が止まっても札が残っている");
-  assert(h.zooms.some((z) => z.view === null && z.playerId === "a"));
+  const stopped = h.zooms.filter((z) => z.playerId === "a");
+  assert(stopped.length > 0, "主役エリアへ知らせが届いていない");
+  const last = stopped[stopped.length - 1].view as { stream: unknown; source: string } | null;
+  assertExists(last, "映像が止まっただけで主役を降ろそうとしている");
+  assertEquals(last.stream, null, "止まった映像を張ったままにしている");
+  assertEquals(last.source, "none", "映像なしとして伝わっていない");
 });
 
 Deno.test("画面全体を選んだときは強めに警告する（§9-1）", async () => {

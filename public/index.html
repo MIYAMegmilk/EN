@@ -1003,12 +1003,33 @@
         outline: none;
       }
 
-      /* 順位表 */
+      /*
+       * 順位表。見出しを押すと畳める（<details> / <summary>）。あそびが主役に
+       * 出ているあいだは畳んだ状態にして、主役エリアの高さを奪わせない。
+       * 見出しは <h2> のまま <summary> の中に置く。<summary> の中身に見出しを
+       * 1つ置くのは HTML として正しく、順位表が見出しを失わずに済む。
+       */
+      .result-summary {
+        cursor: pointer;
+      }
+
+      /* 畳んでいるときに下の余白だけが残らないよう、開いたときにだけ足す */
+      #result[open] > .result-summary {
+        margin: 0 0 8px;
+      }
+
+      .result-summary:focus-visible {
+        outline: 2px solid var(--gold-3);
+        outline-offset: 2px;
+      }
+
       #result-title {
+        /* 三角の印と同じ行に並べる（block のままだと印だけが上の行に残る） */
+        display: inline;
         font-family: var(--serif);
         font-size: 16px;
         font-weight: 400;
-        margin: 0 0 8px;
+        margin: 0;
         color: var(--cream);
       }
 
@@ -1509,6 +1530,25 @@
         overscroll-behavior: contain;
       }
 
+      /*
+       * ビューモジュールの器（app.js の gameModuleHost が作る div）。
+       *
+       * ここに何も書かないと display: block の auto 高さになり、#phase-body まで
+       * 届いていた高さの鎖が**この1枚で切れる**。切れるとゲームの root の
+       * height: 100% が解決できずに中身なりの高さへ落ち、canvas の
+       * max-height: 100% も上限として効かなくなる（主役エリアからはみ出して
+       * 内部スクロールになる。文字だけのあそびでは中身が短いので露見しない）。
+       *
+       * 親が auto 高さのとき（ロビーや主役に出ていないとき）は height: 100% が
+       * auto に落ちるだけなので、従来どおり中身なりに伸びる。
+       */
+      .game-module {
+        height: 100%;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+
       /* 見出しと期限は自分の高さぶん。残りを丸ごとあそびへ渡す */
       .vc-stage-body > #phase > #phase-title,
       .vc-stage-body > #phase > #phase-deadline {
@@ -1538,6 +1578,53 @@
 
       .vc-stage-video[hidden] {
         display: none;
+      }
+
+      /*
+       * 映像が来ていない人を主役にしたときの下敷き。
+       * 絵はタイルの .vc-peer::before とまったく同じ斜線カメラを使う。
+       * 同じ「映像がない」を別の絵で表すと、タイルと主役で別の話に見える。
+       */
+      .vc-stage-blank {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        background: #000;
+      }
+
+      .vc-stage-blank[hidden] {
+        display: none;
+      }
+
+      .vc-stage-blank::before {
+        content: "";
+        flex: none;
+        width: 84px;
+        height: 84px;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%237a5f3c' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='6.5' width='12' height='11' rx='2.5'/%3E%3Cpath d='M15 11.2 20.5 8v8L15 12.8Z'/%3E%3Cpath d='M4 3.5 20 20.5'/%3E%3C/svg%3E");
+        background-repeat: no-repeat;
+        background-position: center;
+        background-size: contain;
+      }
+
+      /* 名前はここだけに大きく出す（見出しは「映像なし」になる。二重に出さない） */
+      .vc-stage-blank-name {
+        flex: none;
+        margin: 0;
+        max-width: 90%;
+        padding: 4px 14px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        font-family: var(--serif);
+        font-size: 26px;
+        line-height: 1.3;
+        color: var(--gold-3);
+        text-align: center;
+        overflow-wrap: anywhere;
       }
 
       .vc-peer-label {
@@ -2189,6 +2276,15 @@
                       hidden
                     >
                     </video>
+                    <!--
+                      映像が来ていない人を主役にしたときの下敷き。カメラ切でも
+                      主役にできる（Discord と同じ）ので、真っ黒な箱ではなく
+                      タイルと同じ斜線カメラの絵と、その人の名前を大きく出す。
+                      名前は app.js が textContent で入れる（§3.8）。
+                    -->
+                    <div id="vc-stage-blank" class="vc-stage-blank" hidden>
+                      <p id="vc-stage-blank-name" class="vc-stage-blank-name"></p>
+                    </div>
                   </div>
                 </section>
                 <div id="vc-people"></div>
@@ -2310,10 +2406,16 @@
               </section>
             </div>
 
-            <section id="result" class="card block hidden">
-              <h2 id="result-title"></h2>
+            <!--
+              順位表。あそびが主役に出ているあいだは畳んでおく（app.js の
+              movePhaseTo が open を切り替える）。開いたままだと .stage-board に
+              居座って、主役エリアが受け取るはずの高さを奪うため。消さずに
+              畳むだけなので、見出しを押せば遊んでいる最中でも読める。
+            -->
+            <details id="result" class="card block hidden" open>
+              <summary class="result-summary"><h2 id="result-title"></h2></summary>
               <ul id="result-list"></ul>
-            </section>
+            </details>
           </div>
         </div>
 
