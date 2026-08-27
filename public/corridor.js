@@ -83,6 +83,20 @@ if (Sound !== null && detectPage(document) === "standalone") {
 }
 
 /**
+ * 卓を建てるにはログインが必要（§3.1）。ゲストのまま押すと create-room.js に
+ * login.html へ弾かれてしまうので、押せないよう見せるのではなくボタンごと隠す。
+ * index.html（app.js の refreshAccount）と同じ理屈をここでも行う。
+ */
+if (detectPage(document) === "standalone") {
+  fetch("/api/me", { credentials: "same-origin" })
+    .then((res) => res.ok)
+    .catch(() => false)
+    .then((loggedIn) => {
+      document.getElementById("create-room-link")?.classList.toggle("hidden", !loggedIn);
+    });
+}
+
+/**
  * 扉が選ばれたときの入店経路。
  *
  * index.html（home）はもう corridor.js を読まない（3D をホームに埋め込むのをやめた）ため、

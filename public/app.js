@@ -454,6 +454,9 @@ async function refreshAccount() {
   $("account-status").textContent = loggedIn ? `ログイン中: ${body.userId}` : "未ログイン";
   $("login-link").classList.toggle("hidden", loggedIn);
   $("profile-link").classList.toggle("hidden", !loggedIn);
+  // 卓を建てるにはログインが必要（§3.1）。ゲストのまま押すと login.html へ
+  // 弾かれてしまうので、押せないよう見せるのではなくボタンごと隠す
+  $("create-room-link").classList.toggle("hidden", !loggedIn);
   renderLogout();
 
   // 保存済みのあだ名があれば入室欄に自動入力する（§3.0）。ユーザーが既に入力していたら上書きしない
