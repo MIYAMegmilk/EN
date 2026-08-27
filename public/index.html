@@ -1308,22 +1308,6 @@
         background: rgba(255, 255, 255, 0.18);
       }
 
-      /* 共有する内容の種類（§6.3 / §10）。共有ボタンの脇の小さな選択 */
-      .vc-screen-kind {
-        flex: none;
-        padding: 4px 6px;
-        border: 1px solid var(--line);
-        border-radius: var(--r-md);
-        background: rgba(0, 0, 0, 0.25);
-        color: var(--text);
-        font-size: 11px;
-      }
-
-      .vc-screen-kind:disabled {
-        opacity: 0.35;
-        cursor: not-allowed;
-      }
-
       /* 共有画面の拡大表示（§7.2）。覆いそのものは .platform を使い回す */
       .vc-zoom-stage {
         flex: 1;
@@ -1951,14 +1935,6 @@
                 </svg>
                 <span class="vc-ctl-label">画面共有</span>
               </button>
-              <!--
-                共有する内容の種類（§6.3）。文字向けは解像度を守って fps を捨て、
-                動き向けは逆。既定は「文字」で、前回値は覚えない（中身が毎回違うため）。
-              -->
-              <select id="vc-screen-kind" class="vc-screen-kind" aria-label="共有する内容の種類">
-                <option value="text">文字を見せる</option>
-                <option value="motion">動きを見せる</option>
-              </select>
               <button id="vc-transcribe" class="vc-ctl" type="button" data-state="off">
                 <svg class="vc-ctl-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                   <g class="vc-ctl-ico-on">
