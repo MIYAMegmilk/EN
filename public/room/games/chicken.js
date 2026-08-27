@@ -34,6 +34,9 @@
  * 5. update は同じ view で何度も呼ばれうる。骨組みは mount で1度だけ作り、
  *    update では中身だけ変える。入力欄の値・フォーカスを毎回壊さない。
  * 6. 送信前に 0〜100 の整数かをここでも確かめる（サーバーでも検証されるが、無駄な往復を減らすため）。
+ * 7. 【連打対策】提出ボタンは連打されうる。gameEvent には共通のレート枠しか無い（§9.3）ので、
+ *    送ったら即ボタンを無効化し、「返事が来るまで二度と送らない」ことをここでも保証する
+ *    （早押しクイズ hayaoshi.js の buzzSent / answerSent と同じ流儀）。
  *
  * このファイルは index.html に専用 CSS を持たないため、見た目は要素の inline style で
  * 最小限だけ付けている（汎用クラス .btn だけは index.html 定義済みのものを使う）。
@@ -186,6 +189,18 @@ export function mount(container, api) {
   let lastPhase = null;
   /** いま提出操作を受け付けてよいか（phase が submit かつ自分が未提出） */
   let canSubmit = false;
+  /**
+   * すでに submit を送って、その返事（次の view）を待っているか。
+   * 提出ボタンは連打されうるが、gameEvent には共通のレート枠しか無いので、
+   * 押した瞬間に送信を止めないと同じ数字を何度も投げて DUPLICATE の赤帯が出る
+   * （早押しクイズの buzzSent / answerSent と同じ考え方）。
+   *
+   * 解除するのは **サーバーが「あなたはまだ未提出です」と言ってきたとき** だけにする。
+   * こうしておけば、ラウンドが変わったとき（次のラウンドは当然また未提出）にも解け、
+   * 期限切れ・レート超過などでサーバーに弾かれたときにも解ける（送れないまま詰まない）。
+   * 自分の提出が通ったかどうかは view.mySubmission が唯一の根拠である（規約4）
+   */
+  let submitSent = false;
 
   // ---------------------------------------------------------------------------
   // 操作
@@ -193,7 +208,8 @@ export function mount(container, api) {
 
   /** 入力欄の値を検証して送る。不正なら送らずにその場で注意を出す（規約6） */
   function submitValue() {
-    if (!canSubmit) return;
+    // 連打・Enter 連打で二度送らない。送信済みなら次の view が来るまで受け付けない
+    if (!canSubmit || submitSent) return;
     const raw = inputEl.value.trim();
     if (raw.length === 0) {
       noteEl.textContent = "0〜100 の整数を入力してください";
@@ -210,6 +226,10 @@ export function mount(container, api) {
       return;
     }
     noteEl.textContent = "";
+    // 送った時点でボタンを止める。戻すのは次の view（規約4）。
+    // 入力欄は触れるままにしておく（弾かれたときに数字を直して出し直せるように）
+    submitSent = true;
+    submitBtn.disabled = true;
     // 送っただけでは提出済みにしない。提出済みかどうかは次の view（mySubmission）で決まる（規約4）
     api.send({ k: "submit", value });
   }
@@ -431,9 +451,12 @@ export function mount(container, api) {
       const submitting = phase === "submit";
       const submitted = mySubmission !== null;
       canSubmit = submitting && !submitted;
+      // サーバーが「まだ未提出」と言っている＝もう一度送ってよい、が唯一の根拠（規約4）。
+      // ラウンドが変わったときにも、弾かれて提出が残らなかったときにも、ここで解ける
+      if (canSubmit) submitSent = false;
       setShown(submitBox, submitting);
       inputEl.disabled = !canSubmit;
-      submitBtn.disabled = !canSubmit;
+      submitBtn.disabled = !canSubmit || submitSent;
       if (submitted) {
         // 提出済みなら自分の数字を出し、入力欄も同じ値にして無効化する
         inputEl.value = String(mySubmission);

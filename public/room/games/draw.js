@@ -39,6 +39,8 @@
  * 5. update は何度でも呼ばれる。**canvas を作り直すと描いた絵が消える**ので、
  *    骨組みは mount で1度だけ作り、update では中身だけ変える。
  * 6. 送信前にここでも範囲・点数を確かめる（サーバーでも検証されるが、無駄な往復を減らす）。
+ *    ただし **残量を view.pointCount だけで数えないこと**。サーバーは描画の配信を間引くので
+ *    その値は遅れて届く。送った点は自分でも数える（下の sentStrokes / usedPoints）。
  *
  * index.html に専用 CSS が無いため、見た目は inline style と汎用クラス .btn で作る。
  */
@@ -389,6 +391,23 @@ export function mount(container, api) {
   let localStroke = null;
   /** まだ送っていない点（平坦な配列） */
   let outbox = [];
+  /**
+   * すでにサーバーへ送った点数の写し（このターンぶん）。
+   *
+   * **view.pointCount だけでは残量を数えられない。** サーバーは描画チャンクの配信を
+   * 間引く（server/games/draw.ts の viewIntervalMs。120〜400ms）ので、送った点が
+   * view に載って返ってくるのは遅れる。その遅れているぶんを数え落とすと、手元の残量は
+   * まだ余っているのに、サーバー側はもう上限に達していて INVALID_INPUT が連発する。
+   *
+   * WebSocket は順序が保たれるので、「送った順に自分で積む」だけでサーバーの
+   * pointCount を正確に写せる。減るのは undo / clear のときだけで、どちらも
+   * 自分が送るものだから、送った時点で同じように減らせばよい。
+   * ストロークごとに持つのは、undo が「直近のストローク1本」を消すため。
+   * @type {{ id: number, count: number }[]}
+   */
+  let sentStrokes = [];
+  /** sentStrokes の合計（毎回足し直さずに済ませるための控え） */
+  let sentPoints = 0;
   /** ストロークの終わり（k:"end"）を送ったあと、次の view で localStroke を捨てる合図 */
   let awaitingFlush = false;
   /** ポインタ操作中のポインタID（マウス・タッチ・ペンを同じ経路で扱う） */
@@ -500,12 +519,29 @@ export function mount(container, api) {
     };
   }
 
+  /**
+   * サーバーがいま数えているであろう点数。
+   *
+   * 届いた view.pointCount は間引きのぶん古い（sentStrokes のコメントを参照）ので、
+   * 自分が送った量のほうが新しければそちらを採る。undo / clear の直後は逆に
+   * view のほうが古くて大きいが、そのときは多め（＝安全側）に見積もることになる。
+   */
+  function usedPoints() {
+    const seen = lastView === null ? 0 : numberOrNull(lastView.pointCount) ?? 0;
+    return Math.max(seen, sentPoints);
+  }
+
+  /** このターンで描ける残りの点数（送信待ちのぶんも引く） */
+  function budgetLeft() {
+    if (lastView === null) return 0;
+    const max = numberOrNull(lastView.pointMax) ?? 0;
+    return Math.max(0, max - usedPoints() - outbox.length / 2);
+  }
+
   /** 上限に達していないか（サーバーでも弾かれるが、無駄な送信をしない。規約6） */
   function hasBudget() {
     if (lastView === null) return false;
-    const used = numberOrNull(lastView.pointCount) ?? 0;
-    const max = numberOrNull(lastView.pointMax) ?? 0;
-    return used + outbox.length / 2 < max;
+    return budgetLeft() > 0;
   }
 
   function onPointerDown(event) {
@@ -578,6 +614,13 @@ export function mount(container, api) {
     while (outbox.length >= 2) {
       const chunk = outbox.slice(0, MAX_CHUNK_POINTS * 2);
       outbox = outbox.slice(chunk.length);
+      // 送った点はサーバーが数えたものとして自分でも積む（間引きで view が遅れるため）。
+      // 同じストロークIDへの追記はサーバー側で1本に連結されるので、写しも同じ形にする
+      const added = chunk.length / 2;
+      const lastSent = sentStrokes.length > 0 ? sentStrokes[sentStrokes.length - 1] : null;
+      if (lastSent !== null && lastSent.id === localStroke.id) lastSent.count += added;
+      else sentStrokes.push({ id: localStroke.id, count: added });
+      sentPoints += added;
       api.send({
         k: "draw",
         s: localStroke.id,
@@ -611,10 +654,17 @@ export function mount(container, api) {
   function onUndo() {
     if (!canDraw) return;
     api.send({ k: "undo" });
+    // サーバーは直近のストローク1本を消す。写しも同じだけ減らす
+    // （サーバーは履歴が空なら何もしないので、写しが空のときも何もしないでよい）
+    const removed = sentStrokes.pop();
+    if (removed !== undefined) sentPoints -= removed.count;
   }
   function onClear() {
     if (!canDraw) return;
     api.send({ k: "clear" });
+    // サーバーは全部消して pointCount を 0 に戻す。写しも合わせる
+    sentStrokes = [];
+    sentPoints = 0;
   }
   /** @type {Array<() => void>} */
   const toolHandlers = [];
@@ -740,7 +790,7 @@ export function mount(container, api) {
       const topic = typeof view.topic === "string" ? view.topic : null;
       const topicLength = numberOrNull(view.topicLength) ?? 0;
       const rev = numberOrNull(view.rev) ?? 0;
-      const pointCount = numberOrNull(view.pointCount) ?? 0;
+      // pointCount は budgetLeft()（usedPoints）が lastView から直に読む
       const pointMax = numberOrNull(view.pointMax) ?? 0;
       const correct = Array.isArray(view.correct) ? view.correct : [];
       const standings = Array.isArray(view.standings) ? view.standings : [];
@@ -754,6 +804,8 @@ export function mount(container, api) {
         nextStrokeId = 0;
         localStroke = null;
         outbox = [];
+        sentStrokes = [];
+        sentPoints = 0;
         awaitingFlush = false;
         activePointerId = null;
         renderedRev = -1;
@@ -806,7 +858,10 @@ export function mount(container, api) {
       setShown(toolsBox, canDraw);
       setShown(budgetEl, canDraw);
       if (canDraw) {
-        const left = Math.max(0, pointMax - pointCount);
+        // 残量は budgetLeft()（＝送信済み・送信待ちのぶんも引いた値）で出す。
+        // view.pointCount は間引きのぶん古いので、それだけで出すと
+        // 「まだ描けます」と言いながらサーバーに弾かれる、という食い違いが起きる
+        const left = budgetLeft();
         budgetEl.textContent = left === 0
           ? "描ける量の上限に達しました（「全部消す」でやり直せます）"
           : `あと ${left} 点ぶん描けます（全 ${pointMax} 点）`;
