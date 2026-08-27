@@ -203,21 +203,206 @@ function isAllowedOrigin(req: Request): boolean {
   }
 }
 
+/** 信頼するプロキシ段数を指定する環境変数。`.env` でも環境変数でもよい */
+const TRUSTED_PROXY_HOPS_ENV = "EN_TRUSTED_PROXY_HOPS";
+
+/**
+ * 信頼するプロキシ段数の既定値。§6 の構成（同一VPS上の Caddy/Nginx が1段）に合わせる。
+ * 1 なら X-Forwarded-For の**右端の1件**＝直前のプロキシが自分で追記した値を採る。
+ */
+export const DEFAULT_TRUSTED_PROXY_HOPS = 1;
+
+/** 段数の上限。これを超える値は設定ミスとみなして既定値へ倒す */
+const MAX_TRUSTED_PROXY_HOPS = 16;
+
+/**
+ * `EN_TRUSTED_PROXY_HOPS` の値を段数として解釈する。
+ * 0〜16 の十進整数だけを受理し、それ以外（空・負数・小数・非数値・上限超過）は null を返す。
+ * 0 は「X-Forwarded-For を一切信頼しない（TCP 接続元をそのまま使う）」の意味。
+ */
+export function parseTrustedProxyHops(raw: string | null | undefined): number | null {
+  const value = (raw ?? "").trim();
+  if (!/^\d{1,2}$/.test(value)) return null;
+  const hops = Number(value);
+  return hops <= MAX_TRUSTED_PROXY_HOPS ? hops : null;
+}
+
+/**
+ * 起動時に段数を1回だけ読む（`.env` → 環境変数の順。TURN や kuromoji と同じ流儀）。
+ * 未設定は既定値、壊れた値は警告のうえ既定値に倒す（安全側は「右端に寄せる」方）。
+ */
+export function trustedProxyHops(): number {
+  let dotenv: Record<string, string> = {};
+  try {
+    dotenv = loadSync({ export: false });
+  } catch {
+    // .env を読めない環境（権限なし等）では環境変数だけを使う
+  }
+  const raw = (dotenv[TRUSTED_PROXY_HOPS_ENV] ?? Deno.env.get(TRUSTED_PROXY_HOPS_ENV) ?? "").trim();
+  if (raw === "") return DEFAULT_TRUSTED_PROXY_HOPS;
+  const hops = parseTrustedProxyHops(raw);
+  if (hops === null) {
+    console.warn(
+      `${TRUSTED_PROXY_HOPS_ENV}: "${raw}" は 0〜${MAX_TRUSTED_PROXY_HOPS} の整数ではありません。` +
+        `既定値 ${DEFAULT_TRUSTED_PROXY_HOPS} を使います`,
+    );
+    return DEFAULT_TRUSTED_PROXY_HOPS;
+  }
+  return hops;
+}
+
+/**
+ * IPv4 のドット10進表記か検証し、正規形（そのまま）を返す。妥当でなければ null。
+ * `01.2.3.4` のような先頭ゼロは、同じアドレスが別キーになるのを避けるため受理しない。
+ */
+function normalizeIpv4(value: string): string | null {
+  const parts = value.split(".");
+  if (parts.length !== 4) return null;
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null;
+    if (part.length > 1 && part.startsWith("0")) return null;
+    if (Number(part) > 255) return null;
+  }
+  return parts.join(".");
+}
+
+/** IPv6 の8グループ（各16bit）を RFC 5952 の正規形へ整える */
+function renderIpv6(groups: number[]): string {
+  // IPv4 射影アドレス（::ffff:a.b.c.d）は RFC 5952 §5 のとおり混在表記のまま出す
+  if (groups[5] === 0xffff && groups.slice(0, 5).every((g) => g === 0)) {
+    const a = groups[6] >> 8, b = groups[6] & 0xff, c = groups[7] >> 8, d = groups[7] & 0xff;
+    return `::ffff:${a}.${b}.${c}.${d}`;
+  }
+  // 最長の0連続（長さ2以上）を1か所だけ "::" に畳む。同長なら最初の並びを選ぶ
+  let bestStart = -1;
+  let bestLen = 0;
+  let runStart = -1;
+  for (let i = 0; i <= groups.length; i++) {
+    if (i < groups.length && groups[i] === 0) {
+      if (runStart < 0) runStart = i;
+      continue;
+    }
+    if (runStart >= 0) {
+      const len = i - runStart;
+      if (len > bestLen) {
+        bestLen = len;
+        bestStart = runStart;
+      }
+      runStart = -1;
+    }
+  }
+  const hex = groups.map((g) => g.toString(16));
+  if (bestLen < 2) return hex.join(":");
+  const head = hex.slice(0, bestStart).join(":");
+  const tail = hex.slice(bestStart + bestLen).join(":");
+  return `${head}::${tail}`;
+}
+
+/**
+ * IPv6 のテキスト表記を検証し、正規形（小文字・0畳み込み済み）を返す。妥当でなければ null。
+ * ゾーンID付き（`fe80::1%eth0`）はプロキシが書く値として想定しないので受理しない。
+ */
+function normalizeIpv6(value: string): string | null {
+  const lower = value.trim().toLowerCase();
+  if (lower === "" || lower.includes("%")) return null;
+  const halves = lower.split("::");
+  if (halves.length > 2) return null;
+  /** ":" 区切りの片側を16bitグループ列へ。末尾側だけ IPv4 混在表記を許す */
+  const parseSide = (side: string, allowIpv4Tail: boolean): number[] | null => {
+    if (side === "") return [];
+    const items = side.split(":");
+    const groups: number[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.includes(".")) {
+        if (!allowIpv4Tail || i !== items.length - 1) return null;
+        const v4 = normalizeIpv4(item);
+        if (v4 === null) return null;
+        const [a, b, c, d] = v4.split(".").map(Number);
+        groups.push((a << 8) | b, (c << 8) | d);
+        continue;
+      }
+      if (!/^[0-9a-f]{1,4}$/.test(item)) return null;
+      groups.push(Number.parseInt(item, 16));
+    }
+    return groups;
+  };
+  if (halves.length === 1) {
+    const groups = parseSide(halves[0], true);
+    if (groups === null || groups.length !== 8) return null;
+    return renderIpv6(groups);
+  }
+  const head = parseSide(halves[0], false);
+  const tail = parseSide(halves[1], true);
+  if (head === null || tail === null) return null;
+  // "::" は1グループ以上の0を表す（RFC 4291）。7グループ以下でなければ畳めていない
+  if (head.length + tail.length > 7) return null;
+  const filled = [...head, ...new Array(8 - head.length - tail.length).fill(0), ...tail];
+  return renderIpv6(filled);
+}
+
+/**
+ * X-Forwarded-For の1要素を IP として検証し、レート制限のキーに使う正規形を返す。
+ * 妥当でなければ null（呼び出し側が TCP 接続元へ倒す）。
+ *
+ * 実装によってポート付きで書かれることがあるため、次の形を受理してポートを落とす:
+ * `1.2.3.4` / `1.2.3.4:5678` / `2001:db8::1` / `[2001:db8::1]` / `[2001:db8::1]:443`。
+ * RFC 7239 の難読化識別子（`_hidden`）や `unknown` は IP ではないので弾く。
+ */
+export function normalizeForwardedIp(value: string): string | null {
+  const text = value.trim();
+  if (text === "") return null;
+  if (text.startsWith("[")) {
+    const close = text.indexOf("]");
+    if (close < 0) return null;
+    const rest = text.slice(close + 1);
+    if (rest !== "" && !/^:\d{1,5}$/.test(rest)) return null;
+    return normalizeIpv6(text.slice(1, close));
+  }
+  const colons = text.split(":").length - 1;
+  if (colons === 0) return normalizeIpv4(text);
+  if (colons === 1) {
+    const cut = text.indexOf(":");
+    if (!/^\d{1,5}$/.test(text.slice(cut + 1))) return null;
+    return normalizeIpv4(text.slice(0, cut));
+  }
+  return normalizeIpv6(text);
+}
+
 /**
  * クライアントの実IPを求める（§3.8 のレート制限のキーに使う）。
- * 本番は同一VPS上のCaddy/Nginxがリバースプロキシする構成（§6）のため、正規の経路では
- * TCP 接続元（remoteAddrHostname）は常に localhost になる。X-Forwarded-For は送信者が
- * 自由に偽装できるヘッダーなので、TCP 接続元が localhost（＝信頼できるプロキシ経由）の
- * ときだけ信頼する。リバースプロキシを経由しない直接アクセスでは TCP 接続元は偽装できない
- * ため、この場合は X-Forwarded-For を無視して TCP 接続元をそのまま使う。
+ *
+ * 本番は同一VPS上の Caddy/Nginx がリバースプロキシする構成（§6）のため、正規の経路では
+ * TCP 接続元（remoteAddrHostname）は常に localhost になる。つまり「TCP 接続元が localhost
+ * なら信頼する」だけでは何の防御にもならない（全リクエストが該当する）。
+ *
+ * X-Forwarded-For は**左から順に古い**（左端＝送信者が名乗った値＝偽装し放題、右端＝直前の
+ * プロキシが自分で見た TCP 接続元）。Caddy の reverse_proxy は既定でクライアントから届いた
+ * 値を置き換えず**追記**するため、左端を採ると攻撃者が毎回別IPを名乗ってレート制限を
+ * すり抜けられる。そこで**右端から hops 段目**（既定1＝右端）を実クライアントとして採る。
+ * Cloudflare → Caddy のように前段が複数あるときは EN_TRUSTED_PROXY_HOPS で段数を増やす。
+ *
+ * 次のいずれかでは X-Forwarded-For を使わず TCP 接続元へ倒す（安全側＝キーが1つに寄って
+ * 制限が厳しくなる方。攻撃者が決めた値をキーにするより望ましい）:
+ * - TCP 接続元が localhost でない（リバースプロキシを経由しない直接アクセス）
+ * - hops が 0（プロキシを信頼しない設定）
+ * - ヘッダーが無い / 要素数が hops に満たない（＝プロキシが期待どおり追記していない）
+ * - 採った要素が IP として妥当でない
  */
-export function clientIp(req: Request, remoteAddrHostname: string): string {
+export function clientIp(
+  req: Request,
+  remoteAddrHostname: string,
+  hops: number = DEFAULT_TRUSTED_PROXY_HOPS,
+): string {
   const trustedProxy = remoteAddrHostname === "127.0.0.1" || remoteAddrHostname === "::1";
   if (!trustedProxy) return remoteAddrHostname;
+  if (!Number.isInteger(hops) || hops < 1) return remoteAddrHostname;
   const forwarded = req.headers.get("x-forwarded-for");
   if (forwarded === null) return remoteAddrHostname;
-  const first = forwarded.split(",")[0]?.trim();
-  return first !== undefined && first.length > 0 ? first : remoteAddrHostname;
+  // 同名ヘッダーが複数あっても Headers.get が ", " で連結するので、この分割で全段を見られる
+  const parts = forwarded.split(",");
+  if (parts.length < hops) return remoteAddrHostname;
+  return normalizeForwardedIp(parts[parts.length - hops]) ?? remoteAddrHostname;
 }
 
 /**
@@ -611,6 +796,8 @@ export function startServer(
   // デバッグ機能（オーナー困りごと: 「どこでログインがはじかれているのかわからない」への対応）。
   // EN_DEBUG_TOKEN が設定されているときだけ有効。空文字（未設定 or 空値）は無効扱いにする。
   const debugToken = (Deno.env.get("EN_DEBUG_TOKEN") ?? "").trim();
+  // 信頼するプロキシ段数も起動時の1回だけ読む（clientIp が X-Forwarded-For を右から数える段数）
+  const proxyHops = trustedProxyHops();
   const debugEnabled = debugToken !== "";
   const debug = new DebugRecorder(debugEnabled);
   const startedAt = Date.now();
@@ -732,7 +919,11 @@ export function startServer(
         return new Response("forbidden origin", { status: 403 });
       }
       if (auth === null) return new Response("auth not configured", { status: 501 });
-      const res = await auth.handle(req, url, clientIp(req, info.remoteAddr.hostname));
+      const res = await auth.handle(
+        req,
+        url,
+        clientIp(req, info.remoteAddr.hostname, proxyHops),
+      );
       if (res !== null) return res;
       return new Response("not found", { status: 404 });
     }
