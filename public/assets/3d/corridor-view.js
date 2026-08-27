@@ -287,6 +287,9 @@ const PAPER_GLOW = [0.10, 0.30, 0.62];
  * @param {string} [options.modelUrl] 部品モデルの URL
  * @param {(code: string) => void} [options.onEnter] 扉を押したとき。卓コードを渡す
  * @param {(room: object|null) => void} [options.onFocus] 目の前の扉が変わったとき
+ * @param {(state: "lost"|"restored") => void} [options.onContextChange]
+ *   GPU 側の描画文脈が落ちた／戻ったとき。落ちている間は描画ループも止まるので、
+ *   呼び出し側は「いま描けていない」ことを画面に出すために使う（黒いまま放置しない）
  * @param {Map<string, string>} [options.tagLabels] タグID → 表示名。木札の文字を
  *   HTML 側の目印へ移したのでこのビューでは読まないが、呼び出し側の書き方を
  *   壊さないよう受け取りだけ残してある
@@ -299,12 +302,15 @@ export function createCorridorView(container, options = {}) {
   const modelUrl = options.modelUrl ?? "/assets/3d/izakaya_corridor_kit.glb";
   const onEnter = options.onEnter ?? null;
   const onFocus = options.onFocus ?? null;
+  const onContextChange = options.onContextChange ?? null;
 
   let rooms = [];
   let disposed = false;
   let loaded = false;
   let paused = false;
   let running = false;
+  /** GPU 側の描画文脈が落ちている間は true。onContextLost / onContextRestored を参照 */
+  let contextLost = false;
   let raf = 0;
 
   // ── 描画の土台 ────────────────────────────────────
@@ -898,15 +904,27 @@ export function createCorridorView(container, options = {}) {
   }
   const onKeyUp = (ev) => keys.delete(ev.key);
 
+  /**
+   * 押されているキーの記録を空にする。
+   *
+   * 押下は keydown で覚えて keyup で消しているが、**キーを押したまま canvas から
+   * フォーカスが外れると keyup が二度と届かない**（Alt+Tab で窓ごと後ろへ回る、
+   * 画面のボタンを押して焦点が移る、など）。記録だけが残るので、戻ってこないかぎり
+   * 歩き続けて止まらない。焦点を失った時点で必ず空にする。
+   */
+  function releaseKeys() {
+    keys.clear();
+  }
+
   // ── 毎フレーム ───────────────────────────────────
   const clock = new THREE.Clock();
 
   /**
-   * rAF を回し始める。pause() 中や読み込み前は何もしない。
+   * rAF を回し始める。pause() 中・読み込み前・文脈が落ちている間は何もしない。
    * 描画をフラグで飛ばすだけだと rAF は回り続けてしまい、電池を食うのは変わらない。
    */
   function start() {
-    if (running || paused || disposed || !loaded) return;
+    if (running || paused || disposed || contextLost || !loaded) return;
     running = true;
     clock.getDelta();          // 止まっていた間の時間を捨てる。再開で一気に飛ばないように
     raf = requestAnimationFrame(loop);
@@ -916,6 +934,42 @@ export function createCorridorView(container, options = {}) {
     running = false;
     cancelAnimationFrame(raf);
     raf = 0;
+  }
+
+  /**
+   * GPU 側の描画文脈が落ちたとき。
+   *
+   * GPU ドライバの再起動・タブの長時間放置・他アプリの負荷などで実際に起きる。
+   * 何も手当てしないと、**描く物が消えた真っ黒な canvas の上で rAF だけが回り続ける**。
+   * 電池と CPU を食う一方で、利用者からは「固まった」ようにしか見えない。
+   *
+   * 既定動作を止めるのは必須。止めないと webglcontextrestored が来ない＝復帰できない。
+   * three.js の WebGLRenderer も自前で同じことをしているが、こちらの登録順に依存しない
+   * よう自分でも止めておく（preventDefault は何度呼んでも害が無い）。
+   */
+  function onContextLost(ev) {
+    ev.preventDefault();
+    if (contextLost) return;      // 二重に来ても片付けは1回だけ
+    contextLost = true;
+    releaseKeys();                // 止まっている間の押下を持ち越さない
+    stop();
+    if (onContextChange !== null) onContextChange("lost");
+  }
+
+  /**
+   * 文脈が戻ったとき。復帰させる方針を採っている。
+   *
+   * three.js 側は WebGLRenderer が自分で内部の状態を作り直す（形も材質もこちらが
+   * 持ったままなので、次に描くときに載せ直される）。こちらは大きさを入れ直して
+   * 回し始めるだけでよい。pause() 中に戻ってきたときは start() が自分で断るので、
+   * ここで paused を見る必要は無い。
+   */
+  function onContextRestored() {
+    if (!contextLost) return;     // 落ちていないのに来たら何もしない
+    contextLost = false;
+    resize();
+    start();
+    if (onContextChange !== null) onContextChange("restored");
   }
 
   function loop() {
@@ -986,6 +1040,14 @@ export function createCorridorView(container, options = {}) {
   el.tabIndex = 0;   // キー操作を受けるためにフォーカスできるようにする
   el.addEventListener("keydown", onKeyDown);
   el.addEventListener("keyup", onKeyUp);
+  // 焦点が canvas から外れたとき（ページ内の別の物を押した等）
+  el.addEventListener("blur", releaseKeys);
+  // 窓ごと後ろへ回ったとき（Alt+Tab・別アプリ・最小化）。この経路で要素の blur まで
+  // 飛ぶかはブラウザ任せなので、要素側だけに頼らず窓でも受ける。
+  // やることは記録を空にするだけなので、両方から来ても害は無い
+  globalThis.addEventListener("blur", releaseKeys);
+  el.addEventListener("webglcontextlost", onContextLost);
+  el.addEventListener("webglcontextrestored", onContextRestored);
 
   // ── 外向きの API ─────────────────────────────────
   /** visibleDoors() の作業用。毎フレーム呼ばれるので使い回す */
@@ -1115,6 +1177,8 @@ export function createCorridorView(container, options = {}) {
       if (paused || disposed) return;
       paused = true;
       stop();
+      // 止めている間の押下は持ち越さない。resume() した瞬間に勝手に歩き出さないため
+      releaseKeys();
     },
 
     /** 止めた描画を再開する。止めていなければ何もしない */
@@ -1153,6 +1217,10 @@ export function createCorridorView(container, options = {}) {
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("keydown", onKeyDown);
       el.removeEventListener("keyup", onKeyUp);
+      el.removeEventListener("blur", releaseKeys);
+      globalThis.removeEventListener("blur", releaseKeys);
+      el.removeEventListener("webglcontextlost", onContextLost);
+      el.removeEventListener("webglcontextrestored", onContextRestored);
       // 形と材質はまとめ描きの間で共有している（提灯の3状態は同じ形を使う等）ので、
       // 一度集めてから重複なく捨てる。
       const geometries = new Set();
