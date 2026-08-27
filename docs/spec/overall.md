@@ -383,7 +383,7 @@ type ErrorCode =
 - C2S: `joinQueue` / `leaveQueue`（ランダムマッチ §3.1.2）、`chat`（§3.9）、`setBot`（bot ON/OFF、host only §3.10）
 - S2C: `queueStatus` / `matched`（マッチ成立→自動入室）、`chat`（発言者情報付き。bot 発言はフラグで区別）
 - `Room.visibility` の意味変更に伴う追加: 公開ルームの入室方式（open / knock）、合言葉ルームの合言葉（サーバー内のみ保持しクライアントへ送らない）
-- 趣味タグ（§3.11）: `PlayerPublic.tags`（タグID配列）、`join` / `joinQueue` / `createRoom` へのタグ指定、公開ルーム一覧へのルームタグ（`GET /api/tags` は実装済み。§4.0参照）
+- 趣味タグ（§3.11）: 実装済み（`PlayerPublic.tags`（タグID配列）、`join` / `joinQueue` / `createRoom` の `tags`、公開ルーム一覧へのルームタグ、`GET /api/tags`。§4.0参照）。用途1（参加者表示）・用途3（ルームタグ）・用途4（bot の話題振り）まで通っている。**残るは用途2**（ランダムマッチで共通タグの多い組み合わせを優先する。いまは並んだ順のまま成立させる）
 - あだ名保存（§3.0）: 実装済み（`PUT /api/profile`、`GET /api/me` の応答へのあだ名・タグ反映。§4.0参照）
 
 ## 5. データモデル
@@ -418,6 +418,7 @@ type Player = {
   connected: boolean; disconnectedAt?: number;
   sessionToken: string;
   score: number;
+  tags?: HobbyTagId[];               // 趣味タグ（§3.11、最大5個）。入室時に持ち込む。未選択なら undefined
 };
 ```
 

@@ -433,7 +433,8 @@
 
       #players li {
         display: flex;
-        align-items: center;
+        /* 趣味タグで行の高さが変わるので、上端を揃える（中央だとボタンが下がる） */
+        align-items: flex-start;
         justify-content: space-between;
         gap: 8px;
         padding: 7px 10px;
@@ -513,8 +514,31 @@
        * .btn そのままだと呑み手の一覧の中で大きすぎるので、ここだけ詰める。
        */
       /* あだ名が長くても行を横へ伸ばさない（flex の既定は min-width: auto のため） */
-      #players li > span {
+      #players li > span,
+      #players li > .player-main,
+      #players .player-main > span {
         min-width: 0;
+      }
+
+      /* 名前の下に趣味タグを積む枠（§3.11 用途1） */
+      #players .player-main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      #players .player-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+      }
+
+      /* 呑み手の一覧は札が小さいので、共通の .tag より一段詰める */
+      #players .player-tags .tag {
+        padding: 1px 7px;
+        font-size: 11px;
+        line-height: 1.5;
       }
 
       #players .btn-mini {

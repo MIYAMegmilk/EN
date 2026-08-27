@@ -14,7 +14,7 @@
 
 import { decodeBase64, encodeBase64 } from "@std/encoding/base64";
 import { deleteCookie, getCookies, setCookie } from "@std/http/cookie";
-import { HOBBY_TAGS, type HobbyTagId, isValidHobbyTagId } from "./hobby_tags.ts";
+import { HOBBY_TAGS, HOBBY_TAGS_MAX, type HobbyTagId, isValidHobbyTagId } from "./hobby_tags.ts";
 import { validateNickname } from "./validation.ts";
 import type { AuthSession, User } from "./types.ts";
 import type { DebugRecorder } from "./debug.ts";
@@ -35,8 +35,13 @@ const SESSION_TOKEN_BYTES = 32;
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /** セッション Cookie 名 */
 export const SESSION_COOKIE_NAME = "session";
-/** 軽量プロフィールに保存できる趣味タグの上限（§3.11） */
-export const PROFILE_TAGS_MAX = 5;
+/**
+ * 軽量プロフィールに保存できる趣味タグの上限（§3.11）。
+ *
+ * 卓へ持ち込める数（hobby_tags.ts の HOBBY_TAGS_MAX）と必ず同じにする。
+ * ここだけ緩いと「保存はできたのに、その顔ぶれのまま卓に入れない」が起きる
+ */
+export const PROFILE_TAGS_MAX = HOBBY_TAGS_MAX;
 
 /** ログイン試行のレート制限（§3.8: IPごとに5回/分） */
 const LOGIN_LIMIT = 5;

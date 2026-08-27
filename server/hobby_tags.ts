@@ -59,6 +59,14 @@ export const HOBBY_TAGS: readonly HobbyTag[] = [
   { id: "gardening", label: "ガーデニング" },
 ];
 
+/**
+ * 1人が選べるタグの上限（§3.11「入室・マッチ待機時に最大5個選択」）。
+ *
+ * プロフィール保存（auth.ts）と卓への持ち込み（rooms.ts）で同じ上限を使う。
+ * 片方だけ緩いと「保存はできたのに卓に入れない」が起きるので、正本はここ1か所にする
+ */
+export const HOBBY_TAGS_MAX = 5;
+
 const HOBBY_TAG_IDS: ReadonlySet<string> = new Set(HOBBY_TAGS.map((t) => t.id));
 
 /** 値がプリセットのタグIDかどうかを判定する（自由入力を弾く） */

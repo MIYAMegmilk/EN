@@ -7,6 +7,7 @@
  * このファイルはどちらからも独立して読み込める最小限の外部依存に留める。
  */
 
+import { HOBBY_TAGS_MAX, type HobbyTagId, isValidHobbyTagId } from "./hobby_tags.ts";
 import { err, NICKNAME_MAX, ok, type Result } from "./types.ts";
 
 /** 文字数はコードポイント単位で数える（サロゲートペア対策） */
@@ -40,4 +41,26 @@ export function validateNickname(input: unknown): Result<string> {
     return err("INVALID_INPUT", "ニックネームに使用できない文字が含まれています");
   }
   return ok(trimmed);
+}
+
+/**
+ * 参加者の趣味タグを検証する（§3.11）。
+ *
+ * 自由入力は受け付けない。プリセットにない ID が1つでも混じっていれば丸ごと弾く
+ * （黙って捨てると、選んだはずのタグが出ない理由が利用者に分からない）。
+ * 重複は取り除いてから上限を見る。省略（undefined）は「タグ無し」として空配列を返す
+ */
+export function validateHobbyTags(input: unknown): Result<HobbyTagId[]> {
+  if (input === undefined) return ok([]);
+  if (!Array.isArray(input)) {
+    return err("INVALID_INPUT", "趣味タグの形式が不正です");
+  }
+  if (!input.every(isValidHobbyTagId)) {
+    return err("INVALID_INPUT", "趣味タグの指定が不正です");
+  }
+  const unique = [...new Set(input as HobbyTagId[])];
+  if (unique.length > HOBBY_TAGS_MAX) {
+    return err("INVALID_INPUT", `趣味タグは${HOBBY_TAGS_MAX}個以内で選んでください`);
+  }
+  return ok(unique);
 }

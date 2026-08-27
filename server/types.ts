@@ -5,6 +5,7 @@
  * ScoreEntry / PlayerPublic / GameState）はこのファイルで確定させる。
  */
 
+import type { HobbyTagId } from "./hobby_tags.ts";
 import type { RoomTagId } from "./room_tags.ts";
 
 // ---------------------------------------------------------------------------
@@ -140,6 +141,11 @@ export type Player = {
   score: number;
   /** ログイン済みの場合のアカウントID（他者には公開しない） */
   userId?: string;
+  /**
+   * 趣味タグ（§3.11、最大5個）。入室時に持ち込んだプリセットのタグID。
+   * 選んでいない人には持たせない（空配列ではなく undefined）
+   */
+  tags?: HobbyTagId[];
 };
 
 /** 公開ルームへの入室申請（§3.1.1） */
@@ -593,6 +599,13 @@ export type PlayerPublic = {
   score: number;
   /** VC 枠に入っているか。7人目以降は false（§3.1） */
   vcEligible: boolean;
+  /**
+   * 趣味タグ（§3.11）。卓の参加者一覧で名前の横に出す用途1。
+   * 表示名はサーバー由来のみなので、ここで配るのは ID だけ。
+   * クライアントは GET /api/tags の対応表で表示名に直す。
+   * 1つも選んでいない人には付けない（undefined）
+   */
+  tags?: HobbyTagId[];
 };
 
 /** ホストにのみ送るノック申請の公開表現（§3.2 原則3） */
@@ -892,6 +905,12 @@ export type C2S =
     nickname: string;
     visibility: RoomVisibility;
     roomName?: string;
+    /**
+     * 卓を建てた本人の趣味タグ（§3.11、最大5個）。join の tags と同じ扱い。
+     * 卓そのものに付けるルームタグ（§2）とは別物で、そちらは
+     * PATCH /api/rooms/:code の tags で設定する
+     */
+    tags?: HobbyTagId[];
     /** 公開ルームの入室方式（§3.1）。省略すると open */
     entryMode?: RoomEntryMode;
     /**
@@ -911,6 +930,12 @@ export type C2S =
      * 空文字は「入力し忘れ」と区別できないので従来どおりエラーにする
      */
     nickname?: string;
+    /**
+     * 参加者の趣味タグ（§3.11、最大5個）。ゲストも送れる。
+     * プリセットにない ID が混じっていれば INVALID_INPUT で弾く。
+     * 再接続（session 指定）のときは見ない（卓が覚えているものをそのまま使う）
+     */
+    tags?: HobbyTagId[];
     session?: string;
     entryToken?: string;
   }
@@ -945,9 +970,11 @@ export type C2S =
   | { t: "gameEvent"; payload: unknown }
   /**
    * ランダムマッチの待機列に並ぶ（§3.1.2）。ゲスト可。
-   * あだ名を省略するとサーバーが しゅんぴ の二つ名を付ける（join と同じ扱い）
+   * あだ名を省略するとサーバーが しゅんぴ の二つ名を付ける（join と同じ扱い）。
+   * tags は趣味タグ（§3.11）。成立した卓へそのまま持ち込む
+   * （相席は初対面ばかりなので、名前の横のタグが効くのはむしろこちら）
    */
-  | { t: "joinQueue"; nickname?: string }
+  | { t: "joinQueue"; nickname?: string; tags?: HobbyTagId[] }
   /** 待機列から抜ける（§3.1.2） */
   | { t: "leaveQueue" }
   | { t: "leave" };
