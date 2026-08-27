@@ -242,6 +242,7 @@ function emptyState(now: number): GameState {
   };
   return {
     definition,
+    runtimePrompts: [],
     phase: "lobby",
     round: 0,
     promptIndex: 0,

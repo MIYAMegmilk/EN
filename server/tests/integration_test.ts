@@ -266,20 +266,35 @@ Deno.test("結合: 3人で雑学クイズを最終結果まで完走する", asy
   await host.sendPaced({ t: "startGame" });
   for (const client of clients) await client.waitPhase("intro");
 
-  /** ホストがスキップして目的のフェーズまで進める（§3.8 のレート制限に触れない間隔で送る） */
+  /**
+   * ホストがスキップして目的のフェーズまで進める（§3.8 のレート制限に触れない間隔で送る）。
+   * ホストが受け取った phase メッセージを返す（表示された選択肢を読むために使う）
+   */
   const skipTo = async (phase: Phase) => {
     await host.sendPaced({ t: "skipPhase" });
-    for (const client of clients) await client.waitPhase(phase);
+    let hostMsg: Extract<S2C, { t: "phase" }> | null = null;
+    for (const client of clients) {
+      const msg = await client.waitPhase(phase);
+      if (client === host) hostMsg = msg;
+    }
+    assertExists(hostMsg);
+    return hostMsg;
   };
 
   for (let round = 1; round <= QUIZ.rounds; round++) {
     await skipTo("prompt");
-    await skipTo("input");
+    const inputMsg = await skipTo("input");
 
     const prompt = QUIZ.prompts[(round - 1) % QUIZ.prompts.length];
     assert(prompt.kind === "choice" && prompt.answer !== undefined);
-    const correct = prompt.answer;
-    const wrong = (correct + 1) % prompt.options.length;
+    // 選択肢はゲーム開始ごとにシャッフルされるので、正解の添字は
+    // 定義の answer ではなく「実際に表示された並び」から引く
+    assert(inputMsg.view.phase === "input");
+    const options = inputMsg.view.options;
+    assertExists(options);
+    const correct = options.indexOf(prompt.options[prompt.answer]);
+    assert(correct >= 0, "表示された選択肢に正解が含まれていない");
+    const wrong = (correct + 1) % options.length;
 
     // 提出順で早さボーナスが決まるため、間隔をあけて順に送る
     await host.sendPaced({ t: "submitInput", value: correct });

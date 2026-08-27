@@ -40,9 +40,23 @@ function players(...ids: string[]): EnginePlayerInput[] {
   return ids.map((id) => ({ id, nickname: `nick-${id}`, connected: true }));
 }
 
-/** startGame をエラーなしで実行する */
+/**
+ * startGame をエラーなしで実行する。
+ *
+ * startGame は選択肢をシャッフルして answer を振り直すため、並べ替えなし（恒等）の
+ * シャッフルを注入し、このファイルのテストが「定義に書いたとおりの選択肢・answer」を
+ * 前提にできるようにする。シャッフルそのものの検証は
+ * server/tests/quiz_answer_position_test.ts が行う。
+ */
 function start(def: GameDefinition, ids: string[], now = T0): GameState {
-  const res = startGame(def, players(...ids), now, DEFAULT_PHASE_DURATIONS);
+  const res = startGame(
+    def,
+    players(...ids),
+    now,
+    DEFAULT_PHASE_DURATIONS,
+    undefined,
+    (items) => [...items],
+  );
   assertEquals(res.error, undefined);
   return res.state;
 }
