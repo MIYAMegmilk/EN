@@ -7,9 +7,9 @@
  * 外部要因はすべて EngineEvent として引数で受け取る。
  * 入力の GameState は変更せず、新しい GameState を返す。
  *
- * 例外は startGame だけで、選択肢のシャッフルと匿名 reveal 用トークンの生成に乱数を使う。
+ * 例外は startGame だけで、お題と選択肢のシャッフル・匿名 reveal 用トークンの生成に乱数を使う。
  * 乱数はここに閉じており、reduce / buildPhaseView は従来どおり純粋・決定的。
- * テストは startGame の tokenSource / shuffleOptions 引数へ決定的な値を注入できる。
+ * テストは startGame の tokenSource / shuffle 引数へ決定的な値を注入できる。
  */
 
 import type {
@@ -198,19 +198,30 @@ export const cryptoShuffle: ShuffleFn = <T>(items: readonly T[]): T[] => {
 /**
  * 出題の原本から「実際に出題するお題」を作る。
  *
- * choice のお題は選択肢を並べ替え、answer を並べ替え後の位置へ振り直す。
+ * **お題の並び自体を毎回シャッフルする。** `startRound` はラウンド番号から
+ * `promptIndex = (round - 1) % runtimePrompts.length` を引くだけなので、原本の順のまま
+ * 載せると「収録28問・rounds 3」の大喜利は何度遊んでも prompts[0..2] の同じ3問しか出ない。
+ * ここで並べ替えておけば、先頭から rounds 本を取るだけで**重複なしの無作為抽選**になり、
+ * 収録データが一巡するまで同じお題が繰り返されない（rounds が件数を超えたときだけ巡回する）。
+ *
+ * choice のお題はさらに選択肢を並べ替え、answer を並べ替え後の位置へ振り直す。
  * 正解位置がデータの書き方に依存しなくなるため、「毎回いちばん上が正解」になる事故を防ぐ。
  * - answer が undefined（正解を持たない選択式）は並べ替えだけ行う
  * - answer が範囲外・非整数の壊れたデータは並べ替えず原本のまま通す（正解が別物に化けないように）
  * - choice 以外（open）はそのまま写す
  *
  * 原本（prompts と各 options）は読むだけで、返す値はすべて新しい配列・新しいオブジェクト。
+ * 件数は原本と必ず一致する（並べ替えるだけで、間引きも水増しもしない）。
  */
 export function buildRuntimePrompts(
   prompts: readonly Prompt[],
-  shuffleOptions: ShuffleFn,
+  shuffle: ShuffleFn,
 ): Prompt[] {
-  return prompts.map((prompt) => {
+  // 並べ替えるのは「どのお題をどのラウンドで出すか」。中身はこのあと1件ずつ写す
+  const ordered = shuffle(prompts);
+  // 注入されたシャッフルが件数を変えてしまった場合の保険。原本の並びで通す
+  const source = ordered.length === prompts.length ? ordered : [...prompts];
+  return source.map((prompt) => {
     if (prompt.kind !== "choice") return { ...prompt };
     const options = prompt.options;
     const answer = prompt.answer;
@@ -219,7 +230,7 @@ export function buildRuntimePrompts(
     if (answerBroken || options.length < 2) return { ...prompt, options: [...options] };
     // 添字を並べ替えてから引き当てる。こうすると正解の移動先が indexOf で求まり、
     // 同じ文字列の選択肢があっても取り違えない
-    const order = shuffleOptions(options.map((_, index) => index));
+    const order = shuffle(options.map((_, index) => index));
     const moved = answer === undefined ? 0 : order.indexOf(answer);
     if (order.length !== options.length || (answer !== undefined && moved < 0)) {
       // 注入されたシャッフルが壊れている場合の保険。原本のまま通す
@@ -744,10 +755,13 @@ function eligibleVoteTargets(state: GameState, voterId: string): string[] {
  *
  * 乱数を使うのはこの関数だけで、reduce / buildPhaseView は純粋なまま。ここで2つ作る。
  *   - 匿名 reveal 用のトークン（全ラウンド分をまとめて）
- *   - definition.prompts から runtimePrompts（選択肢をシャッフルし answer を振り直す）
+ *   - definition.prompts から runtimePrompts（お題の並びと選択肢をシャッフルし、
+ *     choice の answer を並べ替え後の位置へ振り直す）
  *
- * tokenSource / shuffleOptions はテストが決定的な値を注入するための口で、
+ * tokenSource / shuffle はテストが決定的な値を注入するための口で、
  * 省略時は必ず暗号乱数を使う（省略時に固定値・固定の並びにはしない）。
+ * shuffle は「お題の並び」と「選択肢の並び」の両方に使う。恒等シャッフルを渡せば
+ * 定義に書いたとおりの順・並びで出題される（既存テストの前提）。
  */
 export function startGame(
   definition: GameDefinition,
@@ -755,7 +769,7 @@ export function startGame(
   now: number,
   durations: PhaseDurations = DEFAULT_PHASE_DURATIONS,
   tokenSource: RevealTokenSource = randomRevealToken,
-  shuffleOptions: ShuffleFn = cryptoShuffle,
+  shuffle: ShuffleFn = cryptoShuffle,
 ): EngineResult {
   const participants: Record<string, GameParticipant> = {};
   const order: string[] = [];
@@ -773,7 +787,7 @@ export function startGame(
   }
   const base: GameState = {
     definition,
-    runtimePrompts: buildRuntimePrompts(definition.prompts, shuffleOptions),
+    runtimePrompts: buildRuntimePrompts(definition.prompts, shuffle),
     phase: "lobby",
     round: 0,
     promptIndex: 0,

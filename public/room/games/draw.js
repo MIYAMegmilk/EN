@@ -600,7 +600,11 @@ export function mount(container, api) {
   }
 
   function onPointerUp(event) {
-    if (localStroke === null || event.pointerId !== activePointerId) return;
+    if (activePointerId === null || event.pointerId !== activePointerId) return;
+    // 線が残っていなくても、掴んだままのポインタは必ず手放す。
+    // ここを握ったままにすると onPointerDown の先頭で弾かれ続け、二度と描き始められない
+    activePointerId = null;
+    if (localStroke === null) return;
     endStroke();
   }
 
@@ -635,6 +639,22 @@ export function mount(container, api) {
   canvas.addEventListener("pointermove", onPointerMove);
   canvas.addEventListener("pointerup", onPointerUp);
   canvas.addEventListener("pointercancel", onPointerUp);
+  /**
+   * canvas の外で離したときの逃げ場。
+   *
+   * setPointerCapture が無い・例外を投げる環境では、canvas の外でポインタを離しても
+   * pointerup も pointercancel も **canvas には届かない**。届かないと引きかけの線と
+   * activePointerId が残り続け、onPointerDown の先頭 `activePointerId !== null` に
+   * 必ず引っかかって、**そのターンの間ずっと描き始められなくなる**（復帰はターン交代待ち）。
+   * そこで window でも同じハンドラを受ける。捕捉が効く環境では canvas と window の
+   * 両方で呼ばれるが、onPointerUp は手放したあとなら何もしないので二重には効かない。
+   * unmount で必ず外す（規約3）
+   */
+  const globalTarget = typeof globalThis.addEventListener === "function" ? globalThis : null;
+  if (globalTarget !== null) {
+    globalTarget.addEventListener("pointerup", onPointerUp);
+    globalTarget.addEventListener("pointercancel", onPointerUp);
+  }
 
   // 一定間隔で送る（毎 pointermove で送るとレート枠を使い切る）
   const sendTimerId = setInterval(() => {
@@ -661,10 +681,28 @@ export function mount(container, api) {
   }
   function onClear() {
     if (!canDraw) return;
+    // 引きかけの線も「全部消す」の対象なので、送らずにここで捨てる。
+    // 消したあとに古い（大きい）IDのチャンクが届くと、次の 0 番が
+    // サーバーの「IDは必ず増えていく」判定に引っかかってしまう
+    localStroke = null;
+    outbox = [];
+    awaitingFlush = false;
+    // 掴んだままのポインタも手放す（離すイベントは localStroke が無いので届いても効かない）
+    activePointerId = null;
     api.send({ k: "clear" });
     // サーバーは全部消して pointCount を 0 に戻す。写しも合わせる
     sentStrokes = [];
     sentPoints = 0;
+    // **ストロークIDも 0 に戻す。** サーバーが見るのは「履歴の最後より大きいこと」と
+    // 0..DRAW_MAX_STROKES*4（1600）の範囲で、clear の直後は履歴が空なので若いIDでも通る。
+    // 戻さないと「全部消す」を繰り返すたびに増え続け、1601本目で INVALID_INPUT になって
+    // そのターンは二度と描けなくなる（復帰手段がターン交代しか無い）
+    nextStrokeId = 0;
+    // 捨てた「引きかけの線」を画面からも消す（履歴そのものは、サーバーの返事＝
+    // strokes が空の view が届いたときに消える）。版番号を無効にしておき、
+    // その view で必ず引き直させる
+    renderedRev = -1;
+    redraw();
   }
   /** @type {Array<() => void>} */
   const toolHandlers = [];
@@ -905,6 +943,10 @@ export function mount(container, api) {
       canvas.removeEventListener("pointermove", onPointerMove);
       canvas.removeEventListener("pointerup", onPointerUp);
       canvas.removeEventListener("pointercancel", onPointerUp);
+      if (globalTarget !== null) {
+        globalTarget.removeEventListener("pointerup", onPointerUp);
+        globalTarget.removeEventListener("pointercancel", onPointerUp);
+      }
       undoBtn.removeEventListener("click", onUndo);
       clearBtn.removeEventListener("click", onClear);
       for (const off of toolHandlers) off();
