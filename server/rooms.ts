@@ -63,7 +63,9 @@ import {
   ROOM_NAME_MAX,
   type RoomEntryMode,
   type RoomPhase,
+  ROOMS_PER_ACCOUNT_MAX,
   type RoomSnapshot,
+  RTC_SIGNAL_PAYLOAD_MAX_BYTES,
   type S2C,
   type ScoreEntry,
   type ScoringMode,
@@ -165,6 +167,13 @@ export interface ClientLink {
   readonly id: string;
   /** WS アップグレード時に Cookie から検証済みのアカウントID。未ログインなら null（§3.0） */
   readonly userId: string | null;
+  /**
+   * WS ハンドシェイク時の実クライアントIP（main.ts の clientIp が決めた値）。
+   * 「接続を張り直しても同じ相手」と分かる唯一の手がかりで、ノックのレート制限の
+   * キーに使う（§3.8）。取れない実装（テストのモック等）は undefined でよく、
+   * その場合は接続IDへ倒す（knockRateKey 参照）。
+   */
+  readonly clientIp?: string;
   /** S2C メッセージを送る */
   send(msg: S2C): void;
   /**
@@ -700,6 +709,22 @@ export class RoomManager {
       sendError(link, "AUTH_REQUIRED", "ルーム作成にはログインが必要です");
       return;
     }
+    // 1アカウントにつき同時 ROOMS_PER_ACCOUNT_MAX ルームまで（§3.8）。
+    // 「1接続につき1ルーム」だけでは、同じアカウントで WS を何本も張れば
+    // いくらでも卓を作れてしまう。ランダムマッチが建てる卓は ownerUserId が
+    // 空文字なので数に入らない（userId は4文字以上なので取り違えも起きない）
+    let ownedRooms = 0;
+    for (const owned of this.rooms.values()) {
+      if (owned.room.ownerUserId === link.userId) ownedRooms++;
+    }
+    if (ownedRooms >= ROOMS_PER_ACCOUNT_MAX) {
+      sendError(
+        link,
+        "RATE_LIMITED",
+        `同時に持てる卓は${ROOMS_PER_ACCOUNT_MAX}つまでです。使っていない卓を閉じてください`,
+      );
+      return;
+    }
     if (msg.visibility !== "public" && msg.visibility !== "private") {
       sendError(link, "INVALID_INPUT", "公開設定が不正です");
       return;
@@ -1110,8 +1135,9 @@ export class RoomManager {
         );
         return;
       case "rtcSignal":
-        // 中継条件を満たさない場合は黙って破棄する（§3.6 / §3.8）
-        this.relayRtcSignal(entry, player, msg);
+        // 中継条件を満たさない場合は黙って破棄する（§3.6 / §3.8）。
+        // サイズ超過だけは gameEvent と同じく INVALID_INPUT で返す（relayRtcSignal 参照）
+        this.relayRtcSignal(entry, state.link, player, msg);
         return;
       case "gameEvent":
         this.handleGameEvent(entry, state, player, msg, now);
@@ -1159,9 +1185,19 @@ export class RoomManager {
    */
   private relayRtcSignal(
     entry: RoomEntry,
+    link: ClientLink,
     sender: Player,
     msg: Extract<C2S, { t: "rtcSignal" }>,
   ): void {
+    // payload だけ大きさが無検査だと、WS 1メッセージの上限（64KB）と rtcSignal 専用の
+    // レート枠（100件/秒）を掛け合わせて同室の相手1人へ約 6.4MB/秒 を送りつけられる。
+    // 正当な SDP は実測 約6.4KB なので RTC_SIGNAL_PAYLOAD_MAX_BYTES(16KB) で足りる。
+    // 黙って捨てず INVALID_INPUT を返す: 万一 正当な SDP が上限に触れたときに
+    // 「VC が理由もなく繋がらない」ではなく原因の分かる形で表に出すため（gameEvent と同じ）
+    if (rtcSignalPayloadExceedsLimit(msg.payload)) {
+      sendError(link, "INVALID_INPUT", "シグナリングのデータが大きすぎます");
+      return;
+    }
     if (typeof msg.to !== "string" || msg.to === sender.id) return;
     if (!entry.room.players.has(msg.to)) return;
     const target = entry.links.get(msg.to);
@@ -1508,7 +1544,12 @@ export class RoomManager {
         }
       }
       const now = this.now();
-      const recent = entry.knockTimes.get(link.id);
+      // レート制限のキーは接続IDではなくIPにする。接続IDは WS を張り直すたびに
+      // 変わるため、切断→再接続→ノック を繰り返すだけで間隔制限が丸ごと無効になる
+      // （1件のノックごとにホストへスナップショットが再送されるため増幅にもなる）
+      const rateKey = knockRateKey(link);
+      pruneKnockTimes(entry.knockTimes, now);
+      const recent = entry.knockTimes.get(rateKey);
       if (recent !== undefined && now - recent < KNOCK_RATE_WINDOW_MS) {
         sendError(link, "RATE_LIMITED", "続けてノックはできません。少し待ってください");
         return;
@@ -1531,7 +1572,7 @@ export class RoomManager {
         expiresAt: now + KNOCK_TTL_MS,
       };
       room.pendingKnocks.set(knockId, knock);
-      entry.knockTimes.set(link.id, now);
+      entry.knockTimes.set(rateKey, now);
       this.knockers.set(knockId, {
         link,
         roomCode: code,
@@ -1649,8 +1690,9 @@ export class RoomManager {
       this.enqueue(code, () => {
         const entry = this.rooms.get(code);
         if (entry === undefined) return;
-        // レート制限の記録も一緒に捨てる。接続IDごとに増えるだけで刈られないため
-        entry.knockTimes.delete(link.id);
+        // レート制限の記録は**消さない**。切断で消すと「接続し直せば即ノックできる」
+        // ことになり、間隔制限の意味が無くなる。窓から外れた記録は次のノックのときに
+        // pruneKnockTimes がまとめて刈る
         if (!entry.room.pendingKnocks.delete(knockId)) return;
         this.sendHostSnapshotRefresh(entry);
       });
@@ -2379,7 +2421,12 @@ export class RoomManager {
       this.broadcast(entry, { t: "playerLeft", player: this.toPublic(entry, player) });
     }
     if (room.hostId === playerId) {
-      const successor = [...room.players.keys()][0];
+      // 接続中の在籍者を優先する。最古の在籍者が再接続猶予中（connected:false）だと
+      // 「その場に居ない人」がホストになり、残った全員がホスト操作を NOT_HOST で
+      // 弾かれて最長60秒（猶予切れ）まで卓が固まる。誰も接続していないときだけ
+      // 従来どおり最古の在籍者へ倒す
+      const successor = [...room.players.values()].find((p) => p.connected)?.id ??
+        [...room.players.keys()][0];
       if (successor !== undefined) {
         room.hostId = successor;
         this.broadcast(entry, { t: "hostChanged", playerId: successor });
@@ -2688,6 +2735,47 @@ function isPlayerAction(event: ModuleEvent): boolean {
 /** エラーを1件送る */
 function sendError(link: ClientLink, code: ErrorCode, message: string): void {
   link.send({ t: "error", code, message });
+}
+
+/**
+ * rtcSignal の payload が直列化サイズ上限を超えるか（§3.6 / §3.8）。
+ * 直列化できない値（undefined・関数・循環参照など）は上限超過と同じ扱いにする
+ * （games/module.ts の gameEventPayloadExceedsLimit と同じ流儀）。
+ */
+export function rtcSignalPayloadExceedsLimit(payload: unknown): boolean {
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(payload);
+  } catch {
+    return true;
+  }
+  if (typeof json !== "string") return true;
+  return new TextEncoder().encode(json).length > RTC_SIGNAL_PAYLOAD_MAX_BYTES;
+}
+
+/**
+ * ノックのレート制限のキー（§3.8）。
+ *
+ * IP が分かるならそれを使う。接続IDは WS を張り直すたびに変わるので、キーにすると
+ * 「切断して繋ぎ直せば即ノックできる」ことになり間隔制限が効かない。
+ * IP を持たない ClientLink 実装（テストのモック等）だけ接続IDへ倒す。
+ * キー空間を混ぜないよう接頭辞を付ける（IP が "L1" のような値になることはないが、
+ * 由来が読めるようにしておく）。
+ */
+export function knockRateKey(link: ClientLink): string {
+  const ip = link.clientIp;
+  return ip !== undefined && ip !== "" ? `ip:${ip}` : `link:${link.id}`;
+}
+
+/**
+ * ノックのレート制限の記録から、判定窓を過ぎたものを捨てる。
+ * 切断時に消す方式（＝再接続で回避できる）をやめた代わりに、ここで刈って
+ * 卓が生きている間に単調増加しないようにする（chatTimes / voiceTimes と同じ考え方）。
+ */
+function pruneKnockTimes(knockTimes: Map<string, number>, now: number): void {
+  for (const [key, at] of knockTimes) {
+    if (now - at >= KNOCK_RATE_WINDOW_MS) knockTimes.delete(key);
+  }
 }
 
 /** 1件の処理中に例外が出ても他の処理を止めない */
