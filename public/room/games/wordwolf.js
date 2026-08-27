@@ -43,6 +43,9 @@
  * 5. update は同じ view で何度も呼ばれうる。骨組みは mount で1度だけ作り、
  *    update では中身だけ変える。入力欄の値・フォーカスを毎回壊さない。
  * 6. 送信前にここでも軽く検証する（サーバーでも検証されるが、無駄な往復を減らすため）。
+ * 7. 【連打対策】投票・言い当てのボタンは連打されうる。gameEvent には共通のレート枠しか
+ *    無い（§9.3）ので、送ったら即ボタンを無効化し、「返事が来るまで二度と送らない」ことを
+ *    ここでも保証する（早押しクイズ hayaoshi.js の buzzSent / answerSent と同じ流儀）。
  *
  * このファイルは index.html に専用 CSS を持たないため、見た目は要素の inline style で
  * 最小限だけ付けている（汎用クラス .btn だけは index.html 定義済みのものを使う）。
@@ -318,8 +321,23 @@ export function mount(container, api) {
   let canVote = false;
   /** いま言い当てを受け付けてよいか */
   let canGuess = false;
+  /**
+   * すでに vote / guess を送って、その返事（次の view）を待っているか。
+   * ボタンは連打されうるが、gameEvent には共通のレート枠しか無いので、
+   * 押した瞬間に送信を止めないと同じ内容を何度も投げて DUPLICATE の赤帯が出る
+   * （早押しクイズ hayaoshi.js の buzzSent / answerSent と同じ考え方）。
+   *
+   * 解除するのは **サーバーが「あなたはまだ投票／回答していません」と言ってきたとき** だけ。
+   * こうしておけばフェーズが変われば当然解け（持ち越さない）、
+   * 期限切れ・レート超過などで弾かれたときにも解ける（送れないまま詰まない）。
+   * 自分の投票・回答が通ったかどうかは view.myVote / view.guess が唯一の根拠である（規約4）
+   */
+  let voteSent = false;
+  let guessSent = false;
   /** 投票ボタンを作り直すかの判定に使う署名 */
   let voteSignature = "";
+  /** 投票ボタン（署名が変わらなくても有効・無効だけは毎回入れ直す） */
+  let voteButtons = [];
   /** 議論時間ボタンを作り直すかの判定に使う署名 */
   let secSignature = "";
   /** 議論時間ボタン（署名が変わったときだけ作り直す） */
@@ -363,7 +381,8 @@ export function mount(container, api) {
   }
 
   function submitGuess() {
-    if (!canGuess) return;
+    // 連打・Enter 連打で二度送らない。送信済みなら次の view が来るまで受け付けない
+    if (!canGuess || guessSent) return;
     const raw = guessInput.value.trim();
     if (raw.length === 0) {
       guessNoteEl.textContent = "答えを入力してください";
@@ -374,6 +393,10 @@ export function mount(container, api) {
       return;
     }
     guessNoteEl.textContent = "";
+    // 送った時点でボタンを止める。戻すのは次の view（規約4）。
+    // 入力欄は触れるままにしておく（弾かれたときに書き直して出し直せるように）
+    guessSent = true;
+    guessBtn.disabled = true;
     // 送っただけでは回答済みにしない。回答済みかどうかは次の view で決まる（規約4）
     api.send({ k: "guess", word: raw });
   }
@@ -423,36 +446,49 @@ export function mount(container, api) {
     for (const entry of secButtons) markSelected(entry.button, entry.value === selected);
   }
 
+  /** 投票ボタンの有効・無効をまとめて切り替える */
+  function setVoteButtonsEnabled(enabled) {
+    for (const button of voteButtons) button.disabled = !enabled;
+  }
+
   /** 投票ボタン。自分は除く。投票済み・観戦中は押せない */
   function renderVoteButtons(players, myVote, enabled) {
     const signature = players
       .map((p) => `${p.playerId}:${p.connected === true ? 1 : 0}`)
-      .join("|") + `#${myVote ?? ""}#${enabled ? 1 : 0}`;
-    if (signature === voteSignature) return;
-    voteSignature = signature;
-    // 古いボタンのリスナを外してから作り直す（切り離した DOM を抱え込まない）
-    clearVoteListeners();
-    clear(voteList);
-    for (const p of players) {
-      if (p === null || typeof p !== "object" || typeof p.playerId !== "string") continue;
-      if (p.playerId === api.youId) continue;
-      const button = el(
-        "button",
-        p.connected === false ? `${nameOf(p)}（切断中）` : nameOf(p),
-      );
-      button.type = "button";
-      button.className = "btn";
-      button.disabled = !enabled;
-      markSelected(button, myVote === p.playerId);
-      const targetId = p.playerId;
-      const onVote = () => {
-        if (!canVote) return;
-        api.send({ k: "vote", targetId });
-      };
-      button.addEventListener("click", onVote);
-      voteListeners.push({ target: button, type: "click", fn: onVote });
-      voteList.appendChild(button);
+      .join("|") + `#${myVote ?? ""}`;
+    if (signature !== voteSignature) {
+      voteSignature = signature;
+      // 古いボタンのリスナを外してから作り直す（切り離した DOM を抱え込まない）
+      clearVoteListeners();
+      clear(voteList);
+      voteButtons = [];
+      for (const p of players) {
+        if (p === null || typeof p !== "object" || typeof p.playerId !== "string") continue;
+        if (p.playerId === api.youId) continue;
+        const button = el(
+          "button",
+          p.connected === false ? `${nameOf(p)}（切断中）` : nameOf(p),
+        );
+        button.type = "button";
+        button.className = "btn";
+        markSelected(button, myVote === p.playerId);
+        const targetId = p.playerId;
+        const onVote = () => {
+          // 連打で二度送らない。送信済みなら次の view が来るまで受け付けない
+          if (!canVote || voteSent) return;
+          voteSent = true;
+          setVoteButtonsEnabled(false);
+          api.send({ k: "vote", targetId });
+        };
+        button.addEventListener("click", onVote);
+        voteListeners.push({ target: button, type: "click", fn: onVote });
+        voteList.appendChild(button);
+        voteButtons.push(button);
+      }
     }
+    // 有効・無効は署名に含めない。**作り直しの有無によらず毎回入れ直す**
+    // （送信時に自分で無効化したぶんを、次の view で必ず戻せるようにするため）
+    setVoteButtonsEnabled(enabled);
   }
 
   /** 参加者一覧。投票を済ませたかどうかだけを出す（投票先は view に無い） */
@@ -605,6 +641,9 @@ export function mount(container, api) {
       const voting = phase === "vote";
       setShown(voteBox, voting);
       canVote = voting && youArePlayer && myVote === null;
+      // サーバーが「まだ投票していない」と言っている＝もう一度送ってよい、が唯一の根拠（規約4）。
+      // フェーズが変わったときにも、弾かれて投票が残らなかったときにも、ここで解ける
+      if (canVote) voteSent = false;
       if (voting) {
         const votedCount = numberOrNull(view.votedCount) ?? 0;
         const playerCount = numberOrNull(view.playerCount) ?? players.length;
@@ -614,7 +653,7 @@ export function mount(container, api) {
           : votedName === null
           ? `怪しい人に投票してください（投票 ${votedCount} / ${playerCount} 人）`
           : `${votedName} に投票しました（投票 ${votedCount} / ${playerCount} 人・変更できません）`;
-        renderVoteButtons(players, myVote, canVote);
+        renderVoteButtons(players, myVote, canVote && !voteSent);
       }
 
       // --- 参加者一覧（config / discuss / vote のあいだだけ） ---
@@ -641,13 +680,15 @@ export function mount(container, api) {
       const youAreWolf = view.youAreWolf === true;
       const submittedGuess = typeof view.guess === "string" && view.guess.length > 0;
       canGuess = guessing && youAreWolf && !submittedGuess;
+      // 投票と同じ理由（サーバーが「まだ答えていない」と言えば、もう一度送ってよい）
+      if (canGuess) guessSent = false;
       if (guessing) {
         guessInfoEl.textContent = youAreWolf
           ? "あなたが狼でした。市民のお題を言い当てれば逆転勝ちです。"
           : "追放されたのは狼でした。狼が市民のお題を言い当てようとしています。";
         setShown(guessRow, youAreWolf);
         guessInput.disabled = !canGuess;
-        guessBtn.disabled = !canGuess;
+        guessBtn.disabled = !canGuess || guessSent;
         if (submittedGuess) guessNoteEl.textContent = "";
       }
 
@@ -689,6 +730,7 @@ export function mount(container, api) {
     unmount() {
       clearInterval(timerId);
       clearVoteListeners();
+      voteButtons = [];
       for (const entry of listeners) entry.target.removeEventListener(entry.type, entry.fn);
       listeners.length = 0;
       clear(container);
