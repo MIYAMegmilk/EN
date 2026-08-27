@@ -720,6 +720,14 @@ select {
   line-height: 1.3;
   text-align: left;
   overflow-wrap: anywhere;
+  /*
+   * 呑み手の枠は右下のマイクマークを避けるため1行に詰めて … で切るが（index.html
+   * の .vc-peer-label）、bot の細い行は折り返して2行に組むのが前提なので打ち消す。
+   * マイクマークは bot の枠には出ない（bot はマイクを持たない）。
+   */
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
 }
 
 .vc-bot-role {
