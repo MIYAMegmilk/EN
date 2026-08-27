@@ -78,6 +78,48 @@ function vote(playerId: string, targetPlayerId: string, now: number): ModuleEven
   return { t: "clientEvent", playerId, payload: { k: "submitVote", targetPlayerId }, now };
 }
 
+/**
+ * 匿名 reveal 用のトークン（revealTokens / revealTokenPool）は、ゲーム開始ごとに
+ * 暗号乱数で作り直す（H-3 の修正）。別々に開始した2つの state では必ず値が食い違うため、
+ * 「モジュール経由とエンジン直呼びの進行が一致するか」を見るこのファイルでは、
+ * トークンの**中身**だけを伏せ字にして突き合わせる（キー集合と個数は保ったまま比較する）。
+ * トークン自体の性質は server/tests/reveal_anonymity_test.ts が検証する。
+ */
+function maskTokens(state: GameState): GameState {
+  const revealTokens: Record<string, string> = {};
+  for (const id of Object.keys(state.revealTokens).sort()) revealTokens[id] = "<token>";
+  return {
+    ...state,
+    revealTokens,
+    revealTokenPool: state.revealTokenPool.map((row) => row.map(() => "<token>")),
+  };
+}
+
+/** ModuleResult ごとトークンを伏せる */
+function maskResultTokens(result: ModuleResult<GameState>): ModuleResult<GameState> {
+  return { ...result, state: maskTokens(result.state) };
+}
+
+/** 匿名ゲームの投票先はラウンドごとのトークン。実IDを直前の state で引き直す */
+function resolveModuleVote(event: ModuleEvent, state: GameState): ModuleEvent {
+  if (event.t !== "clientEvent") return event;
+  const payload = event.payload;
+  if (payload === null || typeof payload !== "object") return event;
+  const record = payload as Record<string, unknown>;
+  if (record.k !== "submitVote" || typeof record.targetPlayerId !== "string") return event;
+  const token = state.revealTokens[record.targetPlayerId];
+  if (token === undefined) return event;
+  return { ...event, payload: { k: "submitVote", targetPlayerId: token } };
+}
+
+/** 上と同じことを EngineEvent に対して行う */
+function resolveEngineVote(event: EngineEvent, state: GameState): EngineEvent {
+  if (event.t !== "submitVote") return event;
+  const token = state.revealTokens[event.targetPlayerId];
+  if (token === undefined) return event;
+  return { ...event, targetPlayerId: token };
+}
+
 // ---------------------------------------------------------------------------
 // 開始
 // ---------------------------------------------------------------------------
@@ -86,8 +128,10 @@ Deno.test("prompt: init は engine.startGame と同じ state を作る", () => {
   const def = makeDef();
   const mine = initPrompt(def, ["a", "b"]);
   const theirs = engineStartGame(def, players("a", "b"), T0, DEFAULT_PHASE_DURATIONS);
-  assertEquals(mine.state, theirs.state);
+  assertEquals(maskTokens(mine.state), maskTokens(theirs.state));
   assertEquals(mine.changed, true);
+  // 匿名トークンだけは開始ごとの乱数なので一致しない（一致したら乱数になっていない）
+  assertNotEquals(mine.state.revealTokenPool, theirs.state.revealTokenPool);
 });
 
 Deno.test("prompt: init の効果は phaseChanged → viewChanged + schedule に写像される", () => {
@@ -125,7 +169,7 @@ Deno.test("prompt: seed は宣言的フローの進行に影響しない（乱�
     seed: 999_999,
     config: { definition: def },
   });
-  assertEquals(a.state, b.state);
+  assertEquals(maskTokens(a.state), maskTokens(b.state));
 });
 
 // ---------------------------------------------------------------------------
@@ -162,9 +206,10 @@ Deno.test("prompt: vote 1ラウンドの進行が engine 直呼びと完全に�
   ];
 
   for (let i = 0; i < moduleEvents.length; i++) {
-    mine = step(mine, moduleEvents[i]);
-    theirs = engineReduce(theirs, engineEvents[i]).state;
-    assertEquals(mine, theirs, `${i} 件目のイベントで state が食い違った`);
+    // 投票先は state ごとに違うトークンなので、それぞれの state で引き直してから流す
+    mine = step(mine, resolveModuleVote(moduleEvents[i], mine));
+    theirs = engineReduce(theirs, resolveEngineVote(engineEvents[i], theirs)).state;
+    assertEquals(maskTokens(mine), maskTokens(theirs), `${i} 件目のイベントで state が食い違った`);
   }
   assertEquals(mine.phase, "finalResult");
 });
@@ -196,7 +241,7 @@ Deno.test("prompt: 参加者の増減イベントも engine 直呼びと一致�
   for (const [moduleEvent, engineEvent] of pairs) {
     mine = promptModule.reduce(mine, moduleEvent).state;
     theirs = engineReduce(theirs, engineEvent).state;
-    assertEquals(mine, theirs, `${moduleEvent.t} で state が食い違った`);
+    assertEquals(maskTokens(mine), maskTokens(theirs), `${moduleEvent.t} で state が食い違った`);
   }
 });
 
@@ -342,9 +387,15 @@ Deno.test("prompt: 同じ入力からは何度呼んでも同じ結果になる"
   const def = makeDef();
   const a = initPrompt(def, ["a", "b"]);
   const b = initPrompt(def, ["a", "b"]);
-  assertEquals(a, b);
+  // 匿名トークンは開始のたびに引き直す乱数なので、そこだけ伏せて比べる（H-3）。
+  // reduce 自体は乱数を使わないため、同じ state からは何度でも同じ結果になる
+  assertEquals(maskResultTokens(a), maskResultTokens(b));
   assertEquals(
     promptModule.reduce(a.state, { t: "skipPhase", now: T0 + 1 }),
-    promptModule.reduce(b.state, { t: "skipPhase", now: T0 + 1 }),
+    promptModule.reduce(a.state, { t: "skipPhase", now: T0 + 1 }),
+  );
+  assertEquals(
+    maskResultTokens(promptModule.reduce(a.state, { t: "skipPhase", now: T0 + 1 })),
+    maskResultTokens(promptModule.reduce(b.state, { t: "skipPhase", now: T0 + 1 })),
   );
 });
