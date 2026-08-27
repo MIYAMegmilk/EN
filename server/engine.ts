@@ -7,9 +7,9 @@
  * 外部要因はすべて EngineEvent として引数で受け取る。
  * 入力の GameState は変更せず、新しい GameState を返す。
  *
- * 例外は startGame だけで、選択肢のシャッフル（cryptoShuffle）に乱数を使う。
+ * 例外は startGame だけで、選択肢のシャッフルと匿名 reveal 用トークンの生成に乱数を使う。
  * 乱数はここに閉じており、reduce / buildPhaseView は従来どおり純粋・決定的。
- * テストは startGame の shuffleOptions 引数へ決定的な並べ替えを注入できる。
+ * テストは startGame の tokenSource / shuffleOptions 引数へ決定的な値を注入できる。
  */
 
 import type {
@@ -1186,6 +1186,8 @@ export function buildPhaseView(state: GameState, viewerId: string): PhaseView {
         round: state.round,
         totalRounds,
         scoring: def.scoring,
+        inputType: def.inputType,
+        options: promptOptions(state),
         reveal: def.reveal,
         entries: buildRevealEntries(state),
         canVote: def.scoring === "vote" && viewer !== undefined && viewer.role === "player" &&
