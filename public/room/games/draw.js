@@ -51,6 +51,16 @@ const MAX_CHUNK_POINTS = 64;
 const SEND_INTERVAL_MS = 100;
 /** これ未満しか動いていない点は捨てる（高頻度な pointermove で点数を使い切らないため） */
 const MIN_STEP = 2;
+/**
+ * canvas ビットマップの総画素数の上限。
+ *
+ * 表示が大きいほど内部解像度も上げるが、際限なく上げるとメモリと塗り直しの負荷が効く
+ * （1画素4バイトなので 2048×2048 で約16MiB）。2048 は 2D の実装でもまず確保できる
+ * 辺の長さなので、ここを頭打ちにしておけば高 dpr の大画面でも破綻しない
+ */
+const MAX_CANVAS_PIXELS = 2048 * 2048;
+/** devicePixelRatio の上限。これ以上は見た目がほとんど変わらず、面積だけが増える */
+const MAX_DPR = 3;
 
 /** パレット。**並び順がサーバーの色番号（0..7）そのもの**なので、勝手に入れ替えないこと */
 const COLORS = [
@@ -85,6 +95,11 @@ export function mount(container, api) {
   root.style.display = "flex";
   root.style.flexDirection = "column";
   root.style.gap = "8px";
+  // 器に高さがあればそれを使い切る（高さが決まっていない器では auto と同じ扱いになる）。
+  // minHeight:0 が無いと、中身が縮めず器からはみ出す
+  root.style.height = "100%";
+  root.style.minHeight = "0";
+  root.style.boxSizing = "border-box";
 
   const titleEl = el("h3", "お絵かき当て");
   titleEl.style.margin = "0";
@@ -121,9 +136,17 @@ export function mount(container, api) {
   const canvas = document.createElement("canvas");
   canvas.width = CANVAS_SIZE;
   canvas.height = CANVAS_SIZE;
+  // 大きさは器なり（固定の px 上限は置かない）。幅と高さの両方に収まるよう
+  // max-width / max-height を効かせ、正方形の比率は object-fit: contain が守る
   canvas.style.width = "100%";
-  canvas.style.maxWidth = `${CANVAS_SIZE}px`;
+  canvas.style.maxWidth = "100%";
+  canvas.style.maxHeight = "100%";
+  canvas.style.minHeight = "0";
+  canvas.style.flex = "0 1 auto";
   canvas.style.aspectRatio = "1 / 1";
+  canvas.style.objectFit = "contain";
+  // 枠線ぶんで器からはみ出さないようにする
+  canvas.style.boxSizing = "border-box";
   canvas.style.background = "#ffffff";
   canvas.style.border = "1px solid rgba(127,127,127,0.5)";
   canvas.style.borderRadius = "6px";
@@ -292,6 +315,51 @@ export function mount(container, api) {
     paintStroke(localStroke);
   }
 
+  /**
+   * canvas の内部解像度（ビットマップ）を、いま表示されている大きさに合わせる。
+   *
+   * **canvas.width への代入はビットマップも 2D の変換行列も消す**。
+   * 論理座標（0..CANVAS_SIZE-1。サーバー正本と同じ）のまま描き続けられるよう、
+   * ここで必ず行列を掛け直す。消えた絵の描き直しは呼び出し側の仕事。
+   *
+   * @returns {boolean} 実際に作り直したら true。同じ大きさなら何もせず false
+   */
+  function fitCanvas() {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = Math.min(MAX_DPR, Math.max(1, globalThis.devicePixelRatio || 1));
+    // 表示は object-fit: contain。絵が出るのは箱に収まる正方形なので、その辺で倍率を決める。
+    // 箱が 0 のとき（隠れている・まだ measure されていない）は等倍で置いておき、
+    // 見えるようになったときの通知で作り直す
+    const contain = Math.min(rect.width, rect.height) / CANVAS_SIZE;
+    let scale = Number.isFinite(contain) && contain > 0 ? contain * dpr : dpr;
+    // 面積の上限で頭打ちにする（大画面 × 高 dpr で内部解像度が暴走しないように）
+    const pixels = CANVAS_SIZE * CANVAS_SIZE * scale * scale;
+    if (pixels > MAX_CANVAS_PIXELS) scale *= Math.sqrt(MAX_CANVAS_PIXELS / pixels);
+    // 1px 未満に潰れても 0 にはしない（canvas.width = 0 は描画が全部無効になる）
+    const side = Math.max(1, Math.round(CANVAS_SIZE * scale));
+    if (canvas.width === side && canvas.height === side) return false;
+    canvas.width = side;
+    canvas.height = side;
+    if (ctx !== null) ctx.setTransform(side / CANVAS_SIZE, 0, 0, side / CANVAS_SIZE, 0, 0);
+    return true;
+  }
+
+  fitCanvas();
+  /**
+   * 表示の大きさを見張って内部解像度を追従させる。unmount で必ず disconnect する（規約3）。
+   * ResizeObserver は続けて何度も発火するので、作り直したときだけ描き直す
+   */
+  const sizeObserver = typeof ResizeObserver === "function"
+    ? new ResizeObserver(() => {
+      if (!fitCanvas()) return;
+      // 作り直したビットマップは白紙。update は rev が変わったときしか描き直さないので、
+      // 版番号を無効にしたうえで、その場で描き直す（次の点が打たれるまで白紙にしない）
+      renderedRev = -1;
+      redraw();
+    })
+    : null;
+  if (sizeObserver !== null) sizeObserver.observe(canvas);
+
   // ---------------------------------------------------------------------------
   // 入力（マウス・タッチ・ペンを Pointer Events でまとめて扱う）
   // ---------------------------------------------------------------------------
@@ -300,8 +368,13 @@ export function mount(container, api) {
   function toLogical(event) {
     const rect = canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
-    const x = Math.round((event.clientX - rect.left) / rect.width * CANVAS_SIZE);
-    const y = Math.round((event.clientY - rect.top) / rect.height * CANVAS_SIZE);
+    // 表示は object-fit: contain。正方形の絵は箱の中央に収まるので、
+    // 余白（レターボックス）を除いてから論理座標に直す
+    const side = Math.min(rect.width, rect.height);
+    const left = rect.left + (rect.width - side) / 2;
+    const top = rect.top + (rect.height - side) / 2;
+    const x = Math.round((event.clientX - left) / side * CANVAS_SIZE);
+    const y = Math.round((event.clientY - top) / side * CANVAS_SIZE);
     return {
       x: clamp(x, 0, CANVAS_SIZE - 1),
       y: clamp(y, 0, CANVAS_SIZE - 1),
@@ -653,6 +726,7 @@ export function mount(container, api) {
     unmount() {
       clearInterval(timerId);
       clearInterval(sendTimerId);
+      if (sizeObserver !== null) sizeObserver.disconnect();
       canvas.removeEventListener("pointerdown", onPointerDown);
       canvas.removeEventListener("pointermove", onPointerMove);
       canvas.removeEventListener("pointerup", onPointerUp);

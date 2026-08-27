@@ -141,7 +141,10 @@ export function mount(container, api) {
   const buzzBtn = el("button", "早押し！");
   buzzBtn.type = "button";
   buzzBtn.className = "btn";
-  buzzBtn.style.alignSelf = "flex-start";
+  // 広い枠で左端に小さく残らないよう、幅いっぱいの帯にする。
+  // 高さも文字3行ぶんを下限にして、主役表示でも押しやすい大きさにする
+  buzzBtn.style.alignSelf = "stretch";
+  buzzBtn.style.minHeight = "3em";
   buzzBtn.style.fontSize = "1.2em";
   buzzBtn.style.padding = "10px 24px";
   root.appendChild(buzzBtn);

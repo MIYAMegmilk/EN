@@ -35,6 +35,8 @@ const FACES = ["tokkuri", "ochoko", "edamame", "yakitori", "chochin", "yunomi"];
 const BACK = "back";
 const ASSET_DIR = "/assets/games/emoawase";
 const COLS = 4;
+/** 札は6組12枚なので、4列なら3行 */
+const ROWS = (FACES.length * 2) / COLS;
 
 /** 裏返すまでの待ち（ms） */
 const FLIP_BACK_MS = 800;
@@ -57,8 +59,15 @@ export function mount(container, api) {
   const grid = el("div");
   grid.style.display = "grid";
   grid.style.gridTemplateColumns = `repeat(${COLS}, 1fr)`;
+  grid.style.gridTemplateRows = `repeat(${ROWS}, 1fr)`;
   grid.style.gap = "6px";
-  grid.style.maxWidth = "360px";
+  // 大きさは器なり（固定の px 上限は置かない）。幅と高さの両方に収め、
+  // 絵そのものの比率は img の object-fit: contain が守る
+  grid.style.aspectRatio = `${COLS} / ${ROWS}`;
+  grid.style.maxWidth = "100%";
+  grid.style.maxHeight = "100%";
+  grid.style.minHeight = "0";
+  grid.style.flex = "0 1 auto";
   shell.body.appendChild(grid);
 
   const board = el("ol");
@@ -110,6 +119,9 @@ export function mount(container, api) {
       btn.style.background = "transparent";
       btn.style.cursor = "pointer";
       btn.style.lineHeight = "0";
+      // 器が狭いときにマス目が縮めるようにする（既定の min-width:auto だとはみ出す）
+      btn.style.minWidth = "0";
+      btn.style.minHeight = "0";
       btn.dataset.index = String(i);
       const img = document.createElement("img");
       img.src = `${ASSET_DIR}/${BACK}.svg`;
@@ -117,7 +129,9 @@ export function mount(container, api) {
       img.width = 100;
       img.height = 100;
       img.style.width = "100%";
-      img.style.height = "auto";
+      img.style.height = "100%";
+      img.style.minHeight = "0";
+      img.style.objectFit = "contain";
       img.style.borderRadius = "8px";
       img.draggable = false;
       btn.appendChild(img);

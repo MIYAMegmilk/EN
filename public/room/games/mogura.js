@@ -20,6 +20,7 @@
  */
 
 import {
+  autoFitCanvas,
   clear,
   createCanvas,
   createLoop,
@@ -48,6 +49,9 @@ export function mount(container, api) {
   const shell = createShell(container, "もぐらたたき MOGURA");
   const { canvas, ctx } = createCanvas(W, H);
   shell.body.appendChild(canvas);
+  // 表示の大きさに内部解像度を追従させる（帯にも主役表示にも耐えるように）。
+  // 盤面は毎フレーム描き直すので、作り直しの通知は要らない。stop() は unmount で必ず呼ぶ
+  const canvasFit = autoFitCanvas(canvas, ctx, W, H);
 
   const peerList = el("ul");
   peerList.style.margin = "6px 0 0";
@@ -305,6 +309,7 @@ export function mount(container, api) {
 
     unmount() {
       loop.stop();
+      canvasFit.stop();
       canvas.removeEventListener("pointerdown", onPointerDown);
       clear(container);
     },

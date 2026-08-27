@@ -186,6 +186,11 @@ export function createShell(container, title) {
   root.style.display = "flex";
   root.style.flexDirection = "column";
   root.style.gap = "8px";
+  // 器に高さがあればそれを使い切る（高さが決まっていない器では auto と同じ扱いになる）。
+  // minHeight:0 が無いと、中身が縮めず器からはみ出す
+  root.style.height = "100%";
+  root.style.minHeight = "0";
+  root.style.boxSizing = "border-box";
 
   const head = el("h3", title);
   head.style.margin = "0";
@@ -197,7 +202,12 @@ export function createShell(container, title) {
   note.style.opacity = "0.7";
   root.appendChild(note);
 
+  // 遊ぶところ。余った高さはここが引き取る（大きい器では主役が大きくなる）
   const body = el("div");
+  body.style.display = "flex";
+  body.style.flexDirection = "column";
+  body.style.flex = "1 1 auto";
+  body.style.minHeight = "0";
   root.appendChild(body);
 
   const status = el("p", "");
@@ -210,17 +220,36 @@ export function createShell(container, title) {
 }
 
 /**
+ * canvas ビットマップの総画素数の上限。
+ *
+ * 表示が大きいほど内部解像度も上げるが、際限なく上げるとメモリと塗り直しの負荷が効く
+ * （1画素4バイトなので 2048×2048 で約16MiB）。2048 は 2D/WebGL どちらの実装でも
+ * まず確保できる辺の長さなので、ここを頭打ちにしておけば高 dpr の大画面でも破綻しない
+ */
+const MAX_CANVAS_PIXELS = 2048 * 2048;
+/** devicePixelRatio の上限。これ以上は見た目がほとんど変わらず、面積だけが増える */
+const MAX_DPR = 3;
+
+/**
  * 論理サイズ w×h の canvas を作る（devicePixelRatio 対応）。
- * 返る ctx は論理座標で描けるよう、あらかじめ拡大してある
+ * 返る ctx は論理座標で描けるよう、あらかじめ拡大してある。
+ *
+ * 大きさは器なり（固定の px 上限は置かない）。幅と高さの両方に収まるよう
+ * max-width / max-height を効かせ、比率は object-fit: contain が守る。
+ * 器に差し込んだら autoFitCanvas を呼び、表示サイズに内部解像度を追従させること
  */
 export function createCanvas(w, h) {
   const canvas = document.createElement("canvas");
-  const ratio = Math.min(3, Math.max(1, globalThis.devicePixelRatio || 1));
+  const ratio = Math.min(MAX_DPR, Math.max(1, globalThis.devicePixelRatio || 1));
   canvas.width = Math.round(w * ratio);
   canvas.height = Math.round(h * ratio);
   canvas.style.width = "100%";
-  canvas.style.maxWidth = `${w}px`;
+  canvas.style.maxWidth = "100%";
+  canvas.style.maxHeight = "100%";
+  canvas.style.minHeight = "0";
+  canvas.style.flex = "0 1 auto";
   canvas.style.aspectRatio = `${w} / ${h}`;
+  canvas.style.objectFit = "contain";
   canvas.style.touchAction = "manipulation";
   canvas.style.display = "block";
   const ctx = canvas.getContext("2d");
@@ -229,15 +258,72 @@ export function createCanvas(w, h) {
 }
 
 /**
+ * canvas の内部解像度（ビットマップ）を、いま表示されている大きさに合わせる。
+ *
+ * **canvas.width への代入はビットマップも 2D の変換行列も消す**。
+ * 論理サイズ w×h のまま描き続けられるよう、ここで必ず行列を掛け直す
+ * （掛け直しを忘れると、以後 1倍で左上に縮んで描かれる）。
+ * 消えたビットマップの描き直しは呼び出し側の仕事（autoFitCanvas の onResize）。
+ *
+ * @returns {boolean} 実際に作り直したら true。同じ大きさなら何もせず false
+ */
+export function fitCanvasBitmap(canvas, ctx, w, h) {
+  const rect = canvas.getBoundingClientRect();
+  const dpr = Math.min(MAX_DPR, Math.max(1, globalThis.devicePixelRatio || 1));
+  // 表示は object-fit: contain。絵が出るのは箱に収まる w:h の矩形なので、その倍率を使う。
+  // 箱が 0 のとき（隠れている・まだ measure されていない）は等倍で置いておき、
+  // 見えるようになったときの通知で作り直す
+  const contain = Math.min(rect.width / w, rect.height / h);
+  let scale = Number.isFinite(contain) && contain > 0 ? contain * dpr : dpr;
+  // 面積の上限で頭打ちにする（大画面 × 高 dpr で内部解像度が暴走しないように）
+  const pixels = w * h * scale * scale;
+  if (pixels > MAX_CANVAS_PIXELS) scale *= Math.sqrt(MAX_CANVAS_PIXELS / pixels);
+  // 1px 未満に潰れても 0 にはしない（canvas.width = 0 は描画が全部無効になる）
+  const width = Math.max(1, Math.round(w * scale));
+  const height = Math.max(1, Math.round(h * scale));
+  if (canvas.width === width && canvas.height === height) return false;
+  canvas.width = width;
+  canvas.height = height;
+  if (ctx !== null) ctx.setTransform(width / w, 0, 0, height / h, 0, 0);
+  return true;
+}
+
+/**
+ * canvas の表示サイズを見張り、内部解像度を追い掛けさせる。
+ * **返る stop() を unmount で必ず呼ぶこと**（規約3。解除し忘れると mount のたびに溜まる）。
+ *
+ * @param {(() => void)} [onResize] 作り直したときだけ呼ばれる。消えた絵を描き直す用
+ */
+export function autoFitCanvas(canvas, ctx, w, h, onResize) {
+  fitCanvasBitmap(canvas, ctx, w, h);
+  if (typeof ResizeObserver !== "function") return { stop() {} };
+  const observer = new ResizeObserver(() => {
+    // ResizeObserver は続けて何度も発火する。大きさが変わっていなければ何もしない
+    if (!fitCanvasBitmap(canvas, ctx, w, h)) return;
+    if (typeof onResize === "function") onResize();
+  });
+  observer.observe(canvas);
+  return {
+    stop() {
+      observer.disconnect();
+    },
+  };
+}
+
+/**
  * pointerdown の位置を canvas の論理座標に直す。
- * CSS で伸縮していても、論理サイズ（createCanvas の w/h）基準の座標が返る
+ * CSS で伸縮していても、論理サイズ（createCanvas の w/h）基準の座標が返る。
+ * object-fit: contain の余白（レターボックス）を除いてから直すので、
+ * 器の縦横比が w:h とずれていてもずれない
  */
 export function pointerPos(canvas, event, w, h) {
   const rect = canvas.getBoundingClientRect();
-  if (rect.width === 0 || rect.height === 0) return { x: -1, y: -1 };
+  if (rect.width <= 0 || rect.height <= 0) return { x: -1, y: -1 };
+  const scale = Math.min(rect.width / w, rect.height / h);
+  if (!Number.isFinite(scale) || scale <= 0) return { x: -1, y: -1 };
   return {
-    x: ((event.clientX - rect.left) / rect.width) * w,
-    y: ((event.clientY - rect.top) / rect.height) * h,
+    x: (event.clientX - rect.left - (rect.width - w * scale) / 2) / scale,
+    y: (event.clientY - rect.top - (rect.height - h * scale) / 2) / scale,
   };
 }
 
