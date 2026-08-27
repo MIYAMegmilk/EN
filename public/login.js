@@ -272,6 +272,29 @@ $("login").addEventListener("click", async () => {
   }
 });
 
+/**
+ * ブラウザの「戻る」で bfcache から復元されたときの後始末。
+ *
+ * playEnterAnimation() は「このままリロードされずに戻ってくる」ことを
+ * 想定しておらず、遷移前提でボタンを disabled にしたり body に
+ * entering/cover を付けたり #noren-stage を visible にしたりする。
+ * bfcache 復元はスクリプトを再実行せず離脱時の DOM をそのまま蘇らせるため、
+ * これらを戻さないと「暗転しきった画面で固まって何も押せない」状態になる。
+ *
+ * ログイン済みのまま戻ってきた場合は refreshMe() が entrance.html へ
+ * 送り返してくれるので、ここでは画面を操作可能な状態に戻すだけでよい。
+ */
+globalThis.addEventListener("pageshow", (e) => {
+  if (!e.persisted) return;
+  document.body.classList.remove("entering", "cover");
+  $("noren-stage").classList.remove("visible");
+  setControlsDisabled(false);
+  $("status").textContent = "";
+  $("login-error").textContent = "";
+  $("register-error").textContent = "";
+  refreshMe();
+});
+
 Sound.bindButtons();
 Sound.mountControls();
 
