@@ -51,6 +51,58 @@ const MAX_CHUNK_POINTS = 64;
 const SEND_INTERVAL_MS = 100;
 /** これ未満しか動いていない点は捨てる（高頻度な pointermove で点数を使い切らないため） */
 const MIN_STEP = 2;
+/**
+ * canvas ビットマップの総画素数の上限。
+ *
+ * 表示が大きいほど内部解像度も上げるが、際限なく上げるとメモリと塗り直しの負荷が効く
+ * （1画素4バイトなので 2048×2048 で約16MiB）。2048 は 2D の実装でもまず確保できる
+ * 辺の長さなので、ここを頭打ちにしておけば高 dpr の大画面でも破綻しない
+ */
+const MAX_CANVAS_PIXELS = 2048 * 2048;
+/** devicePixelRatio の上限。これ以上は見た目がほとんど変わらず、面積だけが増える */
+const MAX_DPR = 3;
+/**
+ * canvas の表示高さの下限（CSS px）＝ **潰れ防止の最低線**。
+ *
+ * 縦の flex では、min-height が auto のまま（＝内容より縮まない）文字の兄弟に対して、
+ * min-height: 0 の canvas だけがいくらでも縮む。器に高さが通ると不足分がほぼ全部
+ * canvas に割り当たり、数 px まで潰れて絵が消える（主役エリアで実測 1.6px）。
+ * ここはその事故だけを止める線であって、**遊びやすい大きさの目標ではない**。
+ *
+ * 80px の根拠は2つある。
+ *
+ * 1. 絵として読める最低線。論理座標 CANVAS_SIZE（480）の 1/6 の縮尺にあたり、
+ *    太い線（WIDTHS の末尾 = 論理 18px）が 3 CSS px、中くらい（8px）が 1.3 CSS px。
+ *    小さいながら「絵」として形が分かる。数 px まで潰れると絵ではなく帯になる。
+ * 2. **道具箱とお題を画面外へ押し出さない大きさ**であること。実ブラウザ
+ *    （Chrome・窓の高さ 698px・卓に3人・お絵かき当てを主役）で器（#phase-body）は
+ *    241px しかなく、そこから縮まない兄弟（見出し 28 + お題 36 + 道具箱 42 + 隙間 24
+ *    ＝ 130px）を引いた残りは 111px。下限をこれより高く置くと、下限を満たすために
+ *    器からあふれ、**あふれたぶんが道具箱を外側スクロールの向こうへ押し出す**。
+ *    絵を描くゲームで道具箱に届かないのは、絵が少し小さいことより悪い。
+ *
+ * かつて 240px（1/2 の縮尺）を下限にしていたが、それは上の 111px を大きく超えており、
+ * まさにその押し出しを起こしていた（canvas の下 63px が切れ、道具箱は表示領域の外）。
+ * いまの 240px は「余裕があるときに届いてほしい目標」であって下限ではない。
+ * 器に余裕があれば canvas は flex-grow で 240px を超えて育つ（下の SIDE_SHRINK 参照）。
+ */
+const MIN_CANVAS_CSS_PX = 80;
+
+/**
+ * 副次的な文字（正解した人・答え合わせ・得点表）の縮み係数。
+ *
+ * flex の縮みは「flex-shrink × flex-basis」の比で同時に配られる。副次領域と canvas を
+ * 同じ係数（既定の 1）にしていたため、狭い器では両方がいっしょに縮み、canvas は
+ * 下限へ張り付いたまま——器を広げても、副次領域が伸びしろを食うので canvas は
+ * ほとんど育たなかった（#phase-body が約 1044px を超えるまで 240px 止まり）。
+ *
+ * 係数を大きく離すと、flex は先に下限（min-height: 0）へ達した側を凍結して
+ * 残りを他方へ配り直すので、**副次領域が先に畳まれ、canvas は最後に縮む**という
+ * 順序が作れる。1000 は副次領域の内容高さ（実測でも数百 px）に対して十分大きく、
+ * 「まず副次領域を 0 まで畳む」と言い切れる比。
+ * 逆に器が広いときは、畳まれていた副次領域が戻り、canvas はそのまま育ち続ける。
+ */
+const SIDE_SHRINK = 1000;
 
 /** パレット。**並び順がサーバーの色番号（0..7）そのもの**なので、勝手に入れ替えないこと */
 const COLORS = [
@@ -84,23 +136,46 @@ export function mount(container, api) {
   const root = document.createElement("div");
   root.style.display = "flex";
   root.style.flexDirection = "column";
-  root.style.gap = "8px";
+  // 縦に並ぶ子の数だけ隙間が要る。8px × 10 隙間 = 80px は、主役エリアの
+  // 高さ（実測 240.6px）の 1/3 にあたり、文字4行の合計に迫る量だった。
+  // 隙間そのものを詰め、さらに下の headRow / sideBox で「隙間の数」も減らす
+  root.style.gap = "6px";
+  // 器に高さがあればそれを使い切る（高さが決まっていない器では auto と同じ扱いになる）。
+  // minHeight:0 が無いと、中身が縮めず器からはみ出す
+  root.style.height = "100%";
+  root.style.minHeight = "0";
+  root.style.boxSizing = "border-box";
+
+  /**
+   * 見出し行。題名・ターン・残り秒を **横に並べて1行に畳む**。
+   * 縦に3段積むと 27.8 + 23.8 + 23.8 px に隙間 2つぶんが乗って約 88px 取っていたが、
+   * 横に並べれば一番高い題名ぶん（約 28px）で済む。狭い器では折り返す
+   */
+  const headRow = document.createElement("div");
+  headRow.style.display = "flex";
+  headRow.style.flexWrap = "wrap";
+  headRow.style.alignItems = "baseline";
+  headRow.style.columnGap = "10px";
+  headRow.style.rowGap = "2px";
+  // 遊ぶのに要る1行情報。ここは縮ませない（伸ばしもしない）
+  headRow.style.flex = "none";
+  root.appendChild(headRow);
 
   const titleEl = el("h3", "お絵かき当て");
   titleEl.style.margin = "0";
-  root.appendChild(titleEl);
+  headRow.appendChild(titleEl);
 
   /** 「第N/Mターン ／ 出題者: だれそれ」 */
   const headEl = el("p", "");
   headEl.style.margin = "0";
   headEl.style.fontWeight = "700";
-  root.appendChild(headEl);
+  headRow.appendChild(headEl);
 
   /** 残り時間 */
   const timerEl = el("p", "");
   timerEl.style.margin = "0";
   timerEl.style.opacity = "0.8";
-  root.appendChild(timerEl);
+  headRow.appendChild(timerEl);
 
   /** 役割に応じた案内（お題 or 「チャットに答えを書いてね」） */
   const roleEl = el("p", "");
@@ -108,6 +183,8 @@ export function mount(container, api) {
   roleEl.style.padding = "6px 8px";
   roleEl.style.borderRadius = "6px";
   roleEl.style.background = "rgba(127,127,127,0.12)";
+  // お題そのもの。これが読めないと遊べないので縮ませない
+  roleEl.style.flex = "none";
   root.appendChild(roleEl);
 
   /** 自分が正解したときの本人向けフィードバック（正解の発言はチャットから消えるため） */
@@ -115,15 +192,32 @@ export function mount(container, api) {
   myResultEl.style.margin = "0";
   myResultEl.style.fontWeight = "700";
   myResultEl.style.color = "#1e8449";
+  myResultEl.style.flex = "none";
+  // 空のあいだも「隙間1つぶん」は取ってしまうので、中身が無いときは畳む
+  setShown(myResultEl, false);
   root.appendChild(myResultEl);
 
   // --- canvas（作り直さない。規約5） ---
   const canvas = document.createElement("canvas");
   canvas.width = CANVAS_SIZE;
   canvas.height = CANVAS_SIZE;
+  // 大きさは器なり（固定の px 上限は置かない）。幅と高さの両方に収まるよう
+  // max-width / max-height を効かせ、正方形の比率は object-fit: contain が守る
   canvas.style.width = "100%";
-  canvas.style.maxWidth = `${CANVAS_SIZE}px`;
+  canvas.style.maxWidth = "100%";
+  canvas.style.maxHeight = "100%";
+  // 絵が主役。**余った高さを受け取る側**にし（flex-grow: 1）、
+  // 縮む側では **副次領域より後に縮む**（flex-shrink は 1 のまま。副次領域の
+  // SIDE_SHRINK が桁違いに大きいので、先にあちらが 0 まで畳まれる）。
+  // 譲るのは MIN_CANVAS_CSS_PX（潰れ防止の最低線）まで。
+  // flex-basis は auto のまま（0 にすると器の高さが auto のとき——ロビーや
+  // 主役に出ていないとき——に下限まで縮んでしまい、幅なりの正方形にならない）
+  canvas.style.flex = "1 1 auto";
+  canvas.style.minHeight = `${MIN_CANVAS_CSS_PX}px`;
   canvas.style.aspectRatio = "1 / 1";
+  canvas.style.objectFit = "contain";
+  // 枠線ぶんで器からはみ出さないようにする
+  canvas.style.boxSizing = "border-box";
   canvas.style.background = "#ffffff";
   canvas.style.border = "1px solid rgba(127,127,127,0.5)";
   canvas.style.borderRadius = "6px";
@@ -132,15 +226,26 @@ export function mount(container, api) {
   canvas.style.touchAction = "none";
   canvas.setAttribute("role", "img");
   canvas.setAttribute("aria-label", "お絵かきの画面");
-  root.appendChild(canvas);
+  // **root への差し込みは道具箱の後**（下の root.appendChild(canvas) を参照）。
+  // 縦に並ぶ順がそのまま「器からあふれたときに押し出される順」になるので、
+  // 道具箱・お題より下に置く
   const ctx = canvas.getContext("2d");
 
-  // --- 道具箱（出題者のときだけ出す） ---
+  // --- 道具箱（出題者のときだけ出す。**canvas より上**に置く） ---
+  //
+  // 以前は canvas の下に置いていたが、器が狭いと canvas の下限ぶんだけ器からあふれ、
+  // あふれたぶんが道具箱を押し流して「スクロールしないと色も太さも押せない」状態になった
+  // （実測: 道具箱 563〜604px に対し表示領域の下端は 494px）。
+  // 絵を描くゲームで道具箱に届かないのは、絵が少し小さいことより悪い。
+  // canvas より前に置けば、何が起きても道具箱とお題だけは必ず表示領域に残る。
   const toolsBox = document.createElement("div");
   toolsBox.style.display = "flex";
   toolsBox.style.flexWrap = "wrap";
   toolsBox.style.gap = "6px";
   toolsBox.style.alignItems = "center";
+  // 道具箱が縮むと、色も太さも「ひとつ戻す」も押せなくなり、描く操作そのものが死ぬ。
+  // 器がどれだけ狭くてもここは譲らない（入り切らないぶんは外側のスクロールへ）
+  toolsBox.style.flex = "none";
 
   /** @type {HTMLButtonElement[]} */
   const colorBtns = [];
@@ -178,14 +283,49 @@ export function mount(container, api) {
   clearBtn.className = "btn";
   toolsBox.appendChild(clearBtn);
 
-  root.appendChild(toolsBox);
-
-  /** 「あと◯点ぶん描けます」／上限に達したときの注意 */
+  /**
+   * 「あと◯点ぶん描けます」／上限に達したときの注意。
+   *
+   * **道具箱の中に入れる**（別の行にすると、器が狭いときに 1行ぶん＋隙間 1つで
+   * 27px を canvas から奪う）。道具箱の行に余りがあれば右端に収まって 0px で済み、
+   * 収まらなければ道具箱の中で折り返すので、別行に置いたときと同じ高さにしかならない。
+   * 出したり隠したりの条件も道具箱と同じ（描いている本人のときだけ）なので、
+   * 同じ器に入れておくほうが素直
+   */
   const budgetEl = el("p", "");
   budgetEl.style.margin = "0";
   budgetEl.style.fontSize = "0.9em";
   budgetEl.style.opacity = "0.8";
-  root.appendChild(budgetEl);
+  // 描ける残量。上限に達したことに気づけないと描く手が止まるので縮ませない
+  budgetEl.style.flex = "none";
+  // 道具箱の行に収まるときは右端へ寄せる（ボタンと文字がくっつくと押し間違える）
+  budgetEl.style.marginLeft = "auto";
+  toolsBox.appendChild(budgetEl);
+
+  root.appendChild(toolsBox);
+  // canvas は道具箱・お題の後（＝狭いときに真っ先に譲る側）
+  root.appendChild(canvas);
+
+  /**
+   * 副次的な文字（正解した人・答え合わせ・得点表）をまとめる器。
+   *
+   * どれも「無くても遊べるが見えると嬉しい」もの。ここを **縮む側** に置いて
+   * 自前でスクロールさせることで、絵（canvas）の取り分を奪わせない。
+   * min-height: 0 が無いと flex 既定の min-height: auto（＝内容より縮まない）が効き、
+   * 中身の高さぶんを先に確保してしまう。
+   * まとめること自体にも効果があり、3つを別々に並べていたときの隙間3つが1つになる
+   */
+  const sideBox = document.createElement("div");
+  sideBox.style.display = "flex";
+  sideBox.style.flexDirection = "column";
+  sideBox.style.gap = "6px";
+  // 縮み係数を canvas（1）より桁違いに大きくして、**ここが真っ先に畳まれる**ようにする。
+  // 同じ 1 どうしだと両方がいっしょに縮み、canvas が下限へ張り付いたままになる
+  sideBox.style.flex = `0 ${SIDE_SHRINK} auto`;
+  sideBox.style.minHeight = "0";
+  sideBox.style.overflowY = "auto";
+  // 中で下端まで来たときに、外側（#phase）まで連鎖してスクロールしないように
+  sideBox.style.overscrollBehavior = "contain";
 
   // --- 正解者一覧 ---
   const correctBox = document.createElement("div");
@@ -197,7 +337,7 @@ export function mount(container, api) {
   correctList.style.padding = "0";
   correctList.style.listStyle = "none";
   correctBox.appendChild(correctList);
-  root.appendChild(correctBox);
+  sideBox.appendChild(correctBox);
 
   // --- 答え合わせ ---
   const resultBox = document.createElement("div");
@@ -209,7 +349,7 @@ export function mount(container, api) {
   const resultNoteEl = el("p", "");
   resultNoteEl.style.margin = "0";
   resultBox.appendChild(resultNoteEl);
-  root.appendChild(resultBox);
+  sideBox.appendChild(resultBox);
 
   // --- 順位表 ---
   const standingsBox = document.createElement("div");
@@ -221,7 +361,9 @@ export function mount(container, api) {
   standingsList.style.padding = "0";
   standingsList.style.listStyle = "none";
   standingsBox.appendChild(standingsList);
-  root.appendChild(standingsBox);
+  sideBox.appendChild(standingsBox);
+
+  root.appendChild(sideBox);
 
   container.appendChild(root);
 
@@ -292,6 +434,51 @@ export function mount(container, api) {
     paintStroke(localStroke);
   }
 
+  /**
+   * canvas の内部解像度（ビットマップ）を、いま表示されている大きさに合わせる。
+   *
+   * **canvas.width への代入はビットマップも 2D の変換行列も消す**。
+   * 論理座標（0..CANVAS_SIZE-1。サーバー正本と同じ）のまま描き続けられるよう、
+   * ここで必ず行列を掛け直す。消えた絵の描き直しは呼び出し側の仕事。
+   *
+   * @returns {boolean} 実際に作り直したら true。同じ大きさなら何もせず false
+   */
+  function fitCanvas() {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = Math.min(MAX_DPR, Math.max(1, globalThis.devicePixelRatio || 1));
+    // 表示は object-fit: contain。絵が出るのは箱に収まる正方形なので、その辺で倍率を決める。
+    // 箱が 0 のとき（隠れている・まだ measure されていない）は等倍で置いておき、
+    // 見えるようになったときの通知で作り直す
+    const contain = Math.min(rect.width, rect.height) / CANVAS_SIZE;
+    let scale = Number.isFinite(contain) && contain > 0 ? contain * dpr : dpr;
+    // 面積の上限で頭打ちにする（大画面 × 高 dpr で内部解像度が暴走しないように）
+    const pixels = CANVAS_SIZE * CANVAS_SIZE * scale * scale;
+    if (pixels > MAX_CANVAS_PIXELS) scale *= Math.sqrt(MAX_CANVAS_PIXELS / pixels);
+    // 1px 未満に潰れても 0 にはしない（canvas.width = 0 は描画が全部無効になる）
+    const side = Math.max(1, Math.round(CANVAS_SIZE * scale));
+    if (canvas.width === side && canvas.height === side) return false;
+    canvas.width = side;
+    canvas.height = side;
+    if (ctx !== null) ctx.setTransform(side / CANVAS_SIZE, 0, 0, side / CANVAS_SIZE, 0, 0);
+    return true;
+  }
+
+  fitCanvas();
+  /**
+   * 表示の大きさを見張って内部解像度を追従させる。unmount で必ず disconnect する（規約3）。
+   * ResizeObserver は続けて何度も発火するので、作り直したときだけ描き直す
+   */
+  const sizeObserver = typeof ResizeObserver === "function"
+    ? new ResizeObserver(() => {
+      if (!fitCanvas()) return;
+      // 作り直したビットマップは白紙。update は rev が変わったときしか描き直さないので、
+      // 版番号を無効にしたうえで、その場で描き直す（次の点が打たれるまで白紙にしない）
+      renderedRev = -1;
+      redraw();
+    })
+    : null;
+  if (sizeObserver !== null) sizeObserver.observe(canvas);
+
   // ---------------------------------------------------------------------------
   // 入力（マウス・タッチ・ペンを Pointer Events でまとめて扱う）
   // ---------------------------------------------------------------------------
@@ -300,8 +487,13 @@ export function mount(container, api) {
   function toLogical(event) {
     const rect = canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
-    const x = Math.round((event.clientX - rect.left) / rect.width * CANVAS_SIZE);
-    const y = Math.round((event.clientY - rect.top) / rect.height * CANVAS_SIZE);
+    // 表示は object-fit: contain。正方形の絵は箱の中央に収まるので、
+    // 余白（レターボックス）を除いてから論理座標に直す
+    const side = Math.min(rect.width, rect.height);
+    const left = rect.left + (rect.width - side) / 2;
+    const top = rect.top + (rect.height - side) / 2;
+    const x = Math.round((event.clientX - left) / side * CANVAS_SIZE);
+    const y = Math.round((event.clientY - top) / side * CANVAS_SIZE);
     return {
       x: clamp(x, 0, CANVAS_SIZE - 1),
       y: clamp(y, 0, CANVAS_SIZE - 1),
@@ -598,11 +790,11 @@ export function mount(container, api) {
       // 本人向けフィードバック（正解の発言はチャットから消えるので、ここで必ず知らせる）
       if (myOrder !== null) {
         myResultEl.textContent = `正解！ あなたは${myOrder}番目でした（+${myPoints}点）`;
-      } else if (phase === "draw" && !youAreDrawer) {
-        myResultEl.textContent = "";
       } else {
         myResultEl.textContent = "";
       }
+      // 空のまま置くと隙間1つぶん（6px）だけ器を食う。中身があるときだけ出す
+      setShown(myResultEl, myResultEl.textContent !== "");
 
       // canvas は版番号が変わったときだけ描き直す（毎回だと重い・ちらつく）
       if (rev !== renderedRev) {
@@ -653,6 +845,7 @@ export function mount(container, api) {
     unmount() {
       clearInterval(timerId);
       clearInterval(sendTimerId);
+      if (sizeObserver !== null) sizeObserver.disconnect();
       canvas.removeEventListener("pointerdown", onPointerDown);
       canvas.removeEventListener("pointermove", onPointerMove);
       canvas.removeEventListener("pointerup", onPointerUp);

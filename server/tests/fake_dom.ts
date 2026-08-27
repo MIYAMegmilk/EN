@@ -150,6 +150,14 @@ export function createFakeDocument(elements = new Map<string, FakeElement>()) {
     elements,
     document: {
       body,
+      /*
+       * 端末の全画面に出ている要素。本物の全画面 API は再現しないので、
+       * テストが手で入れる（app.js は「いま全画面なのはどの要素か」しか
+       * 見ていないため、これだけで分岐を試せる）。
+       * requestFullscreen / exitFullscreen は**わざと置かない**。無い環境
+       * （全画面に対応しない端末）でも壊れないことの確認を兼ねている。
+       */
+      fullscreenElement: null as FakeElement | null,
       getElementById,
       createElement: (tag: string) => new FakeElement(tag),
       // app.js は bot の絵と手元の操作の絵を inline SVG で組む。

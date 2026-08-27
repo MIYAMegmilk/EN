@@ -20,6 +20,7 @@
  */
 
 import {
+  autoFitCanvas,
   clear,
   createCanvas,
   createLoop,
@@ -48,13 +49,18 @@ export function mount(container, api) {
   const shell = createShell(container, "もぐらたたき MOGURA");
   const { canvas, ctx } = createCanvas(W, H);
   shell.body.appendChild(canvas);
+  // 表示の大きさに内部解像度を追従させる（帯にも主役表示にも耐えるように）。
+  // 盤面は毎フレーム描き直すので、作り直しの通知は要らない。stop() は unmount で必ず呼ぶ
+  const canvasFit = autoFitCanvas(canvas, ctx, W, H);
 
+  // 他の人の得点は副次的な文字。盤面の高さを奪わないよう shell.side へ入れる
+  // （狭い器ではここが縮んで自前でスクロールする）
   const peerList = el("ul");
-  peerList.style.margin = "6px 0 0";
+  peerList.style.margin = "0";
   peerList.style.paddingLeft = "1.2em";
   peerList.style.fontSize = "12px";
   peerList.style.opacity = "0.8";
-  shell.root.appendChild(peerList);
+  shell.side.appendChild(peerList);
 
   const relay = createRelayReader();
 
@@ -305,6 +311,7 @@ export function mount(container, api) {
 
     unmount() {
       loop.stop();
+      canvasFit.stop();
       canvas.removeEventListener("pointerdown", onPointerDown);
       clear(container);
     },

@@ -644,20 +644,40 @@
       }
 
       /*
-       * あそびが始まったら、余った高さの行き先を卓上からあそびの面へ移す。
-       * ロビーの間は卓上が主役でよいが、始まった後まで卓上が場所を抱えて
-       * いると、肝心のゲームが枠からこぼれて見えない。
-       * 公式ゲームは body の data-room-phase（app.js が入れる）、余興は
-       * iframe が挿さっていることで見分ける。
+       * あそびが始まったときの高さの配り方。
+       *
+       * 以前は「始まったら卓上（#vc）を 320px に固定して、余った高さを
+       * あそびの面へ回す」としていたが、あそびは主役エリア（#vc-stage）に
+       * 入って卓上が抱えるようになったので、それでは肝心のゲームが 320px の
+       * 枠に閉じ込められてしまう。いまは逆で、主役が居るあいだは卓上が
+       * 余った高さを全部受け取り、あそびの面（#phase の抜けた .stage-board）は
+       * 中身のぶんだけに縮む。
+       * 主役が居ないときだけ、従来どおりあそびの面へ高さを回す
+       * （公式ゲームは body の data-room-phase、余興は iframe で見分ける）。
        */
-      body:not([data-room-phase="lobby"]) #vc,
-      .stage-main:has(.sandbox-frame-slot > *) #vc {
+      body[data-vc-stage="none"]:not([data-room-phase="lobby"]) #vc,
+      body[data-vc-stage="none"] .stage-main:has(.sandbox-frame-slot > *) #vc {
         flex: 0 0 320px;
       }
 
-      body:not([data-room-phase="lobby"]) .stage-board,
-      .stage-main:has(.sandbox-frame-slot > *) .stage-board {
+      body[data-vc-stage="none"]:not([data-room-phase="lobby"]) .stage-board,
+      body[data-vc-stage="none"] .stage-main:has(.sandbox-frame-slot > *) .stage-board {
         flex: 1 1 0;
+      }
+
+      /*
+       * #phase の定位置。主役に出ているあいだは空になるので場所を取らない。
+       * ロビーの間は中の #phase が畳まれる（下の規則）ため、入れ物ごと畳んで
+       * .stage-board の gap が余分に空かないようにする。
+       */
+      #phase-slot {
+        flex: none;
+        min-height: 0;
+      }
+
+      #phase-slot:empty,
+      body[data-room-phase="lobby"] #phase-slot {
+        display: none;
       }
 
       /* テロップは卓上に浮いているので、面の高さの取り合いには加わらない */
@@ -983,12 +1003,33 @@
         outline: none;
       }
 
-      /* 順位表 */
+      /*
+       * 順位表。見出しを押すと畳める（<details> / <summary>）。あそびが主役に
+       * 出ているあいだは畳んだ状態にして、主役エリアの高さを奪わせない。
+       * 見出しは <h2> のまま <summary> の中に置く。<summary> の中身に見出しを
+       * 1つ置くのは HTML として正しく、順位表が見出しを失わずに済む。
+       */
+      .result-summary {
+        cursor: pointer;
+      }
+
+      /* 畳んでいるときに下の余白だけが残らないよう、開いたときにだけ足す */
+      #result[open] > .result-summary {
+        margin: 0 0 8px;
+      }
+
+      .result-summary:focus-visible {
+        outline: 2px solid var(--gold-3);
+        outline-offset: 2px;
+      }
+
       #result-title {
+        /* 三角の印と同じ行に並べる（block のままだと印だけが上の行に残る） */
+        display: inline;
         font-family: var(--serif);
         font-size: 16px;
         font-weight: 400;
-        margin: 0 0 8px;
+        margin: 0;
         color: var(--cream);
       }
 
@@ -1163,6 +1204,26 @@
       }
 
       /*
+       * 主役が居るあいだの呑み手の面は、折り返さない横一列の帯にする
+       * （Zoom / Discord のストリップと同じ）。高さは帯のぶんだけに固定し、
+       * 溢れたら横に流す。格子のまま残すと主役の場所が無くなる。
+       */
+      body:not([data-vc-stage="none"]) #vc-people {
+        flex: none;
+        height: 92px;
+        flex-wrap: nowrap;
+        justify-content: flex-start;
+        overflow-x: auto;
+        overflow-y: hidden;
+      }
+
+      body:not([data-vc-stage="none"]) #vc-people > .vc-peer {
+        flex: none;
+        height: 100%;
+        max-width: none;
+      }
+
+      /*
        * bot の列。卓上の右端に縦一列でまとめる。
        * 見出しの「bot」は、実在の呑み手と取り違えないための印を、枠ごとの
        * 「BOT」札から列ごとの見出しに移したもの（狭い行に札を重ねると名前が
@@ -1242,6 +1303,54 @@
 
       .vc-self {
         border-color: var(--gold-3);
+      }
+
+      /*
+       * タイルを押して主役にするための押し口（vc.js が枠ごとに1つ差す）。
+       *
+       * 枠そのものを <button> にはできない。中には既に「拡大」「共有をやめる」の
+       * ボタンがあり、<button> の入れ子は HTML として不正だからである。そこで
+       * 透明なボタンを枠いっぱいに敷き、札（.vc-share-badge, z-index: 3）より
+       * 下に置くことで、札の中のボタンは押し口の**外側**に残す。
+       *
+       * 重ね順: 映像(1) < 押し口(2) = 名前(2・DOM で後ろなので上に出る)
+       *       < 札(3) < マイク印・あなたの札(4)
+       * 名前・あなたの札は文字なので pointer-events を切り、押し口へ通す。
+       */
+      .vc-peer-pick {
+        position: absolute;
+        inset: 0;
+        z-index: 2;
+        padding: 0;
+        border: 0;
+        border-radius: var(--r-md);
+        background: transparent;
+        cursor: pointer;
+      }
+
+      .vc-peer-pick:disabled {
+        cursor: default;
+      }
+
+      /* 押せることを目で示す。映像を隠さないよう内側の細い縁だけにする */
+      .vc-peer-pick:hover:not(:disabled) {
+        box-shadow: inset 0 0 0 2px rgba(198, 160, 90, 0.5);
+      }
+
+      .vc-peer-pick:focus-visible {
+        outline: 2px solid var(--gold-3);
+        outline-offset: -3px;
+      }
+
+      /*
+       * いま主役に出ている人の枠。
+       * 話し中（.vc-peer-speaking）は box-shadow を使っているので、こちらは
+       * outline にする。同じ box-shadow で書くと後勝ちで打ち消し合い、
+       * 「主役で、かつ話している」を同時に示せない。
+       */
+      .vc-peer-onstage {
+        outline: 2px solid var(--gold-3);
+        outline-offset: -3px;
       }
 
       .vc-video {
@@ -1331,65 +1440,198 @@
         background: rgba(255, 255, 255, 0.18);
       }
 
-      /*
-       * 共有画面の拡大表示（§7.2）。覆いの作法（Escape・背景クリック）は
-       * .platform を使い回すが、大きさは品書きの `min(1000px, 100%)` では
-       * 足りない。1000px の枠では 1920px 幅の画面が約 1/2 にしか戻らず、
-       * §7.1 の「読ませる」という目的に届かない。ここだけ窓いっぱいまで広げる。
+      /* ── 主役エリア（#vc-stage） ────────────────────────────────
+       * クリックされた人・共有画面・あそびを、卓上のいちばん大きな場所に出す。
+       * 誰を主役にするかは見ている人ごとの手元の状態で、卓には送らない。
        */
-      #vc-zoom {
-        padding: 0;
-        /* 中央寄せではなく、上下左右いっぱいに伸ばす */
-        align-items: stretch;
-        justify-content: stretch;
+
+      /* 主役と呑み手の帯。bot の列（#vc-bots）とは横に並ぶ */
+      #vc-frames {
+        flex: 1;
+        min-width: 0;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
       }
 
-      #vc-zoom .platform-sheet {
-        width: 100%;
-        max-height: none;
-        /* 窓の縁に貼り付くので、角丸と縁取りは意味を失う */
-        border: 0;
-        border-radius: 0;
+      .vc-stage {
+        /* 余った高さはすべて主役が受け取る。帯は自分の高さぶんだけ */
+        flex: 1 1 0;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        background: #000;
+        overflow: hidden;
       }
 
-      /* 見出しは映像の場所を食う。押し口が押せる高さだけ残して詰める */
-      #vc-zoom .platform-head {
-        padding: 6px 10px;
+      /* 主役が居ないときは畳む。display: flex が既定の hidden を打ち消すため明示する */
+      .vc-stage[hidden] {
+        display: none;
       }
 
-      #vc-zoom .platform-head h2 {
-        font-size: 14px;
+      .vc-stage-head {
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 8px;
+        background: rgba(26, 18, 10, 0.94);
       }
 
-      .vc-zoom-stage {
+      /* 帯そのものが場所を食わないよう、押し口は小さめに詰める */
+      .vc-stage-head .btn {
+        flex: none;
+        padding: 4px 9px;
+        font-size: 11.5px;
+        white-space: nowrap;
+      }
+
+      .vc-stage-title {
+        margin: 0;
+        min-width: 0;
+        font-family: var(--serif);
+        font-size: 12.5px;
+        color: var(--cream);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .vc-stage-body {
         flex: 1;
         min-height: 0;
         display: flex;
         align-items: center;
         justify-content: center;
+      }
+
+      /*
+       * 主役に出したあそびの面。#phase は .card なので余白と地の色を持っている。
+       * ここでは枠の中いっぱいに広げ、溢れたぶんだけを流す。
+       *
+       * 高さの鎖を切らないこと。あそびの絵（canvas）は
+       * max-height: 100% / object-fit: contain で組まれているので、
+       * 主役エリア → #phase → #phase-body → あそびの root と
+       * **確定した高さが伝わって初めて**縦にも収まる。途中を height: auto の
+       * まま置くと鎖が切れ、幅いっぱいに広がるだけで高さには収まらない。
+       */
+      .vc-stage-body > #phase {
+        flex: 1 1 auto;
+        align-self: stretch;
+        min-height: 0;
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+      }
+
+      /*
+       * ビューモジュールの器（app.js の gameModuleHost が作る div）。
+       *
+       * ここに何も書かないと display: block の auto 高さになり、#phase-body まで
+       * 届いていた高さの鎖が**この1枚で切れる**。切れるとゲームの root の
+       * height: 100% が解決できずに中身なりの高さへ落ち、canvas の
+       * max-height: 100% も上限として効かなくなる（主役エリアからはみ出して
+       * 内部スクロールになる。文字だけのあそびでは中身が短いので露見しない）。
+       *
+       * 親が auto 高さのとき（ロビーや主役に出ていないとき）は height: 100% が
+       * auto に落ちるだけなので、従来どおり中身なりに伸びる。
+       */
+      .game-module {
+        height: 100%;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+
+      /* 見出しと期限は自分の高さぶん。残りを丸ごとあそびへ渡す */
+      .vc-stage-body > #phase > #phase-title,
+      .vc-stage-body > #phase > #phase-deadline {
+        flex: none;
+      }
+
+      .vc-stage-body > #phase > #phase-body {
+        flex: 1 1 auto;
+        min-height: 0;
+      }
+
+      .vc-stage-video {
+        width: 100%;
+        height: 100%;
+        /* 既定は人の顔。枠に合わせて切って構わない */
+        object-fit: cover;
         background: #000;
       }
 
-      .vc-zoom-video {
-        /* 枠を余さず使う。max-* だと 1280×720 の素の大きさで止まってしまい、
-           大きな窓でも「拡大したのにあまり変わらない」ままになる */
-        width: 100%;
-        height: 100%;
-        /* 端を切らない。読ませるための拡大なので、全体が入ることが最優先 */
+      /*
+       * 共有画面は端を切らない。読ませるための主役表示なので、全体が入る
+       * ことが最優先（タイル側の .vc-video-screen と同じ判断・§7.3）。
+       */
+      .vc-stage-video-screen {
         object-fit: contain;
+      }
+
+      .vc-stage-video[hidden] {
+        display: none;
+      }
+
+      /*
+       * 映像が来ていない人を主役にしたときの下敷き。
+       * 絵はタイルの .vc-peer::before とまったく同じ斜線カメラを使う。
+       * 同じ「映像がない」を別の絵で表すと、タイルと主役で別の話に見える。
+       */
+      .vc-stage-blank {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
         background: #000;
       }
 
-      /* 端末の全画面のあいだは、覆いの縁も余白も見せない */
-      #vc-zoom-stage:fullscreen {
-        width: 100%;
-        height: 100%;
-        background: #000;
+      .vc-stage-blank[hidden] {
+        display: none;
+      }
+
+      .vc-stage-blank::before {
+        content: "";
+        flex: none;
+        width: 84px;
+        height: 84px;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%237a5f3c' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='6.5' width='12' height='11' rx='2.5'/%3E%3Cpath d='M15 11.2 20.5 8v8L15 12.8Z'/%3E%3Cpath d='M4 3.5 20 20.5'/%3E%3C/svg%3E");
+        background-repeat: no-repeat;
+        background-position: center;
+        background-size: contain;
+      }
+
+      /* 名前はここだけに大きく出す（見出しは「映像なし」になる。二重に出さない） */
+      .vc-stage-blank-name {
+        flex: none;
+        margin: 0;
+        max-width: 90%;
+        padding: 4px 14px;
+        border: 1px solid var(--line);
+        border-radius: var(--r-md);
+        font-family: var(--serif);
+        font-size: 26px;
+        line-height: 1.3;
+        color: var(--gold-3);
+        text-align: center;
+        overflow-wrap: anywhere;
       }
 
       .vc-peer-label {
         position: relative;
         z-index: 2;
+        /* 押し口（.vc-peer-pick）の上に出るが、文字なので押下はそちらへ通す */
+        pointer-events: none;
         margin: 0;
         /* 右はマイクマークの場所。名前が長くてもマークの下へ潜らせない */
         padding: 7px 32px 7px 10px;
@@ -1819,6 +2061,17 @@
         #vc {
           min-height: 260px;
         }
+        /*
+         * 縦積みでは卓上の高さが決め打ちなので、主役が居るあいだは枠ごと
+         * 高くして、主役と帯の両方が潰れないようにする。帯を消してしまうと
+         * 誰かに主役を渡す道が無くなるので、細くして残す。
+         */
+        body:not([data-vc-stage="none"]) #vc {
+          min-height: 420px;
+        }
+        body:not([data-vc-stage="none"]) #vc-people {
+          height: 72px;
+        }
         #chat-log {
           min-height: 200px;
           max-height: 46vh;
@@ -1857,7 +2110,6 @@
         background: rgba(50, 12, 10, 0.78);
         color: #f6cdc8;
       }
-
     </style>
   </head>
   <body>
@@ -1931,7 +2183,6 @@
               <button id="join-passphrase" class="btn" type="button">入店</button>
             </div>
           </div>
-
         </div>
 
         <div class="home-head">
@@ -1996,7 +2247,48 @@
               #vc-people = vc.js、#vc-bots = app.js の renderVcBotTiles。
             -->
             <div id="vc-media">
-              <div id="vc-people"></div>
+              <!--
+                主役（ステージ）と呑み手の帯。bot の列と場所を取り合わないよう、
+                この2つだけを縦に積む入れ物でまとめる。#bot は #vc-media を
+                基準に浮かせているので、ここには入れない。
+              -->
+              <div id="vc-frames">
+                <!--
+                  主役エリア。人のカメラ・共有画面（同じ MediaStream を
+                  #vc-stage-video に張る）と、あそびの面（#phase を丸ごと
+                  ここへ移す）のどちらもここに出す。主役が居ないあいだは
+                  hidden で畳む。中身の出し入れは app.js の renderStage。
+                -->
+                <section id="vc-stage" class="vc-stage" aria-label="主役" hidden>
+                  <div class="vc-stage-head">
+                    <p id="vc-stage-title" class="vc-stage-title"></p>
+                    <span class="spacer"></span>
+                    <button id="vc-stage-full" class="btn" type="button">端末の全画面</button>
+                    <button id="vc-stage-close" class="btn" type="button">主役をやめる</button>
+                  </div>
+                  <div id="vc-stage-body" class="vc-stage-body">
+                    <video
+                      id="vc-stage-video"
+                      class="vc-stage-video"
+                      autoplay
+                      playsinline
+                      muted
+                      hidden
+                    >
+                    </video>
+                    <!--
+                      映像が来ていない人を主役にしたときの下敷き。カメラ切でも
+                      主役にできる（Discord と同じ）ので、真っ黒な箱ではなく
+                      タイルと同じ斜線カメラの絵と、その人の名前を大きく出す。
+                      名前は app.js が textContent で入れる（§3.8）。
+                    -->
+                    <div id="vc-stage-blank" class="vc-stage-blank" hidden>
+                      <p id="vc-stage-blank-name" class="vc-stage-blank-name"></p>
+                    </div>
+                  </div>
+                </section>
+                <div id="vc-people"></div>
+              </div>
               <aside id="vc-bots" aria-label="この卓の bot"></aside>
               <!--
                 しゅんぴたちのテロップ（川柳・ゲーム提案・終了アンケート）。
@@ -2099,17 +2391,31 @@
             あそびの面。本編・余興・順位表はまとめてこの一枠の中で流す。
             別々に流すと、どれも中途半端な高さになって卓上まで潰れる。
           -->
-          <div class="stage-board">
-            <section id="phase" class="card block hidden">
-              <h2 id="phase-title"></h2>
-              <p id="phase-deadline"></p>
-              <div id="phase-body"></div>
-            </section>
+          <div id="stage-board" class="stage-board">
+            <!--
+              #phase の定位置。あそびを主役にすると #phase はここから
+              #vc-stage へ移り、降りるとここへ戻る（app.js の renderStage）。
+              入れ物を挟むのは、戻すときに #result より前という並びを
+              appendChild だけで取り戻せるようにするため。
+            -->
+            <div id="phase-slot">
+              <section id="phase" class="card block hidden">
+                <h2 id="phase-title"></h2>
+                <p id="phase-deadline"></p>
+                <div id="phase-body"></div>
+              </section>
+            </div>
 
-            <section id="result" class="card block hidden">
-              <h2 id="result-title"></h2>
+            <!--
+              順位表。あそびが主役に出ているあいだは畳んでおく（app.js の
+              movePhaseTo が open を切り替える）。開いたままだと .stage-board に
+              居座って、主役エリアが受け取るはずの高さを奪うため。消さずに
+              畳むだけなので、見出しを押せば遊んでいる最中でも読める。
+            -->
+            <details id="result" class="card block hidden" open>
+              <summary class="result-summary"><h2 id="result-title"></h2></summary>
               <ul id="result-list"></ul>
-            </section>
+            </details>
           </div>
         </div>
 
@@ -2161,32 +2467,12 @@
     </div>
 
     <!--
-      共有画面の拡大表示（docs/design/vc-screenshare.md §7）。
-      タイルの中では 1920px 幅の画面が 1/8 に縮み、14px の文字が 1.75px に
-      なって読めない。拡大表示は「あると便利」ではなく、この機能が成立する
-      ための前提条件である。覆いの作法は品書き（#game-platform）に揃えてある。
-      中の video には共有者のタイルと同じ MediaStream を張る（デコードは1回、
-      描画が2回になるだけで、追加の受信帯域はゼロ）。
+      共有画面の拡大表示は覆い（#vc-zoom）をやめ、卓上の主役エリア
+      （#vc-stage）に一本化した。タイルの中では 1920px 幅の画面が 1/8 に縮み、
+      14px の文字が 1.75px になって読めないという前提は変わらないので、
+      「拡大」の押し口は主役にする操作として残してある
+      （docs/design/vc-screenshare.md §7）。
     -->
-    <div
-      id="vc-zoom"
-      class="platform hidden"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="vc-zoom-title"
-    >
-      <div class="platform-sheet card">
-        <div class="platform-head">
-          <h2 id="vc-zoom-title">共有画面</h2>
-          <span class="spacer"></span>
-          <button id="vc-zoom-full" class="btn" type="button">端末の全画面</button>
-          <button id="vc-zoom-close" class="btn" type="button">閉じる</button>
-        </div>
-        <div id="vc-zoom-stage" class="vc-zoom-stage">
-          <video id="vc-zoom-video" class="vc-zoom-video" autoplay playsinline muted></video>
-        </div>
-      </div>
-    </div>
 
     <script src="./assets/sound/sound.js"></script>
     <script src="./rooms.js"></script>

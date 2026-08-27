@@ -63,7 +63,12 @@ export function mount(container, api) {
   const shell = createShell(container, "反射神経バトル REFLEX");
 
   const pad = el("div");
+  // 高さは器なり。広い枠では余った高さを取り、狭い帯では文字とタップ域が潰れない
+  // 下限（文字3行ぶん）まで縮む。160px は従来の高さで、伸び縮みの基準として残してある
   pad.style.height = "160px";
+  pad.style.flex = "1 1 auto";
+  pad.style.minHeight = "3em";
+  pad.style.maxHeight = "100%";
   pad.style.borderRadius = "10px";
   pad.style.display = "flex";
   pad.style.alignItems = "center";
@@ -80,10 +85,12 @@ export function mount(container, api) {
   pad.appendChild(padText);
   shell.body.appendChild(pad);
 
+  // 順位表は副次的な文字。タップ域の高さを奪わないよう shell.side へ入れる
+  // （狭い器ではここが縮んで自前でスクロールする）
   const board = el("ol");
-  board.style.margin = "8px 0 0";
+  board.style.margin = "0";
   board.style.paddingLeft = "1.4em";
-  shell.root.appendChild(board);
+  shell.side.appendChild(board);
 
   const relay = createRelayReader();
 
