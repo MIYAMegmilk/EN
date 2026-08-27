@@ -708,6 +708,19 @@ Deno.test("GET / は正しいCookieでログイン済みなら entrance.html を
   }
 });
 
+Deno.test("GET / は Cache-Control: no-store を返す（ログイン状態でブラウザにキャッシュさせない）", async () => {
+  const kv = await Deno.openKv(":memory:");
+  const handle = startServer(0, "127.0.0.1", kv);
+  try {
+    const res = await fetch(`http://127.0.0.1:${handle.port}/`);
+    await res.body?.cancel();
+    assertEquals(res.headers.get("cache-control"), "no-store");
+  } finally {
+    await handle.shutdown();
+    kv.close();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // gameEvent のレート制限（設計書 docs/design/games-unified.md §2.2 / §9.3）
 //
