@@ -149,9 +149,17 @@ const DEFAULT_ROOM_HANDOFF: RoomHandoffStub = {
 };
 
 /** app.js を偽の環境で読み込む */
+/**
+ * VC.join() の偽物。既定は「繋がらなかった体（false）で即座に解決」。
+ * マイクの許可ダイアログを見ているあいだの挙動を試すテストでは、
+ * テスト側が解決の時機を握れるよう差し替える。
+ */
+type VcJoinStub = () => Promise<boolean>;
+
 async function load(
   guestProfile: GuestProfileStub = DEFAULT_GUEST_PROFILE,
   roomHandoff: RoomHandoffStub = DEFAULT_ROOM_HANDOFF,
+  vcJoin: VcJoinStub | null = null,
 ): Promise<Harness> {
   FakeSocket.instances = [];
   const { elements, document } = createFakeDocument();
@@ -222,7 +230,7 @@ async function load(
       // Promise を返させる。ここでは繋がらなかった体（false）でよい
       join: () => {
         calls.push("VC.join");
-        return Promise.resolve(false);
+        return vcJoin === null ? Promise.resolve(false) : vcJoin();
       },
       // 実物は畳んだら active が false になる（vc_teardown_test.ts で検証済み）
       teardown: () => {
@@ -874,9 +882,126 @@ function playerPublic(id: string, vcEligible: boolean) {
   return { id, nickname: id, connected: true, isHost: false, score: 0, vcEligible };
 }
 
+/**
+ * VC.join() の解決に続く後始末（app.js の done）を走らせる。
+ * done は .then で予約されるので、1度マクロタスクを跨げば必ず流れる。
+ * ここでの setTimeout はテスト側の本物（app.js に渡す偽物とは別）。
+ */
+function flushMicrotasks(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/**
+ * 解決の時機をテストが握れる VC.join の偽物。
+ * 返り値の gates[n] を呼ぶと n 本目の join がその値で解決する。
+ */
+function gatedVcJoin(): { stub: VcJoinStub; gates: Array<(joined: boolean) => void> } {
+  const gates: Array<(joined: boolean) => void> = [];
+  return {
+    gates,
+    stub: () => new Promise<boolean>((resolve) => gates.push(resolve)),
+  };
+}
+
+/** VC.join が呼ばれた回数 */
+function joinCount(h: Harness): number {
+  return h.calls.filter((c) => c === "VC.join").length;
+}
+
+Deno.test("app.js: 参加処理の最中に届いた繰り上がりは、参加が落ち着いてからやり直す", async () => {
+  const { stub, gates } = gatedVcJoin();
+  const h = await load(DEFAULT_GUEST_PROFILE, DEFAULT_ROOM_HANDOFF, stub);
+  // 入店時の自動参加が始まる。マイクの許可ダイアログを見ている状態（未解決）
+  enterRoom(h);
+  assertEquals(joinCount(h), 1);
+  assertEquals(gates.length, 1);
+
+  // その最中に枠が空いて自分が繰り上がった
+  h.socket().receive({ t: "playerJoined", player: playerPublic("p1", true) });
+  // 掴んでいる最中に重ねて取らない（C-2 / C-3 の再入ガードは効いたまま）
+  assertEquals(joinCount(h), 1, "参加処理の最中にマイクを二重に掴まない");
+
+  // 1本目の join が「枠外で入れなかった」と落ち着く
+  gates[0](false);
+  await flushMicrotasks();
+
+  // 取りこぼした繰り上がりをここでやり直す。やらないと枠内なのに一生入れない
+  assertEquals(joinCount(h), 2, "落ち着いたあとに参加をやり直す");
+});
+
+Deno.test("app.js: やり直した参加も失敗したら、それ以上は自動で再試行しない", async () => {
+  const { stub, gates } = gatedVcJoin();
+  const h = await load(DEFAULT_GUEST_PROFILE, DEFAULT_ROOM_HANDOFF, stub);
+  enterRoom(h);
+  h.socket().receive({ t: "playerJoined", player: playerPublic("p1", true) });
+
+  // 1本目が失敗 → 取りこぼした知らせのぶんを一度だけやり直す
+  gates[0](false);
+  await flushMicrotasks();
+  assertEquals(joinCount(h), 2);
+
+  // やり直した2本目も失敗（マイクを拒み続けている人）
+  gates[1](false);
+  await flushMicrotasks();
+  await flushMicrotasks();
+
+  // 新しい知らせが来ない限り、ここで打ち止め。増え続けると許可を求め続けてしまう
+  assertEquals(joinCount(h), 2, "新しい知らせが来ない限り再々試行しない");
+  assertEquals(gates.length, 2, "未解決の join が積み上がっていない");
+});
+
+Deno.test("app.js: 参加できていれば、取りこぼした繰り上がりがあってもやり直さない", async () => {
+  const { stub, gates } = gatedVcJoin();
+  const h = await load(DEFAULT_GUEST_PROFILE, DEFAULT_ROOM_HANDOFF, stub);
+  enterRoom(h);
+  h.socket().receive({ t: "playerJoined", player: playerPublic("p1", true) });
+
+  // 1本目の join が成功した（VC 側の active が立つ）
+  h.setVcActive(true);
+  gates[0](true);
+  await flushMicrotasks();
+  await flushMicrotasks();
+
+  assertEquals(joinCount(h), 1, "参加できているのに入り直さない");
+});
+
+Deno.test("app.js: 卓を離れたあとは、取りこぼした繰り上がりでもやり直さない", async () => {
+  const { stub, gates } = gatedVcJoin();
+  const h = await load(DEFAULT_GUEST_PROFILE, DEFAULT_ROOM_HANDOFF, stub);
+  enterRoom(h);
+  h.socket().receive({ t: "playerJoined", player: playerPublic("p1", true) });
+
+  // 許可ダイアログを見たまま「お先に失礼」を押した
+  h.element("leave").click();
+  gates[0](false);
+  await flushMicrotasks();
+  await flushMicrotasks();
+
+  assertEquals(joinCount(h), 1, "卓を出たあとにマイクを掴み直さない");
+});
+
+Deno.test("app.js: 参加処理の最中に届いた他人の知らせでは、やり直さない", async () => {
+  const { stub, gates } = gatedVcJoin();
+  const h = await load(DEFAULT_GUEST_PROFILE, DEFAULT_ROOM_HANDOFF, stub);
+  enterRoom(h);
+
+  // 他人の入室・他人の繰り上がり・自分あてでも枠外のまま。どれも保留にならない
+  h.socket().receive({ t: "playerJoined", player: playerPublic("p2", true) });
+  h.socket().receive({ t: "playerJoined", player: playerPublic("p2", false) });
+  h.socket().receive({ t: "playerJoined", player: playerPublic("p1", false) });
+
+  gates[0](false);
+  await flushMicrotasks();
+  await flushMicrotasks();
+
+  assertEquals(joinCount(h), 1, "他人の知らせでやり直しを予約しない");
+});
+
 Deno.test("app.js: VC 枠が空いて自分が繰り上がったら、そのときに VC へ参加する", async () => {
   const h = await load();
   enterRoom(h);
+  // 入店時の自動参加が枠に弾かれ、後始末（vcJoining を戻す）まで済んだ状態にする
+  await flushMicrotasks();
   // 入店時の自動参加。枠外だった人はここで VC.join が枠に弾かれている
   assertEquals(h.calls.filter((c) => c === "VC.join").length, 1);
 
