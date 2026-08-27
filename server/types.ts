@@ -500,11 +500,16 @@ export type PhaseDurations = {
 export type GameState = {
   /** 進行中のゲーム定義 */
   definition: GameDefinition;
+  /**
+   * 実際に出題するお題。choice の選択肢はゲーム開始ごとにシャッフルし answer を振り直してある。
+   * definition.prompts は原本として残し、出題はこちらを使う。
+   */
+  runtimePrompts: Prompt[];
   /** 現在のフェーズ */
   phase: Phase;
   /** 現在のラウンド。1..definition.rounds（開始前は 0） */
   round: number;
-  /** 現在の出題の添字。prompts.length を超える分は巡回する */
+  /** 現在の出題の添字（runtimePrompts に対する添字）。件数を超える分は巡回する */
   promptIndex: number;
   /** 現フェーズの期限（epoch ms）。期限なしは null */
   deadline: number | null;

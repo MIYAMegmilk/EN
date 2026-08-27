@@ -6,6 +6,10 @@
  * I/O を持たず内部で await を使わない。タイマー発火・参加者の増減などの
  * 外部要因はすべて EngineEvent として引数で受け取る。
  * 入力の GameState は変更せず、新しい GameState を返す。
+ *
+ * 例外は startGame だけで、選択肢のシャッフル（cryptoShuffle）に乱数を使う。
+ * 乱数はここに閉じており、reduce / buildPhaseView は従来どおり純粋・決定的。
+ * テストは startGame の shuffleOptions 引数へ決定的な並べ替えを注入できる。
  */
 
 import type {
@@ -153,6 +157,81 @@ export function normalizeMatchValue(input: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// 出題の実行時生成（選択肢シャッフル）
+// ---------------------------------------------------------------------------
+
+/**
+ * 配列を並べ替えて新しい配列を返す関数。
+ * 既定は乱数（crypto）だが、テストは決定的な実装を startGame へ注入できる。
+ */
+export type ShuffleFn = <T>(items: readonly T[]) => T[];
+
+/**
+ * 0 以上 bound 未満の一様乱数。
+ * 単純な剰余は 2^32 が bound の倍数でないときに偏るため、余りに当たる範囲は引き直す。
+ */
+function randomBelow(bound: number): number {
+  const limit = Math.floor(0x1_0000_0000 / bound) * bound;
+  const buf = new Uint32Array(1);
+  for (;;) {
+    crypto.getRandomValues(buf);
+    if (buf[0] < limit) return buf[0] % bound;
+  }
+}
+
+/**
+ * crypto 由来の乱数による Fisher-Yates シャッフル（偏りなし）。
+ * 純粋関数の規約（このファイル冒頭）の唯一の例外で、呼び出しは startGame に閉じている。
+ * reduce / buildPhaseView は乱数へ触れないため、状態遷移は従来どおり決定的。
+ */
+export const cryptoShuffle: ShuffleFn = <T>(items: readonly T[]): T[] => {
+  const out = [...items];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = randomBelow(i + 1);
+    const tmp = out[i];
+    out[i] = out[j];
+    out[j] = tmp;
+  }
+  return out;
+};
+
+/**
+ * 出題の原本から「実際に出題するお題」を作る。
+ *
+ * choice のお題は選択肢を並べ替え、answer を並べ替え後の位置へ振り直す。
+ * 正解位置がデータの書き方に依存しなくなるため、「毎回いちばん上が正解」になる事故を防ぐ。
+ * - answer が undefined（正解を持たない選択式）は並べ替えだけ行う
+ * - answer が範囲外・非整数の壊れたデータは並べ替えず原本のまま通す（正解が別物に化けないように）
+ * - choice 以外（open）はそのまま写す
+ *
+ * 原本（prompts と各 options）は読むだけで、返す値はすべて新しい配列・新しいオブジェクト。
+ */
+export function buildRuntimePrompts(
+  prompts: readonly Prompt[],
+  shuffleOptions: ShuffleFn,
+): Prompt[] {
+  return prompts.map((prompt) => {
+    if (prompt.kind !== "choice") return { ...prompt };
+    const options = prompt.options;
+    const answer = prompt.answer;
+    const answerBroken = answer !== undefined &&
+      (!Number.isInteger(answer) || answer < 0 || answer >= options.length);
+    if (answerBroken || options.length < 2) return { ...prompt, options: [...options] };
+    // 添字を並べ替えてから引き当てる。こうすると正解の移動先が indexOf で求まり、
+    // 同じ文字列の選択肢があっても取り違えない
+    const order = shuffleOptions(options.map((_, index) => index));
+    const moved = answer === undefined ? 0 : order.indexOf(answer);
+    if (order.length !== options.length || (answer !== undefined && moved < 0)) {
+      // 注入されたシャッフルが壊れている場合の保険。原本のまま通す
+      return { ...prompt, options: [...options] };
+    }
+    const shuffled = order.map((index) => options[index]);
+    if (answer === undefined) return { ...prompt, options: shuffled };
+    return { ...prompt, options: shuffled, answer: moved };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // 内部ヘルパー
 // ---------------------------------------------------------------------------
 
@@ -174,7 +253,7 @@ function scoredPlayerIds(state: GameState): string[] {
 
 /** 現在のラウンドの出題を返す。ラウンド数が出題数を超える場合は巡回する */
 export function currentPrompt(state: GameState): Prompt | null {
-  const prompts = state.definition.prompts;
+  const prompts = state.runtimePrompts;
   if (prompts.length === 0 || state.round < 1) return null;
   return prompts[state.promptIndex] ?? null;
 }
@@ -300,10 +379,20 @@ function anonymousRevealIds(state: GameState): AnonymousRevealId[] {
   });
 }
 
-/** 状態を浅くコピーする（各コレクションは新しいオブジェクトにする） */
+/**
+ * 状態を浅くコピーする（各コレクションは新しいオブジェクトにする）。
+ *
+ * runtimePrompts は配列だけ作り直し、要素のお題オブジェクトは共有したままにする。
+ * お題は startGame で1度組み立てたあと誰も書き換えない読み取り専用の値であり
+ * （書き換える箇所が無いことは engine.ts / games / rooms.ts を grep して確認済み。
+ * 外へ出す promptOptions も options を複製して返す）、cloneState は提出・投票・
+ * フェーズ遷移のたびに呼ばれるため、毎回お題と選択肢まで複製すると
+ * イベント1件あたり O(お題数 × 選択肢数) の複製が無駄に走る。
+ */
 function cloneState(state: GameState): GameState {
   return {
     ...state,
+    runtimePrompts: [...state.runtimePrompts],
     participants: { ...state.participants },
     order: [...state.order],
     submissions: { ...state.submissions },
@@ -481,7 +570,7 @@ function enterPhase(state: GameState, phase: Phase, now: number): GameState {
 function startRound(state: GameState, round: number, now: number): GameState {
   let next = cloneState(state);
   next.round = round;
-  next.promptIndex = (round - 1) % Math.max(1, next.definition.prompts.length);
+  next.promptIndex = (round - 1) % Math.max(1, next.runtimePrompts.length);
   next.submissions = {};
   next.votes = {};
   next.roundScores = {};
@@ -652,8 +741,13 @@ function eligibleVoteTargets(state: GameState, voterId: string): string[] {
 
 /**
  * ゲームを開始して intro フェーズの状態を作る。
- * 匿名 reveal 用のトークンはここで全ラウンド分をまとめて作る（reduce は純粋関数のままにする）。
- * tokenSource はテストから決定的な値を入れるための注入口で、省略時は必ず暗号乱数を使う。
+ *
+ * 乱数を使うのはこの関数だけで、reduce / buildPhaseView は純粋なまま。ここで2つ作る。
+ *   - 匿名 reveal 用のトークン（全ラウンド分をまとめて）
+ *   - definition.prompts から runtimePrompts（選択肢をシャッフルし answer を振り直す）
+ *
+ * tokenSource / shuffleOptions はテストが決定的な値を注入するための口で、
+ * 省略時は必ず暗号乱数を使う（省略時に固定値・固定の並びにはしない）。
  */
 export function startGame(
   definition: GameDefinition,
@@ -661,6 +755,7 @@ export function startGame(
   now: number,
   durations: PhaseDurations = DEFAULT_PHASE_DURATIONS,
   tokenSource: RevealTokenSource = randomRevealToken,
+  shuffleOptions: ShuffleFn = cryptoShuffle,
 ): EngineResult {
   const participants: Record<string, GameParticipant> = {};
   const order: string[] = [];
@@ -678,6 +773,7 @@ export function startGame(
   }
   const base: GameState = {
     definition,
+    runtimePrompts: buildRuntimePrompts(definition.prompts, shuffleOptions),
     phase: "lobby",
     round: 0,
     promptIndex: 0,
@@ -698,7 +794,9 @@ export function startGame(
   if (connectedCount < MIN_PLAYERS) {
     return fail(base, "INVALID_INPUT", "ゲーム開始には2人以上の参加者が必要です");
   }
-  if (definition.prompts.length === 0) {
+  // 出題は runtimePrompts から引くので、空判定もそちらで行う。
+  // 現状は definition.prompts の 1 対 1 写像なので件数は必ず一致する
+  if (base.runtimePrompts.length === 0) {
     return fail(base, "INVALID_INPUT", "お題が1件もありません");
   }
   const next = enterPhase(base, "intro", now);
