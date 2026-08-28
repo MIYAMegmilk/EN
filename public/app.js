@@ -1740,7 +1740,7 @@ function glowBotVcTile(botId) {
   tile.glowTimer = setTimeout(() => {
     tile.root.classList.remove("vc-bot-speaking");
     tile.glowTimer = null;
-  }, 1600);
+  }, 2000);
 }
 
 /**

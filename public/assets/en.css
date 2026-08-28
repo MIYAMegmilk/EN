@@ -778,9 +778,23 @@ select {
   opacity: 0.42;
 }
 
-/* ボットの発言に合わせて短時間だけ光らせる演出（任意）。§CLAUDE.md: reduced motion に配慮 */
+/*
+ * ボットの発言に合わせた演出（任意）。§CLAUDE.md: reduced motion に配慮。
+ *
+ * 以前は波紋をひとつ広げるだけで、行が細い（高さ 40px 弱）ぶん目の端では
+ * 気づけなかった。「枠が金に立ち上がる（2秒そのまま）＋ 絵が跳ねる ＋
+ * 波紋が2回」を重ねて、卓上の別の場所を見ていても分かるようにする。
+ */
+.vc-peer.vc-peer-bot.vc-bot-speaking {
+  /* 普段は破線。喋っている間だけ実線にすると、色を見なくても差が出る */
+  border-style: solid;
+  border-color: var(--gold-3);
+  background: linear-gradient(180deg, #2d1f0e, #1d1309);
+}
+
 .vc-bot-speaking .vc-bot-face {
-  animation: vc-bot-pulse 1.6s ease-out;
+  /* 波紋は1秒を2回。個体の色（currentColor）のまま広げる */
+  animation: vc-bot-pulse 1s ease-out 2, vc-bot-face-pop 0.42s ease-out;
 }
 
 /* 光る色は個体の色に合わせる（.vc-bot-face の color が currentColor で届く） */
@@ -793,10 +807,27 @@ select {
   }
 }
 
+/* 喋り出しの一跳ね。丸なので拡大しても他の行を押し広げない */
+@keyframes vc-bot-face-pop {
+  0% {
+    transform: scale(1);
+  }
+  45% {
+    transform: scale(1.16);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/*
+ * 動きを止めている人にも「いま喋った」ことは伝える。動かす代わりに、
+ * 枠（上の実線＋金）と絵の縁を強く出したまま 2 秒そこに置く
+ */
 @media (prefers-reduced-motion: reduce) {
   .vc-bot-speaking .vc-bot-face {
     animation: none;
-    box-shadow: 0 0 0 3px currentColor;
+    box-shadow: 0 0 0 4px currentColor;
   }
 }
 
