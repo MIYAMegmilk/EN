@@ -34,6 +34,8 @@
 
 ```
 PROJECT/
+├── deno.json / deno.lock  … Deno のタスク定義（test / check / lint / fmt。§6）と依存ロック
+├── .env.example / .gitignore / .gitattributes / LICENSE
 ├── docs/
 │   ├── spec/              … 仕様書（overall.md / concept.md）
 │   ├── design/            … 設計書（本書 / games-unified.md / vc-screenshare.md /
@@ -52,12 +54,18 @@ PROJECT/
 │   ├── games/             … ゲームカタログの正本（index.ts）と専用サーバーモジュール
 │   │                        （chicken / draw / hayaoshi / wordwolf・prompt.ts=宣言的ゲームの進行・
 │   │                         client.ts / module.ts / _template.ts）
-│   ├── bot.ts             … しゅんぴボット（サーバー側ロジック）  【ひろし】
+│   ├── bot.ts             … 場回し bot 4体（しゅんぴ / せり / ぐっちー / なべ。
+│   │                        仕様書 §3.10）のサーバー側ロジック    【ひろし】
 │   ├── bot_templates.ts   … bot の定型文データ                    【ひろし】
 │   ├── senryu.ts          … 川柳（5-7-5）検出                     【ひろし】
 │   ├── room_tags.ts / hobby_tags.ts … プリセットタグのデータ
 │   ├── debug.ts           … 開発チーム向け内部診断
-│   └── tests/             … Deno.test（games/ 配下含め *_test.ts 58本）
+│   └── tests/             … Deno.test（games/ 配下含め *_test.ts 58本 + テスト用ヘルパー fake_dom.ts）
+├── tools/                 … 開発補助スクリプト（§6 参照。README.md あり）
+│   ├── corridor-harness/  … 3D 実測ハーネス（廊下ビュー）
+│   ├── noren-harness/     … 3D 実測ハーネス（暖簾演出）
+│   ├── blender/           … 3D モデル生成用の Blender スクリプト（.blend / .py）
+│   └── corridor-layout-check.js / noren-slim.js … レイアウト検査・GLB 軽量化
 └── public/                … フロント（素の HTML/CSS/JS）
     ├── index.html         … ホーム+部屋の単一ページ（§1）
     ├── app.js             … index.html の配線（WS 接続・フェーズ切替・状態管理・VC 結線）
@@ -75,13 +83,16 @@ PROJECT/
     │   ├── chat.js        … チャットUI                            【ちいかわ】
     │   ├── vc.js          … VC・カメラ・画面共有（WebRTC）        【ちいかわ】
     │   ├── voice.js       … 通話の文字起こし（VC → テキスト）     【ひろし】
-    │   ├── bot.js         … しゅんぴボットの表示                  【ひろし】
-    │   └── games/         … クライアント側ゲーム実装9本
+    │   ├── bot.js         … bot 4体の表示                         【ひろし】
+    │   └── games/         … クライアント側ゲーム実装7本 + 共通2ファイル（計9ファイル）
     │                        （chicken / draw / emoawase / hayaoshi / mogura / reflex /
-    │                         wordwolf・共通ヘルパー _client.js・雛形 _template.js）
+    │                         wordwolf の7本・共通ヘルパー _client.js・雛形 _template.js）
     ├── vendor/three/      … three.js 一式の同梱（CDN を使わない方針のため自前配信）
-    └── assets/            … プリセット画像・効果音・共通CSS
-        └── 3d/            … GLB・パノラマ画像と廊下ビュー実装（corridor-view.js / corridor-ui.js）
+    └── assets/            … プリセット画像・効果音・共通CSS（en.css / interior.svg /
+        │                    izakaya.jpg / corridor-preview.jpg / noren.glb）
+        ├── 3d/            … GLB・パノラマ画像と廊下ビュー実装（corridor-view.js / corridor-ui.js）
+        ├── games/         … ゲーム用画像素材（emoawase の SVG 7枚・CREDITS.md）
+        └── sound/         … 効果音（sound.js・音源フォルダ3つ・CREDITS.md）
 ```
 
 - `room.html` / `studio.html` は存在しない（§1）。`public/room/` は JS のみのディレクトリで HTML は無い
