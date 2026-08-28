@@ -65,10 +65,23 @@ function renderTags(tags) {
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.value = tag.id;
+    checkbox.addEventListener("change", syncTagCount);
     label.appendChild(checkbox);
     label.appendChild(document.createTextNode(tag.label));
     container.appendChild(label);
   }
+  syncTagCount();
+}
+
+/**
+ * 選んだタグの数を見出しに出す。
+ *
+ * タグの一覧は既定で畳んである（縦に長いため）ので、畳んだままだと何を選んだか
+ * 分からなくなる。数だけでも見えていれば、開かずに済む場面が増える。
+ */
+function syncTagCount() {
+  const count = checkedTagIds().length;
+  $("create-room-tags-count").textContent = count === 0 ? "" : `：${count}個 選択中`;
 }
 
 function checkedTagIds() {

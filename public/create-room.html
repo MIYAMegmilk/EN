@@ -31,10 +31,37 @@
         margin: 0 0 20px;
       }
 
+      /* 見出しは他の欄の <label> と同じ見た目にする（畳めることは ▶ で示す） */
+      #create-room-tags-details > summary {
+        display: block;
+        font-size: 12px;
+        color: var(--muted);
+        margin-bottom: 6px;
+        cursor: pointer;
+        list-style: revert;
+      }
+
+      #create-room-tags-details > summary:hover {
+        color: var(--gold-2);
+      }
+
+      #create-room-tags-details > summary:focus-visible {
+        outline: 2px solid var(--gold);
+        outline-offset: 2px;
+      }
+
+      /* 選んだ数。0個のときは JS が空にするので、余白ごと消える */
+      #create-room-tags-count:not(:empty) {
+        color: var(--gold-2);
+        margin-left: 6px;
+      }
+
       #create-room-tags {
         display: flex;
         flex-wrap: wrap;
         gap: 8px;
+        /* 畳んだ状態から開いたときに、見出しとの間が詰まりすぎないように */
+        margin-top: 8px;
       }
 
       #create-room-tags label {
@@ -113,8 +140,15 @@
           ></textarea>
         </div>
         <div class="field" id="create-room-tags-field">
-          <label>タグ（最大5個・任意）</label>
-          <div id="create-room-tags"></div>
+          <!-- タグは20個以上あって縦に伸びるので、既定では畳んでおく。
+               畳んでいる間も選んだ数は見出しに出す（開かないと分からない、を防ぐ）。
+               details なので JS 無しで開閉でき、キーボードでも操作できる -->
+          <details id="create-room-tags-details">
+            <summary>
+              タグ（最大5個・任意）<span id="create-room-tags-count"></span>
+            </summary>
+            <div id="create-room-tags"></div>
+          </details>
         </div>
         <div class="field">
           <label for="create-room-visibility">誰に見せるか</label>
