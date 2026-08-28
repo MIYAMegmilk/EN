@@ -139,6 +139,17 @@
         margin-bottom: 12px;
       }
 
+      /* ラベルの無い欄の頭を、ラベルのある欄に揃えるための空き。
+         .field > label と同じ寸法（12px・下 6px）にしてある */
+      .home-bar .field > .label-spacer {
+        display: block;
+        font-size: 12px;
+        margin-bottom: 6px;
+      }
+      .home-bar .field > .label-spacer::before {
+        content: "\00a0";
+      }
+
       .entry-join {
         display: flex;
         gap: 10px;
@@ -2179,8 +2190,11 @@
 
           <!-- いますぐ飲む（§3.1.2）。知らない人と自動で相席する -->
           <div class="field">
+            <!-- 左の「あだ名」はラベルのぶん入力欄が下がるので、ボタン側にも
+                 同じ高さの空きを置いて頭を揃える（空きが無いとボタンだけ上にずれる） -->
+            <span class="label-spacer" aria-hidden="true"></span>
             <button id="queue-join" class="btn btn-gold btn-block" type="button">
-              いますぐ飲む（相席）
+              いますぐ飲む（ランダムマッチ）
             </button>
             <div id="queue-waiting" class="queue-waiting hidden" role="status">
               <p id="queue-status">席を探しています…</p>
