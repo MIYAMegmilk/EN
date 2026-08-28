@@ -742,11 +742,12 @@ async function handleStatic(
   for (const [key, value] of SECURITY_HEADERS) headers.set(key, value);
   if (isSessionDependent) {
     headers.set("cache-control", "no-store");
-  } else if (path.endsWith(".html")) {
-    // HTML には CSS と一部の JS が直接埋まっているため、ブラウザにそのまま
-    // キャッシュされるとデプロイしても古い画面が出続ける（Cache-Control が
-    // 無いと発見的キャッシュが効く）。ETag での再検証は残すので、変わって
-    // いなければ 304 で済む
+  } else if (/\.(html|js|css)$/.test(path)) {
+    // 画面を作る3種（HTML・JS・CSS）はデプロイのたびに変わる。Cache-Control が
+    // 無いと発見的キャッシュが効いて、直したはずの画面や動きが古いまま出続ける
+    // （版を URL に埋める仕組みがないので、ここで止めるしかない）。ETag での
+    // 再検証は残るので、変わっていなければ 304 で済む。
+    // 音源・3Dモデル・画像は大きく、変わることも稀なのでキャッシュさせたまま
     headers.set("cache-control", "no-cache");
   }
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
