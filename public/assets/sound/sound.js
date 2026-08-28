@@ -253,6 +253,16 @@
   // -------------------------------------------------------------------------
 
   /**
+   * 素材ごとの既定音量（音量の決まり方①）。専用のつまみを持つ音はここで引く。
+   * 呼び出し側に settings を読ませない（読ませると Sound を差し替えている
+   * テストの偽物にも getSettings が要る）。
+   */
+  function defaultVolumeFor(key) {
+    if (key === "arrival") return settings.arrival;
+    return 1;
+  }
+
+  /**
    * 一度だけ鳴らす。
    * 戻り値は音の長さ（秒）。鳴らせなかった場合は 0。
    */
@@ -265,7 +275,7 @@
       const source = c.createBufferSource();
       source.buffer = buffer;
       const gain = c.createGain();
-      gain.gain.value = options?.volume ?? 1;
+      gain.gain.value = options?.volume ?? defaultVolumeFor(key);
       source.connect(gain);
       gain.connect(sfxGain);
       source.start();
@@ -577,7 +587,7 @@
     const ambience = buildSlider("店のざわめき", "ambience");
     // 呼び鈴も手を離したときに鳴らす。ざわめきの中でどう聞こえるか確かめられる
     const arrival = buildSlider("入室の呼び鈴", "arrival", () => {
-      play("arrival", { volume: settings.arrival });
+      play("arrival");
     }, ARRIVAL_MAX * 100, 10);
 
     const muteRow = document.createElement("div");

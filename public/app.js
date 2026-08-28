@@ -895,9 +895,9 @@ function receive(msg) {
       const arriving = state.snapshot !== null &&
         !state.snapshot.players.some((p) => p.id === msg.player.id);
       upsertPlayer(msg.player);
-      // 大きさは音のつまみの「入室の呼び鈴」で決める（既定 1.5倍）。卓の中は
-      // ざわめきと VC の声が乗っていて、等倍だと入室に気づけないため
-      if (arriving) void Sound.play("arrival", { volume: Sound.getSettings().arrival });
+      // 大きさは音のつまみの「入室の呼び鈴」で決まる（既定 1.5倍。sound.js が
+      // 引く）。卓の中はざわめきと VC の声が乗っていて等倍だと気づけないため
+      if (arriving) void Sound.play("arrival");
       renderAll();
       break;
     }
