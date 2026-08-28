@@ -65,6 +65,13 @@
     myVote: null,
     /** アンケートの残り時間を描き直すタイマー */
     countdown: null,
+    /**
+     * サーバー時刻との差（ミリ秒）。roomState の serverTime から求める。
+     * 端末の時計がずれていると残り秒数がそのぶんずれるため、締切の判定は
+     * 素の Date.now() ではなくこれを足した値で行う（ゲーム側の api.serverNow()
+     * と同じ考え方）。
+     */
+    serverOffsetMs: 0,
     /** 組み立て済みの要素 */
     el: { poll: null },
   };
@@ -132,9 +139,14 @@
   // 終了アンケート（§3.10）
   // -------------------------------------------------------------------------
 
+  /** サーバー時刻に補正した現在時刻（epoch ms） */
+  function serverNow() {
+    return Date.now() + state.serverOffsetMs;
+  }
+
   /** 残り秒数。締切を過ぎていたら 0 */
   function remainingSec(deadline) {
-    return Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    return Math.max(0, Math.ceil((deadline - serverNow()) / 1000));
   }
 
   /** カウントダウンを止める（タイマーを残さない） */
@@ -240,6 +252,11 @@
     switch (msg.t) {
       case "roomState": {
         const snapshot = msg.snapshot;
+        // 締切の残り秒数を端末の時計ずれに引きずられないようにする。
+        // スナップショットは再接続でも届くので、そのたびに測り直す
+        if (typeof snapshot.serverTime === "number") {
+          state.serverOffsetMs = snapshot.serverTime - Date.now();
+        }
         state.isHost = snapshot.youAreHost === true;
         if (typeof snapshot.bots === "object" && snapshot.bots !== null) {
           state.bots = { ...state.bots, ...snapshot.bots };
