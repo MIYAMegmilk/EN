@@ -61,7 +61,14 @@
 
   /** つまみの保存先。版を付けてあるので、項目が増えても古い値で壊れない */
   const STORAGE_KEY = "en.sound.v1";
-  const DEFAULTS = { muted: false, sfx: 0.8, ambience: 0.6 };
+  const DEFAULTS = { muted: false, sfx: 0.8, ambience: 0.6, arrival: 1.5 };
+
+  /**
+   * 入室の呼び鈴だけ上限が 2 なのは、卓の中がざわめきと VC の声で埋まっていて、
+   * 他の効果音と同じ大きさでは埋もれてしまうため。つまみの値がそのまま gain になる
+   * （100 = 等倍、150 = 1.5倍）。
+   */
+  const ARRIVAL_MAX = 2;
 
   let ctx = null;
   let masterGain = null;
@@ -85,11 +92,20 @@
   // つまみの保存
   // -------------------------------------------------------------------------
 
-  /** 0〜1 に収める。壊れた値・古い値が入っていても既定へ倒す */
-  function clamp01(value, fallback) {
+  /**
+   * 0〜max に収める。壊れた値・古い値が入っていても既定へ倒す。
+   * 入室の呼び鈴だけは 1 を超える増幅を許すので、上限を渡せるようにしてある
+   * （Web Audio の gain は 1 を超えても鳴る）。
+   */
+  function clampTo(value, fallback, max) {
     const n = typeof value === "number" ? value : Number(value);
     if (!Number.isFinite(n)) return fallback;
-    return Math.min(1, Math.max(0, n));
+    return Math.min(max, Math.max(0, n));
+  }
+
+  /** 0〜1 に収める */
+  function clamp01(value, fallback) {
+    return clampTo(value, fallback, 1);
   }
 
   /**
@@ -107,6 +123,7 @@
         muted: saved.muted === true,
         sfx: clamp01(saved.sfx, DEFAULTS.sfx),
         ambience: clamp01(saved.ambience, DEFAULTS.ambience),
+        arrival: clampTo(saved.arrival, DEFAULTS.arrival, ARRIVAL_MAX),
       };
     } catch {
       // 読めない・壊れている。既定値のまま
@@ -366,6 +383,9 @@
     if ("muted" in next) settings.muted = next.muted === true;
     if ("sfx" in next) settings.sfx = clamp01(next.sfx, settings.sfx);
     if ("ambience" in next) settings.ambience = clamp01(next.ambience, settings.ambience);
+    if ("arrival" in next) {
+      settings.arrival = clampTo(next.arrival, settings.arrival, ARRIVAL_MAX);
+    }
     ensureContext();
     applySettings();
     saveSettings();
@@ -472,8 +492,11 @@
     document.head.appendChild(style);
   }
 
-  /** つまみ1本ぶん。ラベル・現在値・スライダーをまとめて作る */
-  function buildSlider(labelText, key, onCommit) {
+  /**
+   * つまみ1本ぶん。ラベル・現在値・スライダーをまとめて作る。
+   * max は目盛りの上限（％）。呼び鈴だけ 1 を超える増幅を許すので 200 を渡す。
+   */
+  function buildSlider(labelText, key, onCommit, max = 100, step = 5) {
     const row = document.createElement("div");
     row.className = "sound-controls__row";
 
@@ -488,8 +511,8 @@
     slider.type = "range";
     slider.className = "sound-controls__slider";
     slider.min = "0";
-    slider.max = "100";
-    slider.step = "5";
+    slider.max = String(max);
+    slider.step = String(step);
     // label で包むと range のドラッグを label に取られる環境があるので、
     // 入れ子にせず htmlFor で繋ぐ
     slider.id = `sound-controls-${key}`;
@@ -511,6 +534,8 @@
     controls.sfx.value.textContent = `${Math.round(settings.sfx * 100)}`;
     controls.ambience.slider.value = String(Math.round(settings.ambience * 100));
     controls.ambience.value.textContent = `${Math.round(settings.ambience * 100)}`;
+    controls.arrival.slider.value = String(Math.round(settings.arrival * 100));
+    controls.arrival.value.textContent = `${Math.round(settings.arrival * 100)}`;
     controls.mute.setAttribute("aria-pressed", settings.muted ? "true" : "false");
     controls.mute.textContent = settings.muted ? "音を戻す" : "音を消す";
     controls.toggleText.textContent = settings.muted ? "音（消音中）" : "音";
@@ -550,6 +575,10 @@
     // 効果音は動かした手を離したときに鳴らす。どのくらいの大きさかその場で分かる
     const sfx = buildSlider("効果音", "sfx", () => play("decide"));
     const ambience = buildSlider("店のざわめき", "ambience");
+    // 呼び鈴も手を離したときに鳴らす。ざわめきの中でどう聞こえるか確かめられる
+    const arrival = buildSlider("入室の呼び鈴", "arrival", () => {
+      play("arrival", { volume: settings.arrival });
+    }, ARRIVAL_MAX * 100, 10);
 
     const muteRow = document.createElement("div");
     muteRow.className = "sound-controls__row";
@@ -564,7 +593,7 @@
     note.className = "sound-controls__note";
     note.textContent = "通話中はざわめきを小さめに。設定はこの端末に残ります。";
 
-    panel.append(sfx.row, ambience.row, muteRow, note);
+    panel.append(sfx.row, ambience.row, arrival.row, muteRow, note);
     root.append(panel, toggle);
 
     const setOpen = (open) => {
@@ -584,7 +613,7 @@
     });
 
     (container ?? document.body).appendChild(root);
-    controls = { toggle, toggleText, panel, sfx, ambience, mute };
+    controls = { toggle, toggleText, panel, sfx, ambience, arrival, mute };
     syncControls();
   }
 
