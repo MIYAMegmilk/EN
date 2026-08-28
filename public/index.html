@@ -1173,25 +1173,52 @@
         gap: 10px;
       }
 
-      /* 呑み手の枠。人数に応じて折り返し、余った幅は枠の大きさに回す */
+      /*
+       * 呑み手の枠。人数に応じて折り返し、余った幅は枠の大きさに回す。
+       *
+       * 折り返しは flex ではなく格子（grid）で組む。flex-wrap だと最後の行に
+       * 余った枠だけが flex-grow で伸びてしまい、3人のときに3人目だけが
+       * 大きくなっていた（枠は 4:3 なので横に伸びたぶん縦も伸びる）。
+       * auto-fit の 1fr は「どの行でも列幅が同じ」なので、人数に依らず
+       * すべての枠が同じ大きさになる。
+       */
       #vc-people {
         flex: 1;
         min-width: 0;
         overflow-y: auto;
         overscroll-behavior: contain;
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: center;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        /*
+         * 行の高さは枠の高さそのまま（4:3 から決まる）。auto のままだと
+         * Chrome が余った高さを行に配ってしまい、行が枠より低くなって
+         * 上下の枠が重なる。溢れたぶんはこれまでどおり縦に流す。
+         */
+        grid-auto-rows: max-content;
+        /* 桝より枠が小さいとき（上限に達したとき）は桝の真ん中に置く */
+        justify-items: center;
         align-items: center;
         /* 折り返したときも上下の真ん中に。溢れたら safe が start に倒す */
         align-content: safe center;
         gap: 10px;
+        /*
+         * 枠の高さの頭打ちに使う（下の max-height: 100cqh）。格子では枠の
+         * % 高さが「行」を基準にしてしまい、面の高さで止められないため、
+         * この面自身を大きさの問い合わせ先にする。
+         */
+        container-type: size;
       }
 
       #vc-people > .vc-peer {
-        flex: 1 1 240px;
+        /* 桝いっぱいに広げる。どの行の桝も同じ幅なので枠も揃う */
+        width: 100%;
         /* 卓上が広いとき、ひとりでも間延びしすぎない上限 */
         max-width: 520px;
+        /*
+         * 面の高さで頭を打つ（.vc-peer の max-height: 100% の置き換え）。
+         * 格子の中では % が行の高さ＝枠自身の高さに解決してしまい効かない。
+         */
+        max-height: 100cqh;
       }
 
       /* 誰も入っていないときは枠を敷かず、真ん中に一言だけ置く */
@@ -1209,6 +1236,8 @@
        * 溢れたら横に流す。格子のまま残すと主役の場所が無くなる。
        */
       body:not([data-vc-stage="none"]) #vc-people {
+        /* 帯は横一列なので格子には戻さず、flex のまま横へ流す */
+        display: flex;
         flex: none;
         height: 92px;
         flex-wrap: nowrap;
@@ -1220,6 +1249,8 @@
       body:not([data-vc-stage="none"]) #vc-people > .vc-peer {
         flex: none;
         height: 100%;
+        /* 帯では幅は高さと 4:3 から決まる。格子用の width: 100% は外す */
+        width: auto;
         max-width: none;
       }
 
