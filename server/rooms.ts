@@ -1743,6 +1743,15 @@ export class RoomManager {
       return;
     }
     this.queue.push({ link, nickname, tags: tags.value, joinedAt: this.now() });
+    // 人数がそろったらその場で成立させる。周期を待つと、2人しか居ない場面で
+    // 最大 MATCH_INTERVAL_MS のあいだ「席を探しています」のまま待たされる
+    // （周期は「もっと大きい卓に育てるための猶予」であって、成立の条件ではない）。
+    // タイマーは畳んでから走らせる。runMatching が列の残りを見て張り直す
+    if (this.queue.length >= MATCH_GROUP_MIN) {
+      this.cancelMatchTimer();
+      this.runMatching();
+      return;
+    }
     this.armMatchTimer();
     this.sendQueueStatus();
   }

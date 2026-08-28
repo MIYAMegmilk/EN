@@ -34,9 +34,8 @@ import {
   ENTRY_TOKEN_TTL_MS,
   KNOCK_RATE_WINDOW_MS,
   KNOCK_TTL_MS,
-  MATCH_GROUP_MAX,
+  MATCH_GROUP_MIN,
   MATCH_INTERVAL_MS,
-  MATCH_QUEUE_MAX,
   PENDING_KNOCK_MAX,
   ROOM_CAPACITY,
   ROOM_NAME_MAX,
@@ -1826,16 +1825,14 @@ function queueUp(manager: RoomManager, nickname?: string) {
   return link;
 }
 
-Deno.test("相席: 2人そろうと30秒周期で成立し、同じ卓に入る", () => {
-  const { manager, clock } = setup();
+Deno.test("相席: 2人そろうとその場で成立し、同じ卓に入る", () => {
+  const { manager } = setup();
   const a = queueUp(manager, "あかね");
-  const b = queueUp(manager, "ほたる");
-
-  // 周期が来るまでは成立しない
-  clock.advance(MATCH_INTERVAL_MS - 1);
+  // 1人では成立しない
   assertEquals(last(a, "matched"), undefined);
 
-  clock.advance(2);
+  // 2人目が並んだ時点で、周期を待たずに成立する
+  const b = queueUp(manager, "ほたる");
 
   const matchedA = last(a, "matched");
   const matchedB = last(b, "matched");
@@ -1861,8 +1858,8 @@ Deno.test("相席: 1人だけでは成立しない", () => {
   manager.dispose();
 });
 
-Deno.test("相席: 5人なら4人と1人に分かれ、余りは次の周期へ回る", () => {
-  const { manager, clock } = setup();
+Deno.test("相席: 2人そろうたびに成立するので、5人なら2組と余り1人になる", () => {
+  const { manager } = setup();
   const links = [
     queueUp(manager, "あ"),
     queueUp(manager, "い"),
@@ -1871,16 +1868,18 @@ Deno.test("相席: 5人なら4人と1人に分かれ、余りは次の周期へ�
     queueUp(manager, "お"),
   ];
 
-  clock.advance(MATCH_INTERVAL_MS + 1);
-
+  // 2人そろうたびにその場で成立するので、卓は 2 人ずつになる。
+  // 周期を待って4人に育てる作りではなくなった（§3.1.2）
   const first = last(links[0], "roomState");
   assertExists(first);
-  assertEquals(first.snapshot.players.length, MATCH_GROUP_MAX, "先頭の4人で成立する");
-  assertEquals(last(links[4], "matched"), undefined, "5人目は残る");
+  assertEquals(first.snapshot.players.length, MATCH_GROUP_MIN, "あ と い で成立する");
+  const third = last(links[2], "roomState");
+  assertExists(third);
+  assertEquals(third.snapshot.players.length, MATCH_GROUP_MIN, "う と え で成立する");
+  assertEquals(last(links[4], "matched"), undefined, "5人目は相手が来るまで残る");
 
-  // もう1人来れば次の周期で成立する
+  // もう1人来ればその場で成立する
   const sixth = queueUp(manager, "か");
-  clock.advance(MATCH_INTERVAL_MS + 1);
   assertExists(last(links[4], "matched"));
   assertExists(last(sixth, "matched"));
   manager.dispose();
@@ -1893,10 +1892,11 @@ Deno.test("相席: 待っている間は人数の目安が届く", () => {
   assertExists(first);
   assertEquals(first.waiting, 1);
 
-  queueUp(manager, "ほたる");
-  const second = last(a, "queueStatus");
-  assertExists(second);
-  assertEquals(second.waiting, 2, "増えたら配り直す");
+  // 2人目が来た時点で成立してしまうので、待ち人数が 2 になることはない。
+  // 「待っている」状態で見えるのは常に自分1人ぶん
+  const b = queueUp(manager, "ほたる");
+  assertExists(last(a, "matched"), "2人目が来たら待たずに成立する");
+  assertExists(last(b, "matched"));
   manager.dispose();
 });
 
@@ -1910,12 +1910,14 @@ Deno.test("相席: 同じ接続が二重に並べない（DUPLICATE）", () => {
 
 Deno.test("相席: キャンセルすると列から外れる", () => {
   const { manager, clock } = setup();
+  // 2人並べるとその場で成立してしまうので、1人ずつ確かめる。
+  // 抜けた人が列に残っていれば、次に来た人と成立してしまうはず
   const a = queueUp(manager, "あかね");
-  const b = queueUp(manager, "ほたる");
   manager.handle(a, { t: "leaveQueue" });
 
+  const b = queueUp(manager, "ほたる");
   clock.advance(MATCH_INTERVAL_MS + 1);
-  assertEquals(last(a, "matched"), undefined);
+  assertEquals(last(a, "matched"), undefined, "抜けた人は成立に巻き込まれない");
   assertEquals(last(b, "matched"), undefined, "残った1人だけでは成立しない");
   manager.dispose();
 });
@@ -1923,20 +1925,24 @@ Deno.test("相席: キャンセルすると列から外れる", () => {
 Deno.test("相席: 切断すると自動で列から外れる", () => {
   const { manager, clock } = setup();
   const a = queueUp(manager, "あかね");
-  const b = queueUp(manager, "ほたる");
   manager.disconnect(a);
 
+  const b = queueUp(manager, "ほたる");
   clock.advance(MATCH_INTERVAL_MS + 1);
-  assertEquals(last(b, "matched"), undefined);
+  assertEquals(last(b, "matched"), undefined, "切れた人と組ませない");
   manager.dispose();
 });
 
-Deno.test("相席: 待機列は100人まで", () => {
+Deno.test("相席: 待機列に2人以上たまらない（成立のたびに掃ける）", () => {
   const { manager } = setup();
-  for (let i = 0; i < MATCH_QUEUE_MAX; i++) queueUp(manager, `ひと${i}`);
+  // 2人そろうたびに成立するので、待機列は 0 人か 1 人にしかならない。
+  // MATCH_QUEUE_MAX（100人）の上限は、この経路では踏めない安全網として残っている
+  // 奇数人を並べると、4組が成立して1人だけ残る
+  for (let i = 0; i < 9; i++) queueUp(manager, `ひと${i}`);
   const over = new MockLink();
-  manager.handle(over, { t: "joinQueue", nickname: "あふれた人" });
-  assertEquals(last(over, "error")?.code, "RATE_LIMITED");
+  manager.handle(over, { t: "joinQueue", nickname: "10人目" });
+  assertEquals(last(over, "error"), undefined, "上限には当たらない");
+  assertExists(last(over, "matched"), "余っていた1人と組んで成立する");
   manager.dispose();
 });
 
