@@ -31,14 +31,17 @@
         margin: 0 0 20px;
       }
 
-      /* 見出しは他の欄の <label> と同じ見た目にする（畳めることは ▶ で示す） */
+      /*
+       * 見出しは他の欄の <label> と同じ見た目にする（畳めることは ▶ で示す）。
+       * display は list-item のままにする。block にすると開閉の三角が消える
+       * （marker は display: list-item のときにしか出ない）。
+       */
       #create-room-tags-details > summary {
-        display: block;
+        display: list-item;
         font-size: 12px;
         color: var(--muted);
         margin-bottom: 6px;
         cursor: pointer;
-        list-style: revert;
       }
 
       #create-room-tags-details > summary:hover {
@@ -54,6 +57,16 @@
       #create-room-tags-count:not(:empty) {
         color: var(--gold-2);
         margin-left: 6px;
+      }
+
+      /*
+       * 畳んでいる間は自分で隠す。
+       * 下の #create-room-tags は ID セレクタなので display: flex の詳細度が高く、
+       * 閉じた <details> の中身をブラウザが隠す既定スタイルに勝ってしまう。
+       * それだと畳んでも中身が見えたままになるので、ここで明示的に消す
+       */
+      #create-room-tags-details:not([open]) > #create-room-tags {
+        display: none;
       }
 
       #create-room-tags {
