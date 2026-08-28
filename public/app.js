@@ -1766,10 +1766,20 @@ function setVcControl(button, on, label) {
 function renderVc() {
   const vc = VC.getState();
   $("vc-mute").disabled = !vc.active;
+  $("vc-speaker").disabled = !vc.active;
   // 入切の処理中は閉じる。他の通知で renderVc が走っても開き直さない
   $("vc-camera").disabled = !vc.active || vcCameraBusy;
   // 文言は「押すとどうなるか」、絵は「いまどうなっているか」を出す（Zoom と同じ流儀）
   setVcControl($("vc-mute"), !vc.muted, vc.muted ? "ミュート解除" : "ミュート");
+  // スピーカーミュート。カメラと同じく「押すとどうなるか」を文言にする。
+  // 消えるのは人の声だけで、効果音・ざわめきは別のつまみ（お品書きの音量）
+  const heard = vc.speakerMuted !== true;
+  setVcControl($("vc-speaker"), heard, heard ? "スピーカーOFF" : "スピーカーON");
+  $("vc-speaker").title = heard
+    ? "他の人の声を消します（効果音・ざわめきは消えません）"
+    : "他の人の声を戻します";
+  // ミュートで文字起こしが止まっていることは、そのボタンの側に出す
+  syncTranscribeLabel();
   // 画面共有中はカメラを実際に止めている（LED を消すため）。それでも
   // 「やめたら戻る」なら入として描く。押せば約束のほうが切り替わる
   const cameraOn = vc.camera === true || vc.cameraResumes === true;
@@ -2233,9 +2243,25 @@ function bindVc(iceServers) {
       log("VC", event.message);
       renderVc();
     },
+    /*
+     * マイクのミュートを文字起こし（voice.js）へ渡す。
+     * SpeechRecognition は VC の getUserMedia とは別に自前でマイクを開くので、
+     * VC 側で track.enabled を落としても認識は動き続け、ミュートしたはずの
+     * 声が字幕と bot への入力になってしまう。繋ぎ先をここで決めるのは、
+     * vc.js から Voice を直接触ると VC が文字起こしに依存するため。
+     */
+    onMicMute: (muted) => {
+      Voice.setMuted(muted);
+      syncTranscribeLabel();
+    },
   });
   $("vc-mute").addEventListener("click", () => {
     VC.toggleMute();
+    renderVc();
+  });
+  $("vc-speaker").addEventListener("click", () => {
+    // 他の人の声だけを手元で消す（効果音・ざわめきは別系統なので残る）
+    VC.toggleSpeakerMute();
     renderVc();
   });
   $("vc-camera").addEventListener("click", () => {
@@ -2295,12 +2321,6 @@ function bindVc(iceServers) {
  */
 function bindVoice() {
   const transcribeBtn = $("vc-transcribe");
-  // ボタン文言は常に Voice.getState().enabled から導く（vc-camera / vc-mute と同じ流儀）。
-  // 権限拒否や5回連続失敗など、クリック以外の理由で OFF に倒れたときも表示がずれない
-  const syncTranscribeLabel = () => {
-    const on = Voice.getState().enabled;
-    setVcControl(transcribeBtn, on, on ? "文字起こしOFF" : "文字起こしON");
-  };
   Voice.init({
     send,
     captionEl: $("voice-caption"),
@@ -2310,15 +2330,39 @@ function bindVoice() {
       syncTranscribeLabel();
     },
   });
-  if (!Voice.isSupported()) {
-    transcribeBtn.disabled = true;
-    transcribeBtn.title = "このブラウザは音声の文字起こしに対応していません";
-    return;
-  }
+  syncTranscribeLabel();
+  if (!Voice.isSupported()) return;
   transcribeBtn.addEventListener("click", () => {
     Voice.toggle();
     syncTranscribeLabel();
   });
+}
+
+/**
+ * 文字起こしのボタンの見た目を、いまの Voice の状態から引き直す。
+ *
+ * 文言は常に Voice.getState() から導く（vc-camera / vc-mute と同じ流儀）。
+ * 権限拒否や5回連続失敗など、クリック以外の理由で OFF に倒れたときも表示が
+ * ずれない。bindVoice の中の閉じた関数だったが、マイクのミュートでも
+ * 引き直したい（ミュート中は認識が止まる）ので外へ出した。
+ */
+function syncTranscribeLabel() {
+  const button = $("vc-transcribe");
+  // 非対応ブラウザ（iOS Safari・Firefox 等）では押せない。理由は title に残す。
+  // ボタンを消さないのは、自分の端末にだけ機能が無いことに気づけないため
+  if (!Voice.isSupported()) {
+    button.disabled = true;
+    button.title = "このブラウザは音声の文字起こしに対応していません";
+    setVcControl(button, false, "文字起こしON");
+    return;
+  }
+  const voice = Voice.getState();
+  setVcControl(button, voice.enabled, voice.enabled ? "文字起こしOFF" : "文字起こしON");
+  // ミュート中は認識そのものを止めている（voice.js）。ボタンは ON のままなので、
+  // 何も拾わない理由が分かるように title で断る
+  button.title = voice.enabled && voice.muted === true
+    ? "マイクのミュート中は文字起こしを止めています（ミュートを解除すると再開します）"
+    : "";
 }
 
 /** 操作の割り当て */

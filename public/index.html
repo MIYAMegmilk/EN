@@ -1740,6 +1740,35 @@
         display: none;
       }
 
+      /*
+       * 「この人の声を消している」札（スピーカーミュート中）。
+       *
+       * マイクマークの左隣に、同じ大きさ・同じ線画の作りで置く。色は
+       * クリームのまま抑える。赤にすると相手のマイク切（.vc-mic-mark
+       * [data-state="off"]）と見分けがつかず、相手の状態と自分の設定が
+       * 混ざって読める。消しているあいだしか出さない（vc.js の createDeafMark）。
+       */
+      .vc-deaf-mark {
+        position: absolute;
+        right: 27px;
+        bottom: 7px;
+        z-index: 4;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+        color: var(--cream);
+        opacity: 0.75;
+      }
+
+      /*
+       * display: flex は hidden より強いので、消す指定を明に置く。
+       * これが無いと、スピーカーミュートしていない卓でも札が出たままになる。
+       */
+      .vc-deaf-mark[hidden] {
+        display: none;
+      }
+
       .vc-mic-mark[data-state="off"] .vc-mic-ico-on {
         display: none;
       }
@@ -1902,13 +1931,20 @@
         color: var(--muted);
       }
 
-      #vc-mute[data-state="off"]:not(:disabled) {
+      /*
+       * 音まわり（マイク・スピーカー）だけは切を赤くする。どちらも「聞こえて
+       * いない／届いていない」という、放置すると会話が成り立たない状態なので、
+       * 斜線だけでは弱い。カメラ・文字起こしは切が既定なので赤くしない。
+       */
+      #vc-mute[data-state="off"]:not(:disabled),
+      #vc-speaker[data-state="off"]:not(:disabled) {
         color: #e79c93;
         background: rgba(176, 42, 36, 0.16);
         border-color: #6d2420;
       }
 
-      #vc-mute[data-state="off"]:not(:disabled):hover {
+      #vc-mute[data-state="off"]:not(:disabled):hover,
+      #vc-speaker[data-state="off"]:not(:disabled):hover {
         background: rgba(176, 42, 36, 0.28);
       }
 
@@ -2377,6 +2413,25 @@
                   </g>
                 </svg>
                 <span class="vc-ctl-label">ミュート</span>
+              </button>
+              <!--
+                スピーカーミュート（他の人の VC 音声だけを手元で消す）。
+                マイクのミュートとは独立で、押してもこちらの声は止まらない。
+                消えるのは人の声だけで、効果音・ざわめき（Sound）は別系統の
+                つまみ（お品書きの音量）が受け持つ。
+              -->
+              <button id="vc-speaker" class="vc-ctl" type="button" data-state="on">
+                <svg class="vc-ctl-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <g class="vc-ctl-ico-on">
+                    <path d="M4 9.5h3.4L12 5.5v13L7.4 14.5H4Z" />
+                    <path d="M15.4 9.4a3.6 3.6 0 0 1 0 5.2M18 7a7.2 7.2 0 0 1 0 10" />
+                  </g>
+                  <g class="vc-ctl-ico-off">
+                    <path d="M4 9.5h3.4L12 5.5v13L7.4 14.5H4Z" />
+                    <path d="M4 3.5 20 20.5" />
+                  </g>
+                </svg>
+                <span class="vc-ctl-label">スピーカーOFF</span>
               </button>
               <button id="vc-camera" class="vc-ctl" type="button" data-state="off">
                 <svg class="vc-ctl-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">

@@ -18,6 +18,13 @@
  * プライバシー（§3.7 安全設計）:
  *   - 既定 OFF。本人の明示操作でのみ ON にする（カメラと同じ扱い）
  *   - 認識するのは自分のマイクだけ。他人の声を勝手に文字起こしはしない
+ *   - **マイクをミュートしているあいだは認識そのものを止める**（setMuted）。
+ *     SpeechRecognition は getUserMedia とは別に自前でマイクを開くので、
+ *     VC 側で track.enabled を落としても認識は動き続けてしまう。ミュートは
+ *     「いまの声を誰にも渡さない」という意思表示なので、字幕にも bot にも
+ *     渡してはいけない。止め方は abort()（stopSession）にする。stop() だと
+ *     溜まっていた音声が確定結果として吐き出され、解除後にミュート中の
+ *     発言がまとめて出てしまう
  *   - ブラウザの音声認識はエンジンによっては音声をブラウザベンダのサーバーへ
  *     送る。ON にする前に必ず本人へその旨を示すこと（UI 側の責務）
  *
@@ -95,6 +102,12 @@
   const state = {
     /** 本人が ON にしているか（既定 OFF） */
     enabled: false,
+    /**
+     * VC 側でマイクをミュートしているか（vc.js の state.muted の写し）。
+     * enabled とは別に持つ。ミュートは一時停止であって、本人が入れた
+     * 「文字起こし ON」を取り消すものではない（解除したらそのまま再開する）。
+     */
+    micMuted: false,
     /** SpeechRecognition のインスタンス。OFF のあいだは null */
     recognition: null,
     /** 認識セッションが動いているか */
@@ -120,6 +133,15 @@
   // -------------------------------------------------------------------------
   // 小道具
   // -------------------------------------------------------------------------
+
+  /**
+   * いま認識を動かしてよいか。
+   * 本人が ON にしていて、かつマイクがミュートされていないときだけ。
+   * 開始・再開・送信のすべてがこの1か所を見る（見落としを作らないため）。
+   */
+  function listening() {
+    return state.enabled && !state.micMuted;
+  }
 
   /** 状態を外へ知らせる。UI の描画は呼び出し側の責務（vc.js の notify と同じ方式） */
   function notify(kind, message) {
@@ -229,7 +251,9 @@
 
   /** 確定した認識結果を1件送る */
   function sendFinal(raw) {
-    if (!state.enabled || typeof config.send !== "function") return;
+    // ミュート中の確定結果は捨てる。セッションは止めてあるはずだが、
+    // 止める直前に発火した onresult がここへ来ることがある
+    if (!listening() || typeof config.send !== "function") return;
     for (const text of sanitize(raw)) {
       // 同じ文が続けて確定することがある（エンジンが結果を出し直す）。1回だけ送る
       if (text === state.lastSentText) {
@@ -252,6 +276,8 @@
 
   /** 認識イベントから確定分と未確定分を取り出す */
   function onResult(event) {
+    // ミュートと入れ違いに届いた結果は字幕にも出さない
+    if (!listening()) return;
     let interim = "";
     for (let i = event.resultIndex; i < event.results.length; i++) {
       const result = event.results[i];
@@ -296,7 +322,7 @@
     state.running = false;
     state.interim = "";
     renderCaption();
-    if (!state.enabled) return;
+    if (!listening()) return;
     if (state.restartFailures >= RESTART_MAX_FAILURES) {
       notify("error", "文字起こしを再開できませんでした。もう一度 ON にしてください");
       setEnabled(false);
@@ -311,7 +337,7 @@
 
   /** 認識セッションを開始する */
   function startSession() {
-    if (!state.enabled || state.running) return;
+    if (!listening() || state.running) return;
     const Ctor = recognitionCtor();
     if (Ctor === null) return;
     const recognition = new Ctor();
@@ -390,12 +416,56 @@
       state.restartFailures = 0;
       state.lastSentText = "";
       startSession();
-      notify("voiceState", "文字起こしを開始しました（自分の声のみ）");
+      // ミュート中は startSession が動かない。「開始しました」とだけ出すと
+      // 何も拾わない理由が画面から分からないので、そのときは理由を出す
+      notify(
+        "voiceState",
+        state.micMuted
+          ? "文字起こしを ON にしました（ミュート中は止めています）"
+          : "文字起こしを開始しました（自分の声のみ）",
+      );
     } else {
       stopSession();
       notify("voiceState", "文字起こしを止めました");
     }
     return state.enabled;
+  }
+
+  /**
+   * VC 側のマイクのミュート状態を受け取る（vc.js の init に渡した onMicMute から）。
+   *
+   * ここで認識セッションごと止めるのが要点。SpeechRecognition は VC の
+   * getUserMedia とは別に自前でマイクを開くため、VC 側で track.enabled を
+   * 落としても認識は動き続け、ミュートしたつもりの声が字幕にも bot にも
+   * 流れてしまう（このモジュールに muted の参照が1つも無かった不具合）。
+   *
+   * 止め方は stopSession()＝abort()。stop() だと、それまでに溜まっていた音声が
+   * 最後の確定結果として吐き出され、「ミュート中に喋った内容が解除後に
+   * まとめて出る」ことになる。abort() は溜まっている結果ごと捨てる。
+   *
+   * 本人が入れた「文字起こし ON」（state.enabled）は倒さない。倒すと解除後に
+   * もう一度ボタンを押させることになるうえ、ボタンの文言も勝手に変わる。
+   *
+   * 戻り値は反映後のミュート状態。
+   */
+  function setMuted(muted) {
+    const next = muted === true;
+    if (next === state.micMuted) return state.micMuted;
+    state.micMuted = next;
+    // OFF のあいだは触るものが無い。ON に戻したときに startSession が走らない
+    // よう、state だけ書き換えて帰る
+    if (!state.enabled) return state.micMuted;
+    if (next) {
+      stopSession();
+      return state.micMuted;
+    }
+    // 解除。ミュート中に積み上がった失敗回数は持ち越さない（待ち時間が
+    // 指数で伸びたまま再開すると、解除しても数秒間なにも拾わない）
+    state.restartFailures = 0;
+    // ミュートの前後で同じ文が確定しても落とさないよう、重複よけも戻す
+    state.lastSentText = "";
+    startSession();
+    return state.micMuted;
   }
 
   /** ON / OFF を切り替える。戻り値は切り替え後の状態 */
@@ -433,6 +503,9 @@
   /** 退室時に状態を捨てる */
   function reset() {
     setEnabled(false);
+    // ミュートは VC の状態。卓を離れたら持ち越さない（次に入った卓で
+    // 「文字起こしが ON なのに何も拾わない」になるのを防ぐ）
+    state.micMuted = false;
     state.sentTimes = [];
     state.lastSentText = "";
     state.stats = { sent: 0, dropped: 0 };
@@ -445,6 +518,10 @@
     return {
       supported: isSupported(),
       enabled: state.enabled,
+      /** VC のマイクがミュートされているか（ON のまま一時停止しているか） */
+      muted: state.micMuted,
+      /** 実際にいま認識を動かしてよい状態か（enabled かつミュートでない） */
+      listening: listening(),
       running: state.running,
       interim: state.interim,
       sent: state.stats.sent,
@@ -457,6 +534,7 @@
     init,
     isSupported,
     setEnabled,
+    setMuted,
     toggle,
     handleServerMessage,
     setSelfId,

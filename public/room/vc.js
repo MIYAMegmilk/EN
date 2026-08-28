@@ -6,6 +6,7 @@
  *   - ルーム内の VC 対象者（vcEligible）とのフルメッシュ P2P 接続
  *   - MDN の Perfect Negotiation パターンによるオファー衝突の解消
  *   - マイクのミュート、カメラの ON/OFF（初期 OFF・§3.6）
+ *   - スピーカーミュート（他の人の声だけを手元で消す。setSpeakerMuted）
  *   - 画面共有の開始／停止（docs/design/vc-screenshare.md）
  *
  * 画面共有の不変条件（vc-screenshare.md §4.1）:
@@ -184,6 +185,15 @@
   /** 「切」を表す斜線。カメラ・画面共有の絵と共通の1本 */
   const MIC_SLASH_PATH = "M4 3.5 20 20.5";
 
+  /**
+   * スピーカーの線画。手元の操作の #vc-speaker（index.html）と同じ形。
+   * 卓上の札は「消している」ときにしか出さないので、こちらは斜線入りの
+   * 1状態だけを使う（マイクのように入／切で描き分けはしない）。
+   */
+  const SPEAKER_PATHS = [
+    "M4 9.5h3.4L12 5.5v13L7.4 14.5H4Z",
+  ];
+
   // -------------------------------------------------------------------------
   // 画面共有の送出プロファイル（vc-screenshare.md §6.2 / §6.3）
   //
@@ -240,6 +250,16 @@
      * "camera" | "screen" で、主役側の object-fit の出し分けに使う。
      */
     onSpotlight: null,
+    /**
+     * 自分のマイクのミュート状態が変わったことを知らせる口。(muted) => void
+     *
+     * 文字起こし（voice.js）へ伝えるために足した。SpeechRecognition は VC の
+     * getUserMedia とは別に自前でマイクを開くので、ここで track.enabled を
+     * 落としても認識は止まらない。かといって vc.js から global.Voice を直に
+     * 触ると、VC が文字起こしの有無に依存してしまう（開発用ページには
+     * voice.js が載っていない）。注入で外へ出し、繋ぎ先は app.js が決める。
+     */
+    onMicMute: null,
     /**
      * getStats の注入口。既定は RTCPeerConnection.getStats() をそのまま呼ぶ。
      * テストから統計を差し替えられるようにするためだけに存在する。
@@ -342,8 +362,21 @@
       /** 降格した時刻（Date.now()）。最小保持時間を測る */
       demotedAt: null,
     },
-    /** ミュート中か */
+    /** ミュート中か（自分のマイク） */
     muted: false,
+    /**
+     * スピーカーミュート中か（他の人の声を手元で消しているか）。
+     *
+     * マイクのミュートとは独立に持つ。Discord の deafen はマイクも一緒に
+     * 切るが、ここでは「スピーカーだけ」を素直に実装する（両方切りたい人は
+     * ミュートも押せばよい。逆に自動で切ると、聞くのをやめただけのつもりが
+     * 黙ったことになり、相手からは落ちたように見える）。
+     *
+     * VC を抜けても倒さない。マイクのミュートが join のたびに戻るのは
+     * 掴み直した micStream に track.enabled を貼り直すからで、こちらは
+     * 手元の再生設定でしかない。入り直すたびに聞こえ出すほうが驚く。
+     */
+    speakerMuted: false,
     /**
      * 発話検知の作業領域。AudioContext を使えない環境では何も入らない。
      *   ctx    … 共有の AudioContext（使えなければ null）
@@ -509,6 +542,9 @@
     const audio = document.createElement("audio");
     audio.autoplay = true;
     audio.playsInline = true;
+    // 後から入ってきた相手にもスピーカーミュートを効かせる。ここを忘れると
+    // 「消しているのに、途中参加の人の声だけ聞こえる」になる
+    audio.muted = state.speakerMuted;
 
     const video = document.createElement("video");
     video.autoplay = true;
@@ -523,6 +559,8 @@
     share.zoom.setAttribute("aria-label", `${nicknameOf(playerId)} さんの共有画面を主役にする`);
 
     const mic = createMicMark();
+    const deaf = createDeafMark();
+    deaf.hidden = !state.speakerMuted;
     const pick = createPickButton();
 
     // 押し口は名前より先に入れる。同じ z-index なので、後から入れた名前が
@@ -532,9 +570,10 @@
     root.appendChild(video);
     root.appendChild(share.root);
     root.appendChild(mic);
+    root.appendChild(deaf);
     root.appendChild(audio);
     if (config.container !== null) config.container.appendChild(root);
-    const view = { root, label, audio, video, share, mic, pick };
+    const view = { root, label, audio, video, share, mic, deaf, pick };
     pick.addEventListener("click", () => requestSpotlight(playerId));
     updatePick(view, playerId);
     return view;
@@ -655,6 +694,33 @@
     svg.setAttribute("focusable", "false");
     svg.appendChild(micGlyph("vc-mic-ico-on", MIC_PATHS));
     svg.appendChild(micGlyph("vc-mic-ico-off", MIC_PATHS.concat([MIC_SLASH_PATH])));
+    root.appendChild(svg);
+    return root;
+  }
+
+  /**
+   * 枠の右下に置く「この人の声を消している」札（スピーカーミュート中の表示）。
+   *
+   * マイクマーク（.vc-mic-mark）と同じ作法で組む。role="img" + aria-label で
+   * 読み上げ名を持たせ、絵は inline SVG（外部アイコンは読み込めない・§3.8）。
+   *
+   * マイクマークと違って**消しているときだけ出す**。これは相手の状態ではなく
+   * 自分の設定なので、常時出しておくと卓上の札が「相手のこと」と「自分の
+   * こと」の2種類になり読み違える。既定は hidden で場所も取らない。
+   */
+  function createDeafMark() {
+    const root = document.createElement("span");
+    root.className = "vc-deaf-mark";
+    root.hidden = true;
+    root.setAttribute("role", "img");
+    root.setAttribute("aria-label", "この人の声を消しています");
+
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("class", "vc-mic-ico");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    svg.appendChild(micGlyph("vc-deaf-ico", SPEAKER_PATHS.concat([MIC_SLASH_PATH])));
     root.appendChild(svg);
     return root;
   }
@@ -2544,6 +2610,7 @@
     config.container = options.container ?? null;
     config.onStatus = options.onStatus ?? null;
     config.onSpotlight = typeof options.onSpotlight === "function" ? options.onSpotlight : null;
+    config.onMicMute = typeof options.onMicMute === "function" ? options.onMicMute : null;
     // getStats は省略可。既定は pc.getStats() をそのまま呼ぶ
     if (typeof options.getStats === "function") config.getStats = options.getStats;
     if (Array.isArray(options.iceServers) && options.iceServers.length > 0) {
@@ -2706,6 +2773,9 @@
     state.micStream = stream;
     state.active = true;
     state.muted = false;
+    // 掴み直したマイクは必ず入。前の卓でミュートしていた文字起こしを
+    // 止めたままにしない
+    notifyMicMute();
     state.session = randomId();
     // カメラが切でも自分の枠を出す（着席したことが画面で分かるように）
     renderLocalVideo();
@@ -2783,6 +2853,9 @@
     state.active = false;
     renderLocalVideo();
     state.muted = false;
+    // マイクを手放したので「ミュート中」ではなくなる。ここを伝え忘れると、
+    // ミュートしたまま卓が畳まれた場合に文字起こしが止まったままになる
+    notifyMicMute();
     state.session = null;
     if (options.message !== null) notify("vcState", options.message);
   }
@@ -2823,7 +2896,89 @@
     // 手元の札を先に直してから告知する。自分の操作の反映を往復に待たせない
     refreshMicMark(state.selfId);
     announceMicState();
+    notifyMicMute();
     return state.muted;
+  }
+
+  /**
+   * マイクのミュート状態を外（app.js 経由で voice.js）へ伝える。
+   * track.enabled を落としても音声認識は自前でマイクを開いて動き続けるので、
+   * ここで知らせないとミュート中の声が字幕と bot に流れる。
+   */
+  function notifyMicMute() {
+    if (typeof config.onMicMute === "function") config.onMicMute(state.muted);
+  }
+
+  /** スピーカーミュートを切り替える。戻り値は切り替え後の状態 */
+  function toggleSpeakerMute() {
+    return setSpeakerMuted(!state.speakerMuted);
+  }
+
+  /**
+   * スピーカーミュート（他の人の VC 音声だけを手元で消す）。
+   *
+   * 実現手段に「相手ごとの <audio> 要素の muted」を選んだ理由:
+   *
+   *   1. 相手に伝わらない。受信を止める手（transceiver の direction を
+   *      変える・rtcSignal で「消しています」と告げる）は再ネゴシエーションや
+   *      告知を伴い、誰が自分の声を消しているかが相手に見えてしまう。
+   *      聞くのをやめたことは相手に知らせるべき情報ではない。
+   *   2. 帯域と接続を動かさない。direction を変えると相手の送出そのものが
+   *      止まり、解除したときに再ネゴシエーションと ICE の張り直しが要る。
+   *      その間は無音になり、失敗すれば通話ごと落ちる。要素のミュートなら
+   *      解除は即座で、失敗しようがない。
+   *   3. 発話検知（誰が話しているかの光り）が生き残る。話し中の判定は
+   *      peer.stream を AudioContext で測っており、<audio> の muted は
+   *      その経路に影響しない。receiver 側の track.enabled = false だと
+   *      トラックが無音化されるので、消したとたんに卓上から「誰が喋って
+   *      いるか」まで消える。消したいのは音であって様子ではない。
+   *
+   *   引き換えに、受信帯域とデコードの負荷は消しても減らない。呑み会の VC は
+   *   最大6人・音声のみで、そこを削る価値より上の3点を採った。
+   *
+   * 効果音・ざわめき（Sound）はまったく別の経路なので触らない（あちらには
+   * 専用の音量つまみとミュートがある）。ここで消えるのは人の声だけ。
+   */
+  function setSpeakerMuted(muted) {
+    state.speakerMuted = muted === true;
+    applySpeakerMute();
+    notify(
+      "vcState",
+      state.speakerMuted ? "他の人の声を消しました" : "他の人の声を戻しました",
+    );
+    return state.speakerMuted;
+  }
+
+  /** そのピアの声がもう届いているか（再生し直してよいか の判定に使う） */
+  function hasAudioTrack(peer) {
+    const stream = peer.stream;
+    if (stream === null || stream === undefined) return false;
+    return stream.getAudioTracks().length > 0;
+  }
+
+  /**
+   * いまのスピーカーミュート状態を、全ピアの <audio> と卓上の札へ反映する。
+   * 「設定は state だけが持ち、要素は必ずそこから描き直す」流儀に合わせて、
+   * トグルの中で1要素ずつ裏返すのではなく毎回まとめて当て直す。
+   */
+  function applySpeakerMute() {
+    for (const peer of state.peers.values()) {
+      const view = peer.view;
+      if (view === undefined || view === null) continue;
+      if (view.audio !== undefined && view.audio !== null) {
+        view.audio.muted = state.speakerMuted;
+        // 解除したときは念のため鳴らし直す。要素をミュートしたまま長く置いた
+        // 後の unmute を、端末によっては止めたままにすることがある
+        // （この呼び出しはボタン操作の直後なので自動再生の制限にかからない）。
+        // 声がまだ届いていないピアでは呼ばない。中身の無いストリームに対する
+        // play() は端末によって失敗し、鳴らせない理由が無いのに
+        // 「自動再生がブロックされました」を出してしまう（ontrack と同じ条件）
+        if (!state.speakerMuted && hasAudioTrack(peer)) tryPlay(view.audio);
+      }
+      if (view.deaf !== undefined && view.deaf !== null) {
+        view.deaf.hidden = !state.speakerMuted;
+      }
+    }
   }
 
   /**
@@ -3283,6 +3438,8 @@
     return {
       active: state.active,
       muted: state.muted,
+      /** 他の人の声を手元で消しているか（スピーカーミュート） */
+      speakerMuted: state.speakerMuted,
       camera: state.camStream !== null,
       /**
        * 共有をやめたらカメラに戻るか（共有中のみ意味を持つ）。
@@ -3326,6 +3483,8 @@
     teardown,
     toggleMute,
     setMuted,
+    toggleSpeakerMute,
+    setSpeakerMuted,
     toggleCamera,
     setCamera,
     resumeCamera,

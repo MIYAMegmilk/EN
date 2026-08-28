@@ -207,3 +207,99 @@ Deno.test("voice.js: 音声合成には触れない（bot の発話はチャッ�
     "文字起こしモジュールが読み上げを持ち込んでいる",
   );
 });
+
+// ===========================================================================
+// マイクのミュート中は認識そのものを止める
+//
+// SpeechRecognition は VC の getUserMedia とは別に自前でマイクを開くので、
+// vc.js が track.enabled を落としても認識は動き続ける。以前は voice.js に
+// muted の参照が1つも無く、ミュートしたはずの声が字幕にも bot にも流れていた。
+// ===========================================================================
+
+Deno.test("voice.js: ミュート中は認識を止め、確定結果を送らない", () => {
+  const { Voice, sent } = load();
+  Voice.setEnabled(true);
+  const recognition = current();
+  assertEquals(Voice.getState().listening, true);
+
+  Voice.setMuted(true);
+  assertEquals(Voice.getState().muted, true);
+  assertEquals(Voice.getState().running, false, "ミュート中も認識セッションが動いている");
+  assertEquals(Voice.getState().enabled, true, "ミュートは文字起こしの ON を取り消さない");
+  // 止め方は abort()。stop() だと溜まっていた音声が確定結果として吐き出される
+  assertEquals(recognition.aborted, true, "abort() で止めていない");
+
+  // 止める直前の結果が遅れて届いても送らない（onresult は外してあるので
+  // 本来は届かないが、送信側にも同じ判定を置いてある）
+  recognition.emit("ないしょのはなし", true);
+  assertEquals(sent.length, 0, "ミュート中の発言が送られている");
+});
+
+Deno.test("voice.js: ミュート中に喋った内容が、解除後にまとめて出ない", () => {
+  const { Voice, sent, caption } = load();
+  Voice.setEnabled(true);
+  const before = current();
+  Voice.setMuted(true);
+
+  // ミュート中の発話（未確定も確定も）はどこにも出ない
+  before.emit("ないしょのつぶやき", false);
+  before.emit("ないしょのつぶやき", true);
+  assertEquals(sent.length, 0);
+  assertEquals(caption.textContent, "", "ミュート中の声が字幕に残っている");
+
+  Voice.setMuted(false);
+  const after = current();
+  assert(after !== before, "解除しても新しいセッションが張られていない");
+  assertEquals(Voice.getState().running, true);
+  // 溜め込みが無いこと。古いセッションが後から吐いても素通りする
+  before.emit("ないしょのつぶやき", true);
+  assertEquals(sent.length, 0, "ミュート中の発言が解除後に出てきた");
+
+  after.emit("かんぱいしましょう", true);
+  assertEquals(sent, [{ t: "voice", text: "かんぱいしましょう" }]);
+});
+
+Deno.test("voice.js: ミュート中に ON にしても認識は始まらない（解除で始まる）", () => {
+  const { Voice, status } = load();
+  Voice.setMuted(true);
+  assertEquals(Voice.setEnabled(true), true, "ON の操作そのものは受け付ける");
+  assertEquals(FakeRecognition.instances.length, 0, "ミュート中なのに認識が始まっている");
+  assert(
+    status.some((s) => s.message.includes("ミュート")),
+    "何も拾わない理由が本人に伝わっていない",
+  );
+
+  Voice.setMuted(false);
+  assertEquals(FakeRecognition.instances.length, 1, "解除しても認識が始まらない");
+  assertEquals(Voice.getState().running, true);
+});
+
+Deno.test("voice.js: OFF のあいだのミュート操作は認識を触らない", () => {
+  const { Voice } = load();
+  Voice.setMuted(true);
+  Voice.setMuted(false);
+  assertEquals(FakeRecognition.instances.length, 0, "OFF なのにセッションが張られた");
+  assertEquals(Voice.getState().enabled, false, "ミュート操作で ON になっている");
+});
+
+Deno.test("voice.js: ミュート中は自動再開の予約もしない", () => {
+  const { Voice, timers } = load();
+  Voice.setEnabled(true);
+  const recognition = current();
+  Voice.setMuted(true);
+  // 止めたセッションが後から onend を出しても、張り直しを予約しない
+  recognition.onend?.();
+  assertEquals(timers.length, 0, "ミュート中に再開が予約されている");
+});
+
+Deno.test("voice.js: 卓を離れる（reset）とミュートも持ち越さない", () => {
+  const { Voice } = load();
+  Voice.setEnabled(true);
+  Voice.setMuted(true);
+  Voice.reset();
+  assertEquals(Voice.getState().muted, false);
+  assertEquals(Voice.getState().enabled, false);
+  // 次の卓で ON にすれば、そのまま認識が始まる
+  Voice.setEnabled(true);
+  assertEquals(Voice.getState().running, true);
+});
