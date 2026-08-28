@@ -766,15 +766,21 @@ function leaveQueue() {
   showError("");
 }
 
-/** 待っている人数の目安と、次に席が合うまでの見込みを出す */
+/**
+ * 待っている人数の目安を出す。
+ *
+ * 「次の見合わせまで約N秒」は出さない。相席は2人そろった時点でその場で
+ * 成立するようになり（§3.1.2）、周期を待つ場面が無くなったため。秒数を
+ * 出すと「その秒まで待たされる」と読めて、実際より遅く見える。
+ * nextCheckAt はサーバーが引き続き送ってくるが、表示には使わない。
+ */
 function handleQueueStatus(msg) {
   if (!queueWaiting) return;
-  const seconds = Math.max(0, Math.round((msg.nextCheckAt - Date.now()) / 1000));
   const others = Math.max(0, msg.waiting - 1);
   const company = others === 0
     ? "いまはあなただけです"
     : `ほかに${others}人が探しています`;
-  renderQueue(`席を探しています…（${company}／次の見合わせまで約${seconds}秒）`);
+  renderQueue(`席を探しています…（${company}）`);
 }
 
 /**
