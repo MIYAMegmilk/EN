@@ -30,6 +30,17 @@
   --red-2: #8c1f1a;
   --green: #7fa85c;
 
+  /*
+   * bot の個体色。しゅんぴ＝暖簾の藍、せり＝青菜、ぐっちー＝燗の橙、なべ＝土鍋の火。
+   * 卓上のタイル（.vc-bot-face）とチャットの発言者名（#chat-log .chat-nickname）が
+   * 同じ値を引くので、定義はここ1か所だけにする。
+   * 金の濃淡で4つ並べると隣同士が見分けられないため、色相ごと離してある。
+   */
+  --bot-shunpi: #7fb0d8;
+  --bot-seri: #8fbf68;
+  --bot-gucchi: #e6a63f;
+  --bot-nabe: #d1685f;
+
   --r-sm: 4px;
   --r-md: 8px;
   --r-lg: 14px;
@@ -689,24 +700,23 @@ select {
 }
 
 /*
- * 個体の色。しゅんぴ＝暖簾の藍、せり＝青菜、ぐっちー＝燗の橙、なべ＝土鍋の火。
+ * 個体の色。値は :root の --bot-*（チャットの発言者名と共用）から引く。
  * 縁も線画も currentColor なので、ここ一行で両方に効く。
- * 金の濃淡で4つ並べると隣同士が見分けられないため、色相ごと離してある。
  */
 .vc-bot-face[data-bot-id="shunpi"] {
-  color: #7fb0d8;
+  color: var(--bot-shunpi);
 }
 
 .vc-bot-face[data-bot-id="seri"] {
-  color: #8fbf68;
+  color: var(--bot-seri);
 }
 
 .vc-bot-face[data-bot-id="gucchi"] {
-  color: #e6a63f;
+  color: var(--bot-gucchi);
 }
 
 .vc-bot-face[data-bot-id="nabe"] {
-  color: #d1685f;
+  color: var(--bot-nabe);
 }
 
 /* 名前と役は絵の右に縦積み。行の高さを決めるので行間は詰めておく */

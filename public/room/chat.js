@@ -7,6 +7,12 @@
  * 表示規約（§3.8 / CLAUDE.md セキュリティ基準）:
  * ユーザー由来のテキスト（ニックネーム・本文）は必ず textContent で描画し、innerHTML は使わない。
  *
+ * 行の組み方:
+ * - bot の発言者名には data-bot-id を付ける。個体色は CSS（:root の --bot-*）が持ち、
+ *   卓上のタイル（.vc-bot-face）と同じ値を引く。色だけに頼らせないため bot の札は残す。
+ * - 同じ発言者が 1分（GROUP_WINDOW_MS）以内に続けて喋った行は、時刻・札・名前を出さず
+ *   本文だけを続ける（.chat-cont）。読み上げ用に発言者名を .sr-only で置く。
+ *
  * サーバーとの契約:
  *   C2S: { t: "chat", text }
  *   S2C: { t: "chat", message: ChatMessage }
@@ -22,6 +28,13 @@
   const MAX_MESSAGES = 100;
   /** 制御文字（C0・DEL）。含む本文は送らない（サーバーの hasControlChar と同じ基準） */
   const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+
+  /**
+   * 同じ人の続きの発言として、発言者の行（時刻・札・名前）を省く間隔（ms）。
+   * 起点は「直前のメッセージの時刻」なので、3件続けば 2件目は1件目から、
+   * 3件目は2件目から測る（先頭からの通算ではない）。
+   */
+  const GROUP_WINDOW_MS = 60_000;
 
   /** init で注入される依存 */
   const deps = {
@@ -63,6 +76,39 @@
     return `${hh}:${mm}`;
   }
 
+  /**
+   * 発言者を見分ける鍵。人は playerId、bot は botId で見る（§3.10）。
+   * 表示名（nickname）は改名で変わるので鍵には使わない。
+   * 見分けがつかない発言（playerId も botId も無い）は null を返し、
+   * 前後どちらともまとめない扱いにする。
+   */
+  function speakerKey(message) {
+    if (message.bot === true) {
+      // botId の無い bot 発言（古い履歴など）は、別の bot と混ぜないため null
+      return typeof message.botId === "string" ? `bot:${message.botId}` : null;
+    }
+    return typeof message.playerId === "string" ? `player:${message.playerId}` : null;
+  }
+
+  /**
+   * 直前のメッセージの「続き」として描くか。
+   * 同じ発言者が GROUP_WINDOW_MS 以内に続けて喋ったときだけ true。
+   *
+   * 名前（nickname）が変わっていたら続きにしない。playerId が同じでも、
+   * 改名した直後まで名前を省くと、新しい名前がどこにも出なくなるため。
+   * 時刻が逆行している（サーバーの時計が戻った・履歴の順が壊れた）ときも
+   * 続きにしない ―― 間隔が読めない以上、名前を出しておくほうが安全。
+   */
+  function isContinuation(previous, message) {
+    if (previous === null) return false;
+    const key = speakerKey(message);
+    if (key === null || key !== speakerKey(previous)) return false;
+    if (previous.nickname !== message.nickname) return false;
+    const gap = Number(message.at) - Number(previous.at);
+    if (!Number.isFinite(gap)) return false;
+    return gap >= 0 && gap <= GROUP_WINDOW_MS;
+  }
+
   /** 入力欄の本文を検証して送信する */
   function submit() {
     const text = deps.inputEl.value.trim();
@@ -91,23 +137,40 @@
     const list = deps.listEl;
     if (list === null) return;
     clear(list);
+    /** 直前に描いたメッセージ。続きかどうかの判定に使う */
+    let previous = null;
     for (const message of messages) {
       const item = el("li");
       if (message.bot) item.classList.add("chat-bot");
       if (selfId !== null && message.playerId === selfId) {
         item.classList.add("chat-self");
       }
-      const time = el("span", formatTime(message.at));
-      time.className = "chat-time";
-      item.appendChild(time);
-      if (message.bot) {
-        const badge = el("span", "bot");
-        badge.className = "chat-badge-bot";
-        item.appendChild(badge);
+      if (isContinuation(previous, message)) {
+        // 続きの行。時刻・bot の札・名前は出さず、本文だけを前の行の直下に続ける。
+        // ただし読み上げでは誰の発言か分からなくなるので、目に見えない形で
+        // 発言者の名前を置いておく（.sr-only は en.css）。
+        item.classList.add("chat-cont");
+        const speaker = el("span", message.nickname);
+        speaker.className = "sr-only";
+        item.appendChild(speaker);
+      } else {
+        const time = el("span", formatTime(message.at));
+        time.className = "chat-time";
+        item.appendChild(time);
+        if (message.bot) {
+          // bot であることは色ではなく、この札で示す（色だけに頼らせない）
+          const badge = el("span", "bot");
+          badge.className = "chat-badge-bot";
+          item.appendChild(badge);
+        }
+        const nickname = el("span", message.nickname);
+        nickname.className = "chat-nickname";
+        // 個体色を引くための印。色そのものは CSS（:root の --bot-*）が持つ
+        if (message.bot && typeof message.botId === "string") {
+          nickname.dataset.botId = message.botId;
+        }
+        item.appendChild(nickname);
       }
-      const nickname = el("span", message.nickname);
-      nickname.className = "chat-nickname";
-      item.appendChild(nickname);
       const body = el("span", message.text);
       // 本文であることを class で示す。カードを後ろに足すと :last-child では
       // 拾えなくなるため（index.html の #chat-log .chat-text）
@@ -118,6 +181,7 @@
         deps.renderCard(message, item);
       }
       list.appendChild(item);
+      previous = message;
     }
     list.scrollTop = list.scrollHeight;
   }

@@ -2081,8 +2081,41 @@
         color: #9fb886;
       }
 
+      /*
+       * bot の名前は個体色で出す。4体を並べたときに誰の発言かが一目で分かる
+       * ようにするためで、卓上のタイル（en.css の .vc-bot-face）と同じ色を引く。
+       * 色そのものは :root の --bot-*（en.css）が持ち、ここでは割り当てだけ。
+       * 色だけに頼らせないよう、bot の札（.chat-badge-bot）はそのまま残す。
+       * 人の発言（.chat-nickname に data-bot-id は付かない）の色は変えない。
+       */
+      #chat-log li.chat-bot .chat-nickname[data-bot-id="shunpi"] {
+        color: var(--bot-shunpi);
+      }
+
+      #chat-log li.chat-bot .chat-nickname[data-bot-id="seri"] {
+        color: var(--bot-seri);
+      }
+
+      #chat-log li.chat-bot .chat-nickname[data-bot-id="gucchi"] {
+        color: var(--bot-gucchi);
+      }
+
+      #chat-log li.chat-bot .chat-nickname[data-bot-id="nabe"] {
+        color: var(--bot-nabe);
+      }
+
       #chat-log li.chat-self .chat-nickname {
         color: var(--cream);
+      }
+
+      /*
+       * 同じ人が続けて喋った行（chat.js の .chat-cont）。時刻・札・名前を出さず
+       * 本文だけを続ける。本文は元から flex-basis:100% で li の左端から始まるので、
+       * 前の本文と左端が揃う。#chat-log の gap（11px）だけだと発言の切れ目と
+       * 見分けがつかないので、続きの行は詰めて「ひと固まり」に見せる。
+       */
+      #chat-log li.chat-cont {
+        margin-top: -7px;
       }
 
       #chat-form {
