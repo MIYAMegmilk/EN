@@ -888,10 +888,17 @@ function receive(msg) {
       }
       renderAll();
       break;
-    case "playerJoined":
+    case "playerJoined": {
+      // playerJoined は「新しく入った人」以外でも飛んでくる（一時切断からの復帰、
+      // VC 枠の付け替えで本人ぶんだけを配り直すとき）。名簿に居ない人のときだけ
+      // 呼び鈴を鳴らす。自分の入室では roomState が来るのでここは通らない
+      const arriving = state.snapshot !== null &&
+        !state.snapshot.players.some((p) => p.id === msg.player.id);
       upsertPlayer(msg.player);
+      if (arriving) void Sound.play("arrival");
       renderAll();
       break;
+    }
     case "playerLeft":
       upsertPlayer(msg.player, true);
       renderAll();

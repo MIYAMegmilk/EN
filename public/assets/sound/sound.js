@@ -42,6 +42,8 @@
     slidingScreen: src("効果音辞書", "opening-sliding-screen-1.mp3"),
     /** ボタンの決定音 */
     decide: src("効果音ラボ", "決定ボタンを押す50.mp3"),
+    /** 誰かが卓に入ってきたときの呼び鈴 */
+    arrival: src("効果音ラボ", "chime-1.mp3"),
   };
 
   /**
